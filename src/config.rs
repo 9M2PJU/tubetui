@@ -45,6 +45,8 @@ pub struct SessionConfig {
     /// An imported `cookies.txt`, for machines without a browser (SSH,
     /// servers). Takes precedence over `browser`.
     pub cookies_file: String,
+    /// The app already asked which browser to take the login from.
+    pub asked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -76,6 +78,9 @@ pub enum PlayerMode {
     Embedded,
     /// Video in its own mpv window.
     Window,
+    /// An mpv window without borders laid over the app pane (X11): looks
+    /// embedded, plays like a window.
+    Overlay,
 }
 
 impl PlayerMode {
@@ -83,7 +88,8 @@ impl PlayerMode {
         match self {
             Self::Auto => Self::Embedded,
             Self::Embedded => Self::Window,
-            Self::Window => Self::Auto,
+            Self::Window => Self::Overlay,
+            Self::Overlay => Self::Auto,
         }
     }
 
@@ -93,6 +99,7 @@ impl PlayerMode {
             Self::Auto => "auto",
             Self::Embedded => "embedded",
             Self::Window => "window",
+            Self::Overlay => "overlay",
         }
     }
 }
@@ -138,6 +145,8 @@ pub struct UiConfig {
     pub lang: Option<Lang>,
     /// Video thumbnails in the preview panel (kitty only).
     pub thumbnails: bool,
+    /// Clicks and the wheel (selecting text then needs Shift).
+    pub mouse: bool,
 }
 
 /// Short animations, each one can be turned off.
@@ -291,7 +300,7 @@ impl Default for PlayerConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { sidebar: true, max_tabs: 9, icons: IconSet::Emoji, lang: None, thumbnails: true }
+        Self { sidebar: true, max_tabs: 9, icons: IconSet::Emoji, lang: None, thumbnails: true, mouse: true }
     }
 }
 
@@ -420,7 +429,8 @@ mod tests {
 
     #[test]
     fn cycles_wrap_around() {
-        assert_eq!(PlayerMode::Auto.next().next().next(), PlayerMode::Auto);
+        assert_eq!(PlayerMode::Auto.next().next().next().next(), PlayerMode::Auto);
+        assert_eq!(PlayerMode::Window.next().as_str(), "overlay");
         assert_eq!(PlayerMode::Embedded.as_str(), "embedded");
         assert_eq!(IconSet::Emoji.next(), IconSet::Nerd);
         assert_eq!(IconSet::Unicode.next(), IconSet::Emoji);

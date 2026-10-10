@@ -12,6 +12,7 @@ pub mod domain;
 pub mod i18n;
 pub mod keymap;
 pub mod media;
+pub mod mouse;
 pub mod player;
 pub mod session;
 pub mod store;

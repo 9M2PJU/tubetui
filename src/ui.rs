@@ -11,9 +11,9 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 
 use crate::app::{Focus, Group, Listing, Prompt, Section, Setting, State, Tab, language_label};
 use crate::config::{IconSet, donations};
-use crate::domain::{Channel, Live, Video, date_labels};
+use crate::domain::{Channel, Live, Video, clock, date_labels};
 use crate::i18n::Lang;
-use crate::keymap;
+use crate::{keymap, session};
 use crate::media::{LocalFile, MediaKind};
 use crate::player::Info;
 use crate::youtube::Items;
@@ -24,6 +24,9 @@ const PREVIEW_WIDTH: u16 = 46;
 /// Video lists narrower than this show no preview panel.
 const PREVIEW_MIN_WIDTH: u16 = 96;
 const CHANNEL_WIDTH: usize = 20;
+/// Columns of the channel lists; the @handle goes last.
+const CHANNEL_NAME_WIDTH: usize = 26;
+const FOLLOWERS_WIDTH: usize = 24;
 /// Width of the date column: `"10/10/26 hoy   "`.
 const DATE_WIDTH: usize = 14;
 
@@ -49,7 +52,7 @@ pub struct Icons {
     /// In `Section::ALL` order.
     pub sections: [&'static str; 12],
     /// In `Setting::ALL` order.
-    pub settings: [&'static str; 19],
+    pub settings: [&'static str; 20],
     pub logo: &'static str,
     pub tab: &'static str,
     pub live: &'static str,
@@ -65,7 +68,8 @@ pub struct Icons {
 const EMOJI: Icons = Icons {
     sections: ["🏠", "🧭", "📺", "🕒", "⭐", "🔎", "📡", "📼", "🎵", "🔧", "💜", "🚪"],
     settings: [
-        "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "🗣", "😀", "🖼", "✨", "🌊", "💥", "📼", "🎵", "📁", "📝",
+        "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "🗣", "😀", "🖼", "🖱", "✨", "🌊", "💥", "📼", "🎵", "📁",
+        "📝",
     ],
     logo: "▶️",
     tab: "🎬",
@@ -96,8 +100,8 @@ const NERD: Icons = Icons {
     ],
     settings: [
         "\u{f007}", "\u{f15b}", "\u{f021}", "\u{f08b}", "\u{f1ab}", "\u{f075}", "\u{f1de}", "\u{f008}", "\u{f025}",
-        "\u{f0ac}", "\u{f118}", "\u{f03e}", "\u{f0d0}", "\u{f0e7}", "\u{f0a1}", "\u{f03d}", "\u{f001}", "\u{f07b}",
-        "\u{f044}",
+        "\u{f0ac}", "\u{f118}", "\u{f03e}", "\u{f245}", "\u{f0d0}", "\u{f0e7}", "\u{f0a1}", "\u{f03d}", "\u{f001}",
+        "\u{f07b}", "\u{f044}",
     ],
     logo: "\u{f16a}",
     tab: "\u{f144}",
@@ -113,7 +117,7 @@ const NERD: Icons = Icons {
 
 const UNICODE: Icons = Icons {
     sections: ["⌂", "◎", "▣", "◷", "★", "⌕", "⌁", "▷", "♫", "⚙", "♥", "⏻"],
-    settings: ["☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "⚑", "☻", "▨", "✦", "≈", "✸", "▷", "♫", "▭", "✎"],
+    settings: ["☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "✎"],
     logo: "▶",
     tab: "▶",
     live: "●",
@@ -183,6 +187,81 @@ pub fn areas(area: Rect, sidebar: bool) -> Areas {
     let [side, main] = Layout::horizontal([Constraint::Length(width), Constraint::Fill(1)]).areas(body);
     let [tabs, content] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(main);
     Areas { sidebar: sidebar.then_some(side), tabs, content, status, hints }
+}
+
+/// What is under the mouse pointer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Spot {
+    /// A section of the menu, in `Section::ALL` order.
+    Section(usize),
+    /// A tab, in the menu or the tab bar; 0 is Inicio.
+    Tab(usize),
+    /// A row of the current list.
+    Row(usize),
+    /// The picture of the active video tab.
+    Video,
+    /// A second on the progress bar.
+    Progress(u32),
+}
+
+/// What is at cell (`x`, `y`), laid out as [`draw`] does it.
+pub fn spot(state: &State, playing: Option<&Info>, screen: Rect, x: u16, y: u16) -> Option<Spot> {
+    let at = Position::new(x, y);
+    if state.help || state.confirm.is_some() {
+        return None;
+    }
+    if state.fullscreen {
+        return Some(Spot::Video);
+    }
+    let areas = areas(screen, state.sidebar);
+    if let Some(side) = areas.sidebar.filter(|a| a.contains(at)) {
+        let inner = Block::bordered().inner(side);
+        let line = usize::from(y.checked_sub(inner.y)?);
+        return sidebar_items(state, icons(state.config.ui.icons)).get(line)?.1;
+    }
+    if areas.tabs.contains(at) {
+        // Tabs draws ` title ` and a one-cell divider after each.
+        let mut start = areas.tabs.x;
+        for (i, title) in tab_titles(state, icons(state.config.ui.icons)).iter().enumerate() {
+            let end = start + Span::raw(title.as_str()).width() as u16 + 2;
+            if x < end {
+                return (x >= start).then_some(Spot::Tab(i));
+            }
+            start = end + 1;
+        }
+        return None;
+    }
+    if !areas.content.contains(at) {
+        return None;
+    }
+    if let Some(tab) = state.active_tab() {
+        if let Some((bar, duration)) = playing.and_then(|info| progress_bar(info, areas.content))
+            && bar.contains(at)
+        {
+            let fraction = (f64::from(x - bar.x) + 0.5) / f64::from(bar.width);
+            return Some(Spot::Progress((fraction * duration) as u32));
+        }
+        let inner = Block::bordered().inner(areas.content);
+        return (!tab.playback.audio_only && inner.contains(at)).then_some(Spot::Video);
+    }
+    if state.prompt == Some(Prompt::CookiesFile) {
+        return None;
+    }
+    let listing = state.listing()?;
+    let (_, rest) = split_prompt(state, areas.content);
+    let list = match listing.items {
+        Items::Videos(_) | Items::Channels(_) => split_preview(rest).0,
+        Items::About => return None,
+        _ => rest,
+    };
+    let inner = Block::bordered().inner(list);
+    if !inner.contains(at) || inner.height == 0 {
+        return None;
+    }
+    // A list drawn from offset 0 scrolls just enough to show the selection last.
+    let offset = listing.selected.saturating_sub(usize::from(inner.height) - 1);
+    let row = offset + usize::from(y - inner.y);
+    (row < listing.items.len()).then_some(Spot::Row(row))
 }
 
 /// The cells the embedded video may cover: the active video tab, unless a
@@ -262,6 +341,9 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
             let mut block = panel(title, BLUE);
             if let Some(info) = &view.playing {
                 block = block.title_top(Line::from(playing_label(info, icons)).fg(CYAN).right_aligned());
+                if let Some(progress) = progress_line(info, areas.content.width) {
+                    block = block.title_bottom(progress);
+                }
             }
             frame.render_widget(body.block(block), areas.content);
         }
@@ -300,23 +382,58 @@ fn playing_label(info: &Info, icons: &Icons) -> String {
     if parts.is_empty() { String::new() } else { format!(" {} ", parts.join("  ")) }
 }
 
+/// Where the progress bar sits in the bottom border of the video tab:
+/// the cells of the bar itself and the seconds it spans.
+pub fn progress_bar(info: &Info, content: Rect) -> Option<(Rect, f64)> {
+    info.position?;
+    let duration = info.duration.filter(|d| *d > 0.0)?;
+    let clock_width = clock(duration as u32).len() as u16;
+    // ` ▶ 1:23 ` before the bar and ` 4:56 ` after it, inside the corners.
+    let before = 2 + 2 + clock_width + 1;
+    let after = 1 + clock_width + 1;
+    let width = content.width.checked_sub(2 + before + after).filter(|w| *w >= 10)?;
+    Some((Rect::new(content.x + 1 + before, content.bottom().saturating_sub(1), width, 1), duration))
+}
+
+/// ` ▶ 1:23 ━━━━━━━━━━━━──────── 4:56 `, the width of the tab's bottom border:
+/// played in red, downloaded in grey, the rest dim.
+fn progress_line(info: &Info, width: u16) -> Option<Line<'static>> {
+    let (bar, duration) = progress_bar(info, Rect::new(0, 0, width, 1))?;
+    let position = info.position.unwrap_or_default().clamp(0.0, duration);
+    let cells = |seconds: f64| ((seconds.clamp(0.0, duration) / duration) * f64::from(bar.width)).round() as usize;
+    let done = cells(position);
+    let loaded = cells(info.buffered.unwrap_or_default()).saturating_sub(done);
+    let rest = usize::from(bar.width) - done - loaded;
+    let clock_width = clock(duration as u32).len();
+    // One cell each: the emoji pause sign takes two in most terminals.
+    let icon = if info.paused { "‖" } else { "▶" };
+    Some(Line::from(vec![
+        Span::styled(format!(" {icon} {:>clock_width$} ", clock(position as u32)), Style::new().fg(FG)),
+        Span::styled("━".repeat(done), Style::new().fg(RED)),
+        Span::styled("━".repeat(loaded), Style::new().fg(MUTED)),
+        Span::styled("─".repeat(rest), Style::new().fg(MUTED)),
+        Span::styled(format!(" {} ", clock(duration as u32)), Style::new().fg(FG)),
+    ]))
+}
+
 fn panel<'a>(title: impl Into<Line<'a>>, color: Color) -> Block<'a> {
     Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(color)).title(title)
 }
 
-fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
+/// The menu's lines, each with what a click on it does.
+fn sidebar_items(state: &State, icons: &Icons) -> Vec<(ListItem<'static>, Option<Spot>)> {
     let lang = state.lang();
     let on_inicio = state.active == 0;
-    let mut items: Vec<ListItem> = Vec::new();
+    let mut items: Vec<(ListItem, Option<Spot>)> = Vec::new();
     let mut group = None;
     for (i, section) in Section::ALL.iter().enumerate() {
         if group != Some(section.group()) {
             group = Some(section.group());
             if i > 0 {
-                items.push(ListItem::new(""));
+                items.push((ListItem::new(""), None));
             }
             if section.group() != Group::App {
-                items.push(ListItem::new(Line::from(format!(" {}", section.group().label(lang))).fg(MUTED).bold()));
+                items.push((ListItem::new(Line::from(format!(" {}", section.group().label(lang))).fg(MUTED).bold()), None));
             }
         }
         let mut label = section.label(lang).to_owned();
@@ -330,26 +447,29 @@ fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
         if focused {
             style = style.bg(HIGHLIGHT).add_modifier(Modifier::BOLD);
         }
-        items.push(
-            ListItem::new(Line::from(vec![
-                Span::styled(if focused { "▌" } else { " " }, color),
-                Span::raw(format!("{} ", icons.sections[i])),
-                Span::raw(label),
-            ]))
-            .style(style),
-        );
+        let line = Line::from(vec![
+            Span::styled(if focused { "▌" } else { " " }, color),
+            Span::raw(format!("{} ", icons.sections[i])),
+            Span::raw(label),
+        ]);
+        items.push((ListItem::new(line).style(style), Some(Spot::Section(i))));
     }
     if !state.tabs.is_empty() {
-        items.push(ListItem::new(""));
-        items.push(ListItem::new(Line::from(lang.pick(" PESTAÑAS", " TABS")).fg(MUTED).bold()));
+        items.push((ListItem::new(""), None));
+        items.push((ListItem::new(Line::from(lang.pick(" PESTAÑAS", " TABS")).fg(MUTED).bold()), None));
         for (i, tab) in state.tabs.iter().enumerate() {
             let active = state.active == i + 1;
             let style = if active { Style::new().fg(MAGENTA).bg(HIGHLIGHT).bold() } else { Style::new().fg(FG) };
             let line =
                 format!("{}{} {} {}", if active { "▌" } else { " " }, i + 1, tab_icon(icons, tab), tab.playback.title);
-            items.push(ListItem::new(line).style(style));
+            items.push((ListItem::new(line).style(style), Some(Spot::Tab(i + 1))));
         }
     }
+    items
+}
+
+fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
+    let items = sidebar_items(state, icons).into_iter().map(|(item, _)| item);
     let title = Line::from(vec![
         Span::raw(format!(" {} ", icons.logo)),
         Span::styled("tube", Style::new().fg(RED).bold()),
@@ -358,16 +478,21 @@ fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
     frame.render_widget(List::new(items).block(panel(title, MUTED)), area);
 }
 
-fn draw_tabs(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
+fn tab_titles(state: &State, icons: &Icons) -> Vec<String> {
     let home = Section::Inicio.label(state.lang());
-    let titles = std::iter::once(format!("{} {home}", icons.sections[0])).chain(
-        state
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(i, t)| format!("{} {} {}", i + 1, tab_icon(icons, t), truncate(&t.playback.title, 20))),
-    );
-    let tabs = Tabs::new(titles)
+    std::iter::once(format!("{} {home}", icons.sections[0]))
+        .chain(
+            state
+                .tabs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| format!("{} {} {}", i + 1, tab_icon(icons, t), truncate(&t.playback.title, 20))),
+        )
+        .collect()
+}
+
+fn draw_tabs(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
+    let tabs = Tabs::new(tab_titles(state, icons))
         .select(state.active)
         .style(Style::new().fg(MUTED))
         .highlight_style(Style::new().fg(BLUE).add_modifier(Modifier::BOLD));
@@ -434,13 +559,13 @@ fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, are
                 )),
                 Prompt::DownloadDir => Line::from(format!(
                     " {} {} ",
-                    icons.settings[17],
+                    icons.settings[18],
                     lang.pick("Carpeta de descargas", "Downloads folder")
                 )),
                 Prompt::MediaDirs(kind) => {
                     let (icon, what) = match kind {
-                        MediaKind::Video => (icons.settings[15], lang.pick("Carpetas de videos", "Video folders")),
-                        MediaKind::Music => (icons.settings[16], lang.pick("Carpetas de música", "Music folders")),
+                        MediaKind::Video => (icons.settings[16], lang.pick("Carpetas de videos", "Video folders")),
+                        MediaKind::Music => (icons.settings[17], lang.pick("Carpetas de música", "Music folders")),
                     };
                     let how = lang.pick(
                         "separadas por coma (vacío = la del sistema)",
@@ -560,7 +685,11 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
     };
     let items: Vec<ListItem> = match &listing.items {
         Items::Videos(videos) => videos.iter().map(|v| video_row(state, icons, view, v)).collect(),
-        Items::Channels(channels) => channels.iter().map(|c| channel_row(state, icons, c)).collect(),
+        Items::Channels(channels) => {
+            // The description goes in the panel when there is one, other details in the row.
+            let panel = split_preview(area).1.is_some();
+            channels.iter().map(|c| channel_row(state, icons, c, panel)).collect()
+        }
         Items::Profiles(profiles) => profiles.iter().map(|p| profile_row(state, icons, p)).collect(),
         Items::Settings => {
             Setting::ALL.iter().enumerate().map(|(i, s)| setting_row(state, icons.settings[i], *s)).collect()
@@ -642,6 +771,9 @@ fn draw_channel_preview(frame: &mut Frame, state: &State, icons: &Icons, channel
     frame.render_widget(block, area);
     let Some(c) = channel else { return };
     let mut lines = vec![Line::from(c.name.as_str()).fg(MAGENTA).bold()];
+    if let Some(handle) = &c.handle {
+        lines.push(Line::from(handle.as_str()).fg(CYAN));
+    }
     if let Some(followers) = &c.followers {
         lines.push(Line::from(followers.as_str()).fg(MUTED));
     }
@@ -682,14 +814,24 @@ fn video_row<'a>(state: &State, icons: &Icons, view: &View, v: &'a Video) -> Lis
     ListItem::new(Line::from(spans))
 }
 
-fn channel_row<'a>(state: &State, icons: &Icons, c: &'a Channel) -> ListItem<'a> {
+/// Name, subscribers and @handle in columns; the description too unless
+/// the side panel shows it.
+fn channel_row<'a>(state: &State, icons: &Icons, c: &'a Channel, panel: bool) -> ListItem<'a> {
     let mark = if state.subs.contains(&c.id) { icons.subscribed } else { " " };
-    let mut spans = vec![Span::styled(format!(" {mark} "), GREEN), Span::styled(c.name.as_str(), MAGENTA)];
-    if let Some(followers) = &c.followers {
-        spans.push(Span::styled(format!("  {followers}"), MUTED));
+    let column = |text: &str, width: usize| pad_cells(&truncate(text, width - 2), width);
+    let mut spans = vec![
+        Span::styled(format!(" {mark} "), GREEN),
+        Span::styled(column(&c.name, CHANNEL_NAME_WIDTH), MAGENTA),
+        Span::styled(column(c.followers.as_deref().unwrap_or(""), FOLLOWERS_WIDTH), MUTED),
+    ];
+    if let Some(handle) = &c.handle {
+        spans.push(Span::styled(handle.as_str(), CYAN));
     }
-    if let Some(description) = &c.description {
-        spans.push(Span::styled(format!("  {}", description.replace('\n', " ")), Style::new().fg(FG).add_modifier(Modifier::DIM)));
+    if let Some(description) = c.description.as_ref().filter(|_| !panel) {
+        spans.push(Span::styled(
+            format!("  {}", description.replace('\n', " ")),
+            Style::new().fg(FG).add_modifier(Modifier::DIM),
+        ));
     }
     ListItem::new(Line::from(spans))
 }
@@ -700,7 +842,8 @@ fn profile_row<'a>(state: &State, icons: &Icons, spec: &'a str) -> ListItem<'a> 
     } else {
         "  "
     };
-    let label = if spec.is_empty() { state.lang().pick("Sin sesión", "Not logged in") } else { spec };
+    let label =
+        if spec.is_empty() { state.lang().pick("Sin sesión", "Not logged in").to_owned() } else { session::label(spec) };
     ListItem::new(Line::from(vec![
         Span::styled(format!(" {current}"), GREEN),
         Span::raw(format!("{} ", icons.user)),
@@ -978,7 +1121,11 @@ mod tests {
         View { embedded: true, now: 1_791_590_400, loading: None, opening: None, thumbnails: true, playing: None };
 
     fn render_with(state: &State, view: &View) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
+        render_sized(state, view, 130)
+    }
+
+    fn render_sized(state: &State, view: &View, width: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
         terminal.draw(|f| draw(f, state, view)).unwrap();
         let buffer = terminal.backend().buffer();
         buffer
@@ -1091,14 +1238,21 @@ mod tests {
     fn channel_rows_mark_my_channels() {
         let followed = Channel {
             followers: Some("358 mil suscriptores".into()),
+            handle: Some("@x".into()),
             description: Some("Música\ny charlas".into()),
             ..channel("UCx")
         };
         let mut s = with_items(Items::Channels(vec![followed, channel("UCy")]));
         s.subs.insert("UCx".into());
-        let screen = render(&s);
-        assert!(screen.contains("✓ name UCx  358 mil suscriptores  Música y charlas"), "{screen}");
-        assert!(screen.contains("   name UCy"));
+        let name = pad_cells("name UCx", CHANNEL_NAME_WIDTH);
+        let row = format!("✓ {name}{}@x", pad_cells("358 mil suscriptores", FOLLOWERS_WIDTH));
+        let wide = render(&s);
+        let line = wide.lines().find(|l| l.contains("✓ name UCx")).unwrap();
+        assert!(line.contains(&row), "{line}");
+        assert!(!line.contains("Música"), "the panel shows it: {line}");
+        let narrow = render_sized(&s, &VIEW, 110);
+        assert!(narrow.contains(&format!("{row}  Música y charlas")), "{narrow}");
+        assert!(wide.contains("   name UCy"));
     }
 
     #[test]
@@ -1106,7 +1260,7 @@ mod tests {
         let mut s = with_items(Items::Profiles(vec!["brave:Default".into(), String::new()]));
         s.config.session.browser = "brave:Default".into();
         let screen = render(&s);
-        assert!(screen.contains("● ☺ brave:Default"), "{screen}");
+        assert!(screen.contains("● ☺ brave · Default"), "{screen}");
         assert!(screen.contains("☺ Sin sesión"));
     }
 
@@ -1208,7 +1362,7 @@ mod tests {
         let mut s = state();
         s.config.session.browser = "brave:Default".into();
         let screen = render(&s);
-        assert!(screen.contains("brave:Default"));
+        assert!(screen.contains("brave · Default"), "{screen}");
         assert!(screen.contains("original + subtítulos"));
     }
 
@@ -1335,12 +1489,79 @@ mod tests {
     fn video_tab_shows_volume_quality_and_codec() {
         let mut s = with_items(Items::Videos(vec![video("a")]));
         s.update(Action::Enter);
-        let info = Info { volume: Some(85.0), muted: false, height: Some(480), codec: Some("h264".into()) };
+        let info =
+            Info { volume: Some(85.0), muted: false, height: Some(480), codec: Some("h264".into()), ..Info::default() };
         let screen = render_with(&s, &View { playing: Some(info.clone()), ..VIEW });
         assert!(screen.contains("♪ 85 %  480p  H.264"), "{screen}");
         let muted = Info { muted: true, codec: Some("vp9".into()), ..info };
         assert_eq!(playing_label(&muted, icons(IconSet::Unicode)), " ✕ 85 %  480p  VP9 ");
         assert_eq!(playing_label(&Info::default(), icons(IconSet::Unicode)), "");
+    }
+
+    #[test]
+    fn video_tab_shows_a_progress_bar() {
+        let mut s = with_items(Items::Videos(vec![video("a")]));
+        s.update(Action::Enter);
+        let info = Info { position: Some(30.0), duration: Some(120.0), buffered: Some(60.0), ..Info::default() };
+        let screen = render_with(&s, &View { playing: Some(info.clone()), ..VIEW });
+        let bottom = screen.lines().find(|l| l.contains("2:00")).unwrap_or_default();
+        assert!(bottom.contains("▶ 0:30 ━"), "{screen}");
+        let content = areas(Rect::new(0, 0, 130, 40), s.sidebar).content;
+        let (bar, duration) = progress_bar(&info, content).unwrap();
+        assert_eq!(duration, 120.0);
+        let track = bottom.split("0:30 ").nth(1).and_then(|t| t.split(" 2:00").next()).unwrap();
+        assert_eq!(track.chars().count(), bar.width as usize, "{bottom}");
+        let thick = track.chars().filter(|c| *c == '━').count();
+        assert_eq!(thick, (f64::from(bar.width) / 2.0).round() as usize, "a quarter played, another downloaded");
+        let line = progress_line(&info, content.width).unwrap();
+        let played = &line.spans[1];
+        assert_eq!(played.style.fg, Some(RED));
+        assert_eq!(played.content.chars().count(), (f64::from(bar.width) / 4.0).round() as usize);
+        assert_eq!(line.spans[2].style.fg, Some(MUTED));
+        assert_eq!(bar.y, content.bottom() - 1);
+        let paused = progress_line(&Info { paused: true, ..info.clone() }, 60).unwrap();
+        assert!(paused.to_string().starts_with(" ‖ 0:30 "));
+        assert!(progress_line(&Info { duration: None, ..info }, 60).is_none(), "live: no total");
+    }
+
+    /// The first cell whose row contains `text`, at the start of `text`.
+    fn find(screen: &str, text: &str) -> (u16, u16) {
+        let (y, line) = screen.lines().enumerate().find(|(_, l)| l.contains(text)).unwrap();
+        let x = line[..line.find(text).unwrap()].chars().count();
+        (x as u16, y as u16)
+    }
+
+    #[test]
+    fn spots_under_the_pointer() {
+        let screen_area = Rect::new(0, 0, 130, 40);
+        let videos: Vec<Video> = (0..60).map(|i| video(&i.to_string())).collect();
+        let mut s = with_items(Items::Videos(videos));
+        let screen = render(&s);
+        let spot_at = |s: &State, (x, y): (u16, u16)| spot(s, None, screen_area, x, y);
+        let musica = Section::ALL.iter().position(|x| *x == Section::MiMusica).unwrap();
+        assert_eq!(spot_at(&s, find(&screen, Section::MiMusica.label(Lang::Es))), Some(Spot::Section(musica)));
+        assert_eq!(spot_at(&s, find(&screen, "title 2  1:00")), Some(Spot::Row(2)));
+        assert_eq!(spot_at(&s, (0, 39)), None, "the key hints");
+        // Scrolled: the selection is the last visible row.
+        for _ in 0..50 {
+            s.update(Action::Down);
+        }
+        let screen = render(&s);
+        assert_eq!(spot_at(&s, find(&screen, "title 50  1:00")), Some(Spot::Row(50)));
+        assert_eq!(spot_at(&s, find(&screen, "title 30  1:00")), Some(Spot::Row(30)));
+        s.update(Action::Enter); // plays video 50 in tab 1
+        let screen = render(&s);
+        assert_eq!(spot_at(&s, find(&screen, "1 ▶ title 50")), Some(Spot::Tab(1)));
+        assert_eq!(spot_at(&s, find(&screen, "Inicio ")), Some(Spot::Tab(0)));
+        assert_eq!(spot_at(&s, (80, 20)), Some(Spot::Video));
+        let info = Info { position: Some(0.0), duration: Some(100.0), ..Info::default() };
+        let content = areas(screen_area, s.sidebar).content;
+        let (bar, _) = progress_bar(&info, content).unwrap();
+        assert_eq!(spot(&s, Some(&info), screen_area, bar.x, bar.y), Some(Spot::Progress(0)));
+        let middle = spot(&s, Some(&info), screen_area, bar.x + bar.width / 2, bar.y);
+        assert!(matches!(middle, Some(Spot::Progress(49..=51))), "{middle:?}");
+        s.update(Action::ToggleHelp);
+        assert_eq!(spot_at(&s, (80, 20)), None, "the help covers everything");
     }
 
     #[test]

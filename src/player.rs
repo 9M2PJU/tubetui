@@ -5,8 +5,8 @@
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ratatui::layout::Rect;
@@ -19,6 +19,15 @@ use crate::config::{Language, PlayerConfig, PlayerMode};
 pub enum Mode {
     Embedded,
     Window,
+    /// A borderless mpv window over the pane (X11).
+    Overlay,
+}
+
+impl Mode {
+    /// The video shows inside the app's pane (drawn there or laid over it).
+    pub fn in_pane(self) -> bool {
+        self != Self::Window
+    }
 }
 
 /// Terminal multiplexers relay keys and images with a delay, or drop images.
@@ -33,6 +42,11 @@ pub fn resolve_mode(mode: PlayerMode, env: impl Fn(&str) -> Option<String>) -> M
     match mode {
         PlayerMode::Embedded => Mode::Embedded,
         PlayerMode::Window => Mode::Window,
+        // Needs X11 and the terminal's window (kitty and most terminals export WINDOWID).
+        PlayerMode::Overlay => {
+            let x11 = env("DISPLAY").is_some() && env("XDG_SESSION_TYPE").as_deref() != Some("wayland");
+            if x11 && env("WINDOWID").is_some() && !in_multiplexer(&env) { Mode::Overlay } else { Mode::Window }
+        }
         PlayerMode::Auto => {
             let kitty = env("KITTY_WINDOW_ID").is_some() || env("TERM").as_deref() == Some("xterm-kitty");
             if kitty && !in_multiplexer(&env) { Mode::Embedded } else { Mode::Window }
@@ -51,6 +65,8 @@ pub struct Geometry {
     pub rows: u16,
     pub width_px: u32,
     pub height_px: u32,
+    /// Overlay: the area's top-left pixel on the screen.
+    pub screen: Option<(i32, i32)>,
 }
 
 impl Geometry {
@@ -63,7 +79,22 @@ impl Geometry {
             rows: area.height,
             width_px: u32::from(area.width) * u32::from(cell.0),
             height_px: u32::from(area.height) * u32::from(cell.1),
+            screen: None,
         }
+    }
+
+    /// Places the area on the screen, given where the terminal's cell grid starts.
+    pub fn on_screen(self, grid: (i32, i32)) -> Self {
+        let cell = |px: u32, n: u16| if n == 0 { 0 } else { px / u32::from(n) };
+        let x = grid.0 + (i32::from(self.left) - 1) * cell(self.width_px, self.cols) as i32;
+        let y = grid.1 + (i32::from(self.top) - 1) * cell(self.height_px, self.rows) as i32;
+        Self { screen: Some((x, y)), ..self }
+    }
+
+    /// mpv's `--geometry`: `WxH+X+Y`.
+    fn x11(&self) -> Option<String> {
+        let (x, y) = self.screen?;
+        Some(format!("{}x{}+{x}+{y}", self.width_px, self.height_px))
     }
 
     fn options(&self) -> [(&'static str, u32); 6] {
@@ -146,12 +177,33 @@ pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<S
     // back is slower than decoding them in software: measured on Intel, the
     // picture fell behind the sound (1.7 s after 20 s); in software it stays in sync.
     args.push(match (config.hwdec, mode) {
-        (true, Mode::Window) => "--hwdec=auto".into(),
+        (true, Mode::Window | Mode::Overlay) => "--hwdec=auto".into(),
         _ => "--hwdec=no".into(),
     });
     match mode {
         _ if audio_only => args.push("--vid=no".into()),
         Mode::Window => args.push("--force-window=immediate".into()),
+        Mode::Overlay => {
+            // Clicks go through to the terminal, and so does the keyboard
+            // (window managers that ignore `focus-on` get it back, see `give_back_focus`).
+            args.extend(
+                [
+                    "--force-window=immediate",
+                    "--no-border",
+                    "--ontop",
+                    "--focus-on=never",
+                    "--input-cursor-passthrough=yes",
+                    "--cursor-autohide=always",
+                    "--osc=no",
+                    "--keepaspect-window=no",
+                ]
+                .map(String::from),
+            );
+            args.push(format!("--x11-name={OVERLAY_NAME}"));
+            if let Some(geometry) = geometry.and_then(|g| g.x11()) {
+                args.push(format!("--geometry={geometry}"));
+            }
+        }
         Mode::Embedded => {
             args.extend(
                 ["--vo=kitty", "--vo-kitty-alt-screen=no", "--vo-kitty-config-clear=no", "--sws-scaler=fast-bilinear"]
@@ -171,6 +223,67 @@ pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<S
     args.push("--".into());
     args.extend(queue.iter().cloned());
     args
+}
+
+/// X11 instance name of overlay windows, to tell them apart.
+const OVERLAY_NAME: &str = "tubetui-overlay";
+
+/// Where the terminal's cell grid starts on the screen, from its X11 window
+/// (`$WINDOWID`): the grid is centered in the window, so the left margin
+/// (padding and the leftover pixels) is taken for the top one too.
+pub fn grid_origin(cell: (u16, u16)) -> Option<(i32, i32)> {
+    let window = std::env::var("WINDOWID").ok()?;
+    let out = Command::new("xwininfo").args(["-id", &window]).stderr(Stdio::null()).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let field = |name: &str| -> Option<i32> {
+        let line = text.lines().find(|l| l.trim_start().starts_with(name))?;
+        line.split(':').nth(1)?.trim().parse().ok()
+    };
+    let (x, y, width) = (field("Absolute upper-left X")?, field("Absolute upper-left Y")?, field("Width")?);
+    let columns = ratatui::crossterm::terminal::size().ok()?.0;
+    Some(grid_from_window((x, y, width), columns, cell.0))
+}
+
+fn grid_from_window((x, y, width): (i32, i32, i32), columns: u16, cell_width: u16) -> (i32, i32) {
+    let margin = (width - i32::from(columns) * i32::from(cell_width)).max(0) / 2;
+    (x + margin, y + margin)
+}
+
+/// Window managers that ignore mpv's `focus-on=never` focus every new or
+/// restored overlay: give the keyboard back to the terminal as soon as that
+/// happens (for up to `wait`).
+fn give_back_focus(wait: Duration) {
+    let Ok(terminal) = std::env::var("WINDOWID") else { return };
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if let Some(overlay) = focused_overlay() {
+                let _ = Command::new("xdotool").args(["windowactivate", &terminal]).stderr(Stdio::null()).status();
+                // It is part of the app: keep it out of the taskbar (best effort).
+                let _ = Command::new("wmctrl")
+                    .args(["-i", "-r", &overlay, "-b", "add,skip_taskbar,skip_pager"])
+                    .stderr(Stdio::null())
+                    .status();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+}
+
+/// The focused window is one of our overlays.
+pub fn overlay_has_focus() -> bool {
+    focused_overlay().is_some()
+}
+
+/// The X11 id of the focused window, if it is one of our overlays.
+fn focused_overlay() -> Option<String> {
+    let run = |args: &[&str]| {
+        let out = Command::new(args[0]).args(&args[1..]).stderr(Stdio::null()).output().ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+    let id = run(&["xdotool", "getwindowfocus"])?;
+    run(&["xprop", "-id", &id, "WM_CLASS"]).filter(|class| class.contains(OVERLAY_NAME)).map(|_| id)
 }
 
 /// Deletes every image drawn with the kitty graphics protocol. mpv stops
@@ -226,6 +339,7 @@ pub fn command_lines(
     match command {
         PlayerCommand::TogglePause => line(json!({ "command": ["cycle", "pause"] })),
         PlayerCommand::Seek(seconds) => line(json!({ "command": ["seek", seconds, "relative"] })),
+        PlayerCommand::SeekTo(second) => line(json!({ "command": ["seek", second, "absolute"] })),
         PlayerCommand::Volume(delta) => line(json!({ "command": ["add", "volume", delta] })),
         PlayerCommand::ToggleMute => line(json!({ "command": ["cycle", "mute"] })),
         PlayerCommand::CycleSubtitles => line(json!({ "command": ["cycle", "sub"] })),
@@ -260,20 +374,41 @@ pub struct Info {
     pub height: Option<i64>,
     /// mpv's codec name: `h264`, `vp9`, `av1` …
     pub codec: Option<String>,
+    /// Seconds played and in total.
+    pub position: Option<f64>,
+    pub duration: Option<f64>,
+    /// Up to which second the video is already downloaded.
+    pub buffered: Option<f64>,
+    pub paused: bool,
 }
 
 /// Properties mpv reports to [`Info`] whenever they change.
-const OBSERVED: [&str; 4] = ["volume", "mute", "height", "video-format"];
+const OBSERVED: [&str; 8] =
+    ["volume", "mute", "height", "video-format", "time-pos", "duration", "pause", "demuxer-cache-time"];
 
 impl Info {
-    fn apply(&mut self, name: &str, data: &Value) {
+    /// Takes a new value; whether what is shown changed (the position only
+    /// shows whole seconds, and every redraw competes with the video).
+    fn apply(&mut self, name: &str, data: &Value) -> bool {
+        let before = self.clone();
         match name {
             "volume" => self.volume = data.as_f64(),
             "mute" => self.muted = data.as_bool().unwrap_or(false),
             "height" => self.height = data.as_i64(),
             "video-format" => self.codec = data.as_str().map(str::to_owned),
+            "time-pos" => self.position = data.as_f64(),
+            "duration" => self.duration = data.as_f64(),
+            "pause" => self.paused = data.as_bool().unwrap_or(false),
+            "demuxer-cache-time" => self.buffered = data.as_f64(),
             _ => {}
         }
+        let second = |p: Option<f64>| p.map(|p| p as i64);
+        let coarse = |i: &Self| Self {
+            position: second(i.position).map(|s| s as f64),
+            buffered: second(i.buffered).map(|s| s as f64),
+            ..i.clone()
+        };
+        coarse(self) != coarse(&before)
     }
 }
 
@@ -309,7 +444,7 @@ impl Player {
         let mode = if launch.audio_only { Mode::Window } else { launch.mode };
         let stdout = match mode {
             Mode::Embedded => Stdio::inherit(), // frames go to our terminal
-            Mode::Window => Stdio::null(),
+            Mode::Window | Mode::Overlay => Stdio::null(),
         };
         let child = Command::new("mpv")
             .args(mpv_args(launch, geometry, &ipc_path))
@@ -317,7 +452,10 @@ impl Player {
             .stdout(stdout)
             .stderr(Stdio::null())
             .spawn()?;
-        let shown_at = if mode == Mode::Embedded { geometry } else { None };
+        let shown_at = if mode.in_pane() { geometry } else { None };
+        if mode == Mode::Overlay {
+            give_back_focus(Duration::from_secs(30));
+        }
         let (config, cookies) = (launch.config.clone(), launch.cookies.map(Into::into));
         let started = Arc::new(AtomicBool::new(false));
         let observed = Arc::new(Observed::default());
@@ -366,7 +504,10 @@ impl Player {
         }
         if matches!(
             command,
-            PlayerCommand::Language(_) | PlayerCommand::SubLang(_) | PlayerCommand::Quality(_) | PlayerCommand::Codec(_)
+            PlayerCommand::Language(_)
+                | PlayerCommand::SubLang(_)
+                | PlayerCommand::Quality(_)
+                | PlayerCommand::Codec(_)
         ) {
             // Same video, new format/audio/subtitles, same second.
             let path = self.query("path").and_then(|v| v.as_str().map(str::to_owned));
@@ -384,6 +525,20 @@ impl Player {
     /// Shows the video at `geometry`, resuming it if we had paused it.
     /// No-op in window mode.
     pub fn show(&mut self, geometry: Geometry) {
+        if self.mode == Mode::Overlay {
+            if self.shown_at != Some(geometry) {
+                if let Some(place) = geometry.x11() {
+                    self.write(&set_property("geometry", place.into()).to_string());
+                }
+                if self.shown_at.is_none() {
+                    self.write(&set_property("window-minimized", false.into()).to_string());
+                    give_back_focus(Duration::from_secs(2));
+                }
+                self.shown_at = Some(geometry);
+            }
+            self.resume();
+            return;
+        }
         if self.mode != Mode::Embedded {
             return;
         }
@@ -410,11 +565,13 @@ impl Player {
     /// (background listening); otherwise it is paused until shown again.
     /// Returns whether it was on screen (its last frame must be cleared).
     pub fn hide(&mut self, keep_audio: bool) -> bool {
-        if self.mode != Mode::Embedded {
+        if !self.mode.in_pane() {
             return false;
         }
         let was_shown = self.shown_at.take().is_some();
-        if was_shown {
+        if was_shown && self.mode == Mode::Overlay {
+            self.write(&set_property("window-minimized", true.into()).to_string());
+        } else if was_shown {
             self.write(&set_property("vo", "null".into()).to_string());
         }
         if keep_audio {
@@ -423,7 +580,8 @@ impl Player {
             self.write(&set_property("pause", true.into()).to_string());
             self.paused_by_us = true;
         }
-        was_shown
+        // An overlay leaves nothing drawn in the terminal.
+        was_shown && self.mode == Mode::Embedded
     }
 
     fn resume(&mut self) {
@@ -519,8 +677,8 @@ fn observe(ipc_path: &str, observed: &Observed) {
         let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
         if event["event"] == "property-change"
             && let Ok(mut info) = observed.info.lock()
+            && info.apply(event["name"].as_str().unwrap_or_default(), &event["data"])
         {
-            info.apply(event["name"].as_str().unwrap_or_default(), &event["data"]);
             observed.changed.store(true, Ordering::Relaxed);
         }
     }
@@ -594,12 +752,30 @@ mod tests {
     #[test]
     fn info_follows_property_changes() {
         let mut info = Info::default();
-        info.apply("volume", &json!(85.0));
+        assert!(info.apply("volume", &json!(85.0)));
         info.apply("mute", &json!(true));
         info.apply("height", &json!(480));
         info.apply("video-format", &json!("h264"));
-        info.apply("time-pos", &json!(3.0));
-        assert_eq!(info, Info { volume: Some(85.0), muted: true, height: Some(480), codec: Some("h264".into()) });
+        info.apply("duration", &json!(300.5));
+        assert!(info.apply("time-pos", &json!(3.0)));
+        assert!(!info.apply("time-pos", &json!(3.4)), "same second: nothing to redraw");
+        assert!(info.apply("time-pos", &json!(4.1)));
+        assert!(!info.apply("chapter", &json!(1)));
+        assert!(info.apply("demuxer-cache-time", &json!(60.2)));
+        assert!(!info.apply("demuxer-cache-time", &json!(60.7)));
+        assert_eq!(
+            info,
+            Info {
+                volume: Some(85.0),
+                muted: true,
+                height: Some(480),
+                codec: Some("h264".into()),
+                position: Some(4.1),
+                duration: Some(300.5),
+                buffered: Some(60.7),
+                paused: false,
+            }
+        );
         info.apply("height", &Value::Null);
         assert_eq!(info.height, None, "unloaded while reloading");
     }
@@ -625,7 +801,7 @@ mod tests {
     #[test]
     fn geometry_is_one_based_with_pixel_size() {
         let g = Geometry::new(Rect::new(25, 2, 80, 20), (10, 22));
-        assert_eq!(g, Geometry { left: 26, top: 3, cols: 80, rows: 20, width_px: 800, height_px: 440 });
+        assert_eq!(g, Geometry { left: 26, top: 3, cols: 80, rows: 20, width_px: 800, height_px: 440, screen: None });
     }
 
     const QUEUE: &[String] = &[];
@@ -698,6 +874,43 @@ mod tests {
             args.iter().any(|a| a.starts_with("--ytdl-raw-options=") && a.ends_with(",cookies=/c.txt")),
             "{args:?}"
         );
+    }
+
+    #[test]
+    fn overlay_needs_x11_and_the_terminal_window() {
+        let x11 = [("DISPLAY", ":0"), ("WINDOWID", "42")];
+        assert_eq!(resolve_mode(PlayerMode::Overlay, env(&x11)), Mode::Overlay);
+        let wayland = [("DISPLAY", ":0"), ("WINDOWID", "42"), ("XDG_SESSION_TYPE", "wayland")];
+        assert_eq!(resolve_mode(PlayerMode::Overlay, env(&wayland)), Mode::Window);
+        assert_eq!(resolve_mode(PlayerMode::Overlay, env(&[("DISPLAY", ":0")])), Mode::Window);
+        let tmux = [("DISPLAY", ":0"), ("WINDOWID", "42"), ("TMUX", "1")];
+        assert_eq!(resolve_mode(PlayerMode::Overlay, env(&tmux)), Mode::Window);
+        assert!(Mode::Overlay.in_pane() && Mode::Embedded.in_pane() && !Mode::Window.in_pane());
+    }
+
+    #[test]
+    fn overlay_is_placed_in_screen_pixels() {
+        // 10×20 px cells; the pane starts at column 29, row 4 (1-based).
+        let g = Geometry::new(Rect::new(28, 3, 50, 20), (10, 20));
+        assert_eq!(g.x11(), None, "not placed yet");
+        let placed = g.on_screen((118, 153));
+        assert_eq!(placed.screen, Some((118 + 280, 153 + 60)));
+        assert_eq!(placed.x11().as_deref(), Some("500x400+398+213"));
+        // A 1000 px window with 98 columns of 10 px: 10 px each side.
+        assert_eq!(grid_from_window((100, 50, 1000), 98, 10), (110, 60));
+        assert_eq!(grid_from_window((0, 0, 100), 50, 10), (0, 0), "never negative");
+    }
+
+    #[test]
+    fn overlay_args_make_a_borderless_window_that_lets_input_through() {
+        let config = PlayerConfig::default();
+        let g = Geometry::new(Rect::new(28, 3, 50, 20), (10, 20)).on_screen((118, 153));
+        let args = mpv_args(&launch(&config, Mode::Overlay), Some(g), "/tmp/s");
+        for arg in ["--no-border", "--ontop", "--input-cursor-passthrough=yes", "--hwdec=auto", "--geometry=500x400+398+213"] {
+            assert!(args.contains(&arg.to_string()), "{arg}: {args:?}");
+        }
+        assert!(!args.iter().any(|a| a.starts_with("--vo=")), "mpv's own video output");
+        assert!(ytdl_format(&config, Mode::Overlay).starts_with("bv*[height<=720][vcodec^=avc1]"), "no 30 fps cap");
     }
 
     #[test]

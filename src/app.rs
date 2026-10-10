@@ -8,7 +8,9 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::config::{Config, EffectsConfig, Language, PlayerMode, codec_name, language_name, next_codec, next_language, next_quality};
+use crate::config::{
+    Config, EffectsConfig, Language, PlayerMode, codec_name, language_name, next_codec, next_language, next_quality,
+};
 use crate::domain::{TabId, Video};
 use crate::i18n::Lang;
 use crate::keymap::KeyContext;
@@ -112,6 +114,7 @@ pub enum Setting {
     AppLang,
     Icons,
     Thumbnails,
+    Mouse,
     FxStartup,
     FxPages,
     FxDialogs,
@@ -122,7 +125,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Browser,
         Self::ImportCookies,
         Self::Refresh,
@@ -135,6 +138,7 @@ impl Setting {
         Self::AppLang,
         Self::Icons,
         Self::Thumbnails,
+        Self::Mouse,
         Self::FxStartup,
         Self::FxPages,
         Self::FxDialogs,
@@ -160,6 +164,7 @@ impl Setting {
             Self::AppLang => ("Idioma de la app (C-y l)", "App language (C-y l)"),
             Self::Icons => ("Íconos", "Icons"),
             Self::Thumbnails => ("Portadas de los videos (kitty)", "Video thumbnails (kitty)"),
+            Self::Mouse => ("Mouse (para copiar texto: Shift)", "Mouse (to copy text: Shift)"),
             Self::FxStartup => ("Animación al abrir la app", "Animation when the app starts"),
             Self::FxPages => ("Animación al cambiar de página", "Animation when the page changes"),
             Self::FxDialogs => ("Animación de ayuda y preguntas", "Animation of help and questions"),
@@ -312,6 +317,8 @@ pub enum Action {
     PlayerClosed(TabId, Option<String>),
     TogglePause,
     Seek(i32),
+    /// Jump to this second (a click on the progress bar).
+    SeekTo(u32),
     Volume(i32),
     ToggleMute,
     CycleSubtitles,
@@ -331,6 +338,14 @@ pub enum Action {
     ToggleUiLang,
     /// Switch focus between the menu and the list.
     ToggleFocus,
+    /// First start without a login: offer the browsers found.
+    AskBrowser,
+    /// Open this section of the menu (a click on it).
+    OpenSection(usize),
+    /// Select this row of the list (a click on it).
+    Select(usize),
+    /// Move the list selection by this many rows (the mouse wheel).
+    Scroll(isize),
     /// The video fills the whole terminal (or screen, in window mode).
     ToggleFullscreen,
     Quit,
@@ -386,6 +401,7 @@ pub enum Effect {
 pub enum PlayerCommand {
     TogglePause,
     Seek(i32),
+    SeekTo(u32),
     Volume(i32),
     ToggleMute,
     CycleSubtitles,
@@ -573,7 +589,7 @@ impl State {
         if !session.cookies_file.is_empty() {
             self.tr("cookies.txt importado", "imported cookies.txt").into()
         } else if !session.browser.is_empty() {
-            session.browser.clone()
+            crate::session::label(&session.browser)
         } else {
             self.tr("sin sesión", "not logged in").into()
         }
@@ -598,6 +614,9 @@ impl State {
                 PlayerMode::Auto => self.tr("automático (integrado en kitty)", "automatic (embedded in kitty)").into(),
                 PlayerMode::Embedded => self.tr("integrado", "embedded").into(),
                 PlayerMode::Window => self.tr("ventana aparte", "separate window").into(),
+                PlayerMode::Overlay => {
+                    self.tr("superpuesto: ventana sobre la app (X11)", "overlay: a window over the app (X11)").into()
+                }
             },
             Setting::BackgroundAudio => {
                 if player.background_audio {
@@ -610,6 +629,10 @@ impl State {
             Setting::Icons => self.config.ui.icons.as_str().into(),
             Setting::Thumbnails => {
                 let (es, en) = on_off(self.config.ui.thumbnails);
+                self.tr(es, en).into()
+            }
+            Setting::Mouse => {
+                let (es, en) = on_off(self.config.ui.mouse);
                 self.tr(es, en).into()
             }
             Setting::FxStartup | Setting::FxPages | Setting::FxDialogs => {
@@ -650,6 +673,35 @@ impl State {
                 self.prompt = None;
                 self.sidebar = true;
                 self.focus = Focus::Menu;
+            }
+            Action::AskBrowser => {
+                let session = &self.config.session;
+                if session.asked || !session.browser.is_empty() || !session.cookies_file.is_empty() {
+                    return Vec::new();
+                }
+                let title = self.tr("¿De qué navegador tomo tu sesión de YouTube?", "Which browser has your YouTube login?");
+                let id = self.request(title.into(), Filter::None, false, ListKind::Plain);
+                return vec![Effect::ScanBrowsers { id }];
+            }
+            Action::OpenSection(i) => {
+                let Some(section) = Section::ALL.get(i) else { return Vec::new() };
+                self.active = 0;
+                self.prompt = None;
+                self.menu = i;
+                self.focus = Focus::Menu;
+                return self.open_section(*section);
+            }
+            Action::Select(row) => {
+                let Some(listing) = self.stack.last_mut().filter(|_| self.active == 0) else { return Vec::new() };
+                listing.selected = row.min(listing.items.len().saturating_sub(1));
+                self.focus = Focus::List;
+                return self.more_if_near_the_end();
+            }
+            Action::Scroll(rows) => {
+                if self.active == 0 && !self.stack.is_empty() {
+                    self.focus = Focus::List;
+                    return self.move_selection(rows);
+                }
             }
             Action::ToggleFocus => {
                 self.focus = match self.focus {
@@ -728,6 +780,7 @@ impl State {
             }
             Action::TogglePause => return self.command(PlayerCommand::TogglePause),
             Action::Seek(seconds) => return self.command(PlayerCommand::Seek(seconds)),
+            Action::SeekTo(second) => return self.command(PlayerCommand::SeekTo(second)),
             Action::Volume(delta) => return self.command(PlayerCommand::Volume(delta)),
             Action::ToggleMute => return self.command(PlayerCommand::ToggleMute),
             Action::CycleSubtitles => return self.command(PlayerCommand::CycleSubtitles),
@@ -779,8 +832,11 @@ impl State {
                     lang.pick("Calidad máxima", "Maximum quality"),
                     lang.pick("recargando el video…", "reloading the video…")
                 );
-                let mut effects =
-                    vec![Effect::SaveSetting { table: "player", key: "max_height", value: SettingValue::Number(height.into()) }];
+                let mut effects = vec![Effect::SaveSetting {
+                    table: "player",
+                    key: "max_height",
+                    value: SettingValue::Number(height.into()),
+                }];
                 effects.extend(self.command(PlayerCommand::Quality(height)));
                 return effects;
             }
@@ -794,8 +850,11 @@ impl State {
                     codec_name(codec, lang),
                     lang.pick("recargando el video…", "reloading the video…")
                 );
-                let mut effects =
-                    vec![Effect::SaveSetting { table: "player", key: "prefer_codec", value: SettingValue::Text(codec.into()) }];
+                let mut effects = vec![Effect::SaveSetting {
+                    table: "player",
+                    key: "prefer_codec",
+                    value: SettingValue::Text(codec.into()),
+                }];
                 effects.extend(self.command(PlayerCommand::Codec(codec)));
                 return effects;
             }
@@ -859,12 +918,20 @@ impl State {
             },
             Items::Profiles(profiles) => match profiles.get(selected).cloned() {
                 Some(spec) => {
+                    self.config.session.asked = true;
+                    let mut effects = vec![Effect::SaveSetting {
+                        table: "session",
+                        key: "asked",
+                        value: SettingValue::Bool(true),
+                    }];
                     self.status = if spec.is_empty() {
                         self.tr("Cerrando sesión…", "Logging out…").into()
                     } else {
-                        format!("{} {spec}…", self.tr("Leyendo la sesión de", "Reading the login of"))
+                        let label = crate::session::label(&spec);
+                        format!("{} {label}…", self.tr("Leyendo la sesión de", "Reading the login of"))
                     };
-                    self.set_session(spec, String::new())
+                    effects.extend(self.set_session(spec, String::new()));
+                    effects
                 }
                 None => Vec::new(),
             },
@@ -977,6 +1044,10 @@ impl State {
             Setting::Thumbnails => {
                 self.config.ui.thumbnails = !self.config.ui.thumbnails;
                 save("ui", "thumbnails", SettingValue::Bool(self.config.ui.thumbnails))
+            }
+            Setting::Mouse => {
+                self.config.ui.mouse = !self.config.ui.mouse;
+                save("ui", "mouse", SettingValue::Bool(self.config.ui.mouse))
             }
             Setting::FxStartup | Setting::FxPages | Setting::FxDialogs => {
                 match effect_flag(&mut self.config.effects, setting) {
@@ -1150,6 +1221,20 @@ impl State {
         }
         self.status = if items.is_empty() {
             self.tr("Sin resultados", "No results").into()
+        } else if let Items::Profiles(profiles) = &items {
+            if profiles.iter().all(String::is_empty) {
+                self.tr(
+                    "No encontré navegadores: sin navegador, importá un cookies.txt desde Configuración",
+                    "No browsers found: without one, import a cookies.txt from Settings",
+                )
+                .into()
+            } else {
+                self.tr(
+                    "Elegí con Enter el navegador donde entrás a YouTube",
+                    "Press Enter on the browser you use YouTube in",
+                )
+                .into()
+            }
         } else {
             format!("{} · {}", pending.title, items.len())
         };
@@ -1826,6 +1911,7 @@ mod tests {
         for (action, command) in [
             (Action::TogglePause, PlayerCommand::TogglePause),
             (Action::Seek(-5), PlayerCommand::Seek(-5)),
+            (Action::SeekTo(90), PlayerCommand::SeekTo(90)),
             (Action::Volume(5), PlayerCommand::Volume(5)),
             (Action::ToggleMute, PlayerCommand::ToggleMute),
             (Action::CycleSubtitles, PlayerCommand::CycleSubtitles),
@@ -1979,6 +2065,22 @@ mod tests {
     }
 
     #[test]
+    fn mouse_actions_open_select_and_scroll() {
+        let mut s = with_videos(&["a", "b", "c"]);
+        s.focus = Focus::Menu;
+        assert!(s.update(Action::Select(2)).is_empty());
+        assert_eq!((s.listing().unwrap().selected, s.focus), (2, Focus::List));
+        s.update(Action::Select(99));
+        assert_eq!(s.listing().unwrap().selected, 2, "clamped to the list");
+        s.update(Action::Scroll(-3));
+        assert_eq!(s.listing().unwrap().selected, 0);
+        let settings = Section::ALL.iter().position(|x| *x == Section::Configuracion).unwrap();
+        s.update(Action::OpenSection(settings));
+        assert_eq!((s.menu, s.listing().unwrap().items.clone()), (settings, Items::Settings));
+        assert!(s.update(Action::OpenSection(99)).is_empty());
+    }
+
+    #[test]
     fn sub_language_changes_the_current_video_and_is_saved() {
         let mut s = with_videos(&["a"]);
         let a = play(&mut s, 0);
@@ -1995,7 +2097,10 @@ mod tests {
         let a = play(&mut s, 0);
         assert_eq!(
             s.update(Action::CycleQuality),
-            [saved("player", "max_height", SettingValue::Number(1080)), Effect::Command(a, PlayerCommand::Quality(1080))]
+            [
+                saved("player", "max_height", SettingValue::Number(1080)),
+                Effect::Command(a, PlayerCommand::Quality(1080))
+            ]
         );
         assert!(s.status.contains("1080p"), "{}", s.status);
         assert_eq!(
@@ -2134,12 +2239,13 @@ mod tests {
         assert_eq!(
             s.update(Action::Enter),
             [
+                saved("session", "asked", SettingValue::Bool(true)),
                 saved("session", "browser", text("brave:Default")),
                 saved("session", "cookies_file", text("")),
                 Effect::StartSession { force: true },
             ]
         );
-        assert_eq!(s.session_label(), "brave:Default");
+        assert_eq!(s.session_label(), "brave · Default");
     }
 
     #[test]
@@ -2166,6 +2272,32 @@ mod tests {
         assert_eq!(effects.last(), Some(&Effect::StartSession { force: true }));
         assert_eq!(s.session_label(), "sin sesión");
         assert_eq!(change(&mut s, Setting::Refresh), [Effect::StartSession { force: true }]);
+    }
+
+    #[test]
+    fn first_start_asks_for_a_browser_once() {
+        let mut s = state();
+        let id = match s.update(Action::AskBrowser).as_slice() {
+            [Effect::ScanBrowsers { id }] => *id,
+            other => panic!("{other:?}"),
+        };
+        s.update(Action::Loaded(id, Ok(Items::Profiles(vec!["firefox:x".into(), String::new()]))));
+        assert!(s.status.contains("Elegí"), "{}", s.status);
+        let effects = s.update(Action::Enter);
+        assert_eq!(effects[0], saved("session", "asked", SettingValue::Bool(true)));
+        assert!(effects.contains(&Effect::StartSession { force: true }));
+        assert!(s.status.contains("firefox · x"), "{}", s.status);
+        assert!(s.update(Action::AskBrowser).is_empty(), "asked already");
+        let mut logged = state();
+        logged.config.session.browser = "brave".into();
+        assert!(logged.update(Action::AskBrowser).is_empty());
+        let mut bare = state();
+        let id = match bare.update(Action::AskBrowser).as_slice() {
+            [Effect::ScanBrowsers { id }] => *id,
+            other => panic!("{other:?}"),
+        };
+        bare.update(Action::Loaded(id, Ok(Items::Profiles(vec![String::new()]))));
+        assert!(bare.status.contains("cookies.txt"), "{}", bare.status);
     }
 
     #[test]

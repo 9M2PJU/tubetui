@@ -349,11 +349,15 @@ pub fn collect_channels(page: &Value) -> Vec<Channel> {
             .into_iter()
             .filter_map(text)
             .find(|t| t.contains("suscript") || t.contains("subscri"));
+        // And the @handle in the other one.
+        let handle =
+            [&r["subscriberCountText"], &r["videoCountText"]].into_iter().filter_map(text).find(|t| t.starts_with('@'));
         channels.push(Channel {
             id: id.to_owned(),
             name: text(&r["title"]).unwrap_or_else(|| id.to_owned()),
             url: format!("{ORIGIN}/channel/{id}"),
             followers,
+            handle,
             description: text(&r["descriptionSnippet"]).and_then(description),
         });
     });
@@ -383,6 +387,7 @@ pub fn collect_guide_channels(guide: &Value) -> Vec<Channel> {
                 name: text(&entry["formattedTitle"]).unwrap_or_else(|| id.to_owned()),
                 url: format!("{ORIGIN}/channel/{id}"),
                 followers: None,
+                handle: None,
                 description: None,
             });
         }
@@ -433,6 +438,8 @@ struct ChannelEntry {
     title: Option<String>,
     url: Option<String>,
     channel_follower_count: Option<u64>,
+    /// The @handle.
+    uploader_id: Option<String>,
     description: Option<String>,
 }
 
@@ -481,6 +488,7 @@ pub fn parse_channels(json: &str) -> Result<Vec<Channel>, serde_json::Error> {
             url: e.url.unwrap_or_else(|| format!("{ORIGIN}/channel/{}", e.id)),
             name: e.title.unwrap_or_else(|| e.id.clone()),
             followers: e.channel_follower_count.map(|n| format!("{} suscriptores", compact(n))),
+            handle: e.uploader_id.filter(|h| h.starts_with('@')),
             description: e.description.and_then(description),
             id: e.id,
         })
@@ -573,7 +581,7 @@ mod tests {
     #[test]
     fn parses_channel_search_and_skips_non_channels() {
         let json = r#"{"entries":[
-            {"id":"UCabc","title":"Canal","url":"https://www.youtube.com/channel/UCabc","channel_follower_count":1234567,"description":"Un canal"},
+            {"id":"UCabc","title":"Canal","url":"https://www.youtube.com/channel/UCabc","channel_follower_count":1234567,"description":"Un canal","uploader_id":"@canal"},
             {"id":"UCdef"},
             {"id":"PLxyz","title":"Una playlist"}]}"#;
         let channels = parse_channels(json).unwrap();
@@ -623,6 +631,8 @@ mod tests {
         assert_eq!(channels[1].followers, None);
         assert_eq!(channels[0].description.as_deref(), Some("Música y charlas.\nTodos los viernes"));
         assert_eq!(channels[1].description, None);
+        assert_eq!(channels[0].handle.as_deref(), Some("@maria"));
+        assert_eq!(channels[1].handle, None);
         assert_eq!(collect_continuations(&page), ["AZ", "NEW"]);
     }
 

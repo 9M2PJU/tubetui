@@ -48,11 +48,7 @@ impl Video {
 
     /// `m:ss` or `h:mm:ss`, empty when unknown.
     pub fn duration_label(&self) -> String {
-        match self.duration {
-            None => String::new(),
-            Some(s) if s >= 3600 => format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60),
-            Some(s) => format!("{}:{:02}", s / 60, s % 60),
-        }
+        self.duration.map(clock).unwrap_or_default()
     }
 
     /// Newest first; live streams, then upcoming ones, then by date, unknown dates last.
@@ -99,6 +95,15 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (yoe + era * 400 + i64::from(month <= 2), month, day)
 }
 
+/// `0:05`, `10:35`, `1:02:03`.
+pub fn clock(s: u32) -> String {
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Channel {
     pub id: String,
@@ -106,6 +111,8 @@ pub struct Channel {
     pub url: String,
     /// Already formatted, e.g. "358 mil suscriptores".
     pub followers: Option<String>,
+    /// `@name`, the channel's address on YouTube.
+    pub handle: Option<String>,
     /// What the channel says about itself, as YouTube shortens it.
     pub description: Option<String>,
 }
@@ -135,6 +142,7 @@ pub(crate) fn channel(id: &str) -> Channel {
         name: format!("name {id}"),
         url: format!("https://www.youtube.com/channel/{id}"),
         followers: None,
+        handle: None,
         description: None,
     }
 }

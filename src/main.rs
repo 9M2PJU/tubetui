@@ -12,7 +12,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use clap::Parser;
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::event::{
+    self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event, MouseButton,
+    MouseEventKind,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
 
 use tubetui::anim::Animations;
@@ -25,7 +29,7 @@ use tubetui::player::{self, Geometry, Launch, Mode, Player};
 use tubetui::store::{self, Paths};
 use tubetui::thumbs::Thumbnails;
 use tubetui::youtube::{self, Items};
-use tubetui::{keymap, session, ui};
+use tubetui::{keymap, mouse, session, ui};
 
 const SUBS_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// While the window is being resized the video stays hidden; it is placed
@@ -37,6 +41,10 @@ const LATE_FRAME: Duration = Duration::from_millis(300);
 const THUMBS_AHEAD: usize = 10;
 /// Time between animation frames.
 const FRAME: Duration = Duration::from_millis(33);
+/// How often an overlay follows the terminal window when it moves.
+const OVERLAY_FOLLOW: Duration = Duration::from_millis(500);
+/// Two clicks on the same cell within this time are a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// YouTube in your terminal.
 #[derive(Parser)]
@@ -67,10 +75,13 @@ fn main() -> anyhow::Result<()> {
 
     let mut runtime = Runtime::new(config, config_path, paths, later);
     let mut terminal = ratatui::init();
+    set_focus_reports(true);
     let result = runtime.run(&mut terminal);
     // Stop every mpv first so no frame arrives after the cleanup.
     drop(runtime);
     player::clear_images();
+    set_mouse(false);
+    set_focus_reports(false);
     ratatui::restore();
     if let Err(e) = &result {
         append(&crash_log, &format!("error: {e:#}"));
@@ -84,6 +95,9 @@ fn log_panics(path: PathBuf) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         append(&path, &format!("panic: {info}\n{}", std::backtrace::Backtrace::force_capture()));
+        // Otherwise the shell keeps getting mouse and focus codes.
+        set_mouse(false);
+        set_focus_reports(false);
         previous(info);
     }));
 }
@@ -135,6 +149,17 @@ struct Runtime {
     closing: Vec<std::thread::JoinHandle<()>>,
     animations: Animations,
     thumbs: Thumbnails,
+    /// The terminal sends us mouse events (follows `ui.mouse`).
+    mouse_on: bool,
+    /// The last left click, to tell double clicks.
+    last_click: Option<(Instant, u16, u16)>,
+    /// `xwininfo`, `xdotool` and `xprop` are installed (overlay mode needs them).
+    x11_tools: bool,
+    /// Overlay: where the terminal's cell grid starts on the screen, and when it was checked.
+    grid: Option<(i32, i32)>,
+    grid_checked: Option<Instant>,
+    /// The terminal lost the focus to another program: overlays hide.
+    away: bool,
 }
 
 impl Drop for Runtime {
@@ -167,8 +192,15 @@ impl Runtime {
             closing: Vec::new(),
             animations: Animations::default(),
             thumbs: Thumbnails::default(),
+            mouse_on: false,
+            last_click: None,
+            x11_tools: ["xwininfo", "xdotool", "xprop"].iter().all(|tool| on_path(tool)),
+            grid: None,
+            grid_checked: None,
+            away: false,
         };
         runtime.start_session(false);
+        runtime.send(Action::AskBrowser);
         runtime
     }
 
@@ -177,7 +209,10 @@ impl Runtime {
     }
 
     fn mode(&self) -> Mode {
-        player::resolve_mode(self.state.config.player.mode, |key| std::env::var(key).ok())
+        match player::resolve_mode(self.state.config.player.mode, |key| std::env::var(key).ok()) {
+            Mode::Overlay if !self.x11_tools => Mode::Window,
+            mode => mode,
+        }
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
@@ -220,7 +255,7 @@ impl Runtime {
             // Redraw only on change: every redraw competes with mpv for the terminal.
             if dirty || self.animations.running() {
                 let loading = self.loading_since.map(|t| t.elapsed());
-                let embedded = self.mode() == Mode::Embedded;
+                let embedded = self.mode().in_pane();
                 let thumbnails = embedded && self.state.config.ui.thumbnails;
                 let playing = self.state.active_tab().and_then(|t| self.players.get(&t.id)).map(Player::info);
                 let view = ui::View { embedded, now: now(), loading, opening, thumbnails, playing };
@@ -242,6 +277,21 @@ impl Runtime {
                 }
                 dirty = false;
             }
+            if self.mode() == Mode::Overlay
+                && self.state.active_tab().is_some()
+                && self.grid_checked.is_none_or(|t| t.elapsed() >= OVERLAY_FOLLOW)
+            {
+                self.grid_checked = Some(Instant::now());
+                let grid = player::grid_origin(player::cell_size());
+                if grid != self.grid {
+                    self.grid = grid;
+                    dirty = true;
+                }
+            }
+            if self.mouse_on != self.state.config.ui.mouse {
+                self.mouse_on = self.state.config.ui.mouse;
+                set_mouse(self.mouse_on);
+            }
             let mut pending = Vec::new();
             // Animations want about 30 frames a second; otherwise wait longer.
             let wait = if self.animations.running() { FRAME } else { Duration::from_millis(100) };
@@ -250,6 +300,28 @@ impl Runtime {
                     Event::Key(key) => {
                         dbg(format!("key {:?} {:?}", key.code, key.kind));
                         pending.extend(keymap::map(key, self.state.key_context()))
+                    }
+                    // Another program in front: an overlay would float over it.
+                    Event::FocusLost if self.mode() == Mode::Overlay && !player::overlay_has_focus() => {
+                        self.away = true;
+                        dirty = true;
+                    }
+                    Event::FocusGained if self.away => {
+                        self.away = false;
+                        dirty = true;
+                    }
+                    Event::Mouse(m) => {
+                        let double = m.kind == MouseEventKind::Down(MouseButton::Left) && {
+                            let again = self.last_click.is_some_and(|(at, x, y)| {
+                                at.elapsed() < DOUBLE_CLICK && (x, y) == (m.column, m.row)
+                            });
+                            // A third click starts over.
+                            self.last_click = (!again).then(|| (Instant::now(), m.column, m.row));
+                            again
+                        };
+                        let playing = self.state.active_tab().and_then(|t| self.players.get(&t.id)).map(Player::info);
+                        let spot = ui::spot(&self.state, playing.as_ref(), terminal.size()?.into(), m.column, m.row);
+                        pending.extend(mouse::actions(&self.state, spot, m.kind, double));
                     }
                     // No `terminal.clear()`: it asks the terminal for the cursor
                     // position and, with kitty busy drawing video, can wait 2 s
@@ -290,7 +362,7 @@ impl Runtime {
             if self.window_fullscreen && !self.state.fullscreen {
                 player::set_window_fullscreen(false);
             }
-            self.window_fullscreen = self.state.fullscreen && self.mode() == Mode::Embedded;
+            self.window_fullscreen = self.state.fullscreen && self.mode().in_pane();
         }
         if self.window_fullscreen {
             player::set_window_fullscreen(false);
@@ -396,7 +468,7 @@ impl Runtime {
             Effect::Close(id) => self.stop(id),
             Effect::Command(id, command) => {
                 if let PlayerCommand::Fullscreen(on) = command
-                    && self.mode() == Mode::Embedded
+                    && self.mode().in_pane()
                 {
                     player::set_window_fullscreen(on);
                 }
@@ -412,7 +484,15 @@ impl Runtime {
     /// several times longer with cookies (measured 7 s against 23 s), and
     /// only a few videos (age-restricted, members-only, private) need them.
     fn open(&mut self, id: TabId, playback: &Playback, with_cookies: bool, screen: Rect) {
-        let geometry = ui::video_area(&self.state, screen).map(|a| Geometry::new(a, player::cell_size()));
+        if self.mode() == Mode::Overlay {
+            self.grid = player::grid_origin(player::cell_size());
+        }
+        let geometry = ui::video_area(&self.state, screen)
+            .map(|a| Geometry::new(a, player::cell_size()))
+            .map(|g| match self.grid.filter(|_| self.mode() == Mode::Overlay) {
+                Some(grid) => g.on_screen(grid),
+                None => g,
+            });
         let launch = Launch {
             config: &self.state.config.player,
             mode: self.mode(),
@@ -513,9 +593,13 @@ impl Runtime {
             .unwrap_or_else(|_| if cfg!(windows) { "notepad".into() } else { "nano".into() });
         let mut words = editor.split_whitespace();
         let program = words.next().unwrap_or("nano");
+        set_mouse(false);
+        set_focus_reports(false);
+        self.mouse_on = false;
         ratatui::restore();
         let status = std::process::Command::new(program).args(words).arg(&path).status();
         *terminal = ratatui::init();
+        set_focus_reports(true);
         let result = match status {
             Ok(_) => Config::load(&path).map_err(|e| e.to_string()),
             Err(e) => Err(format!("{} {program}: {e}", self.tr("no se pudo abrir", "could not open"))),
@@ -570,9 +654,17 @@ impl Runtime {
             self.last_watched = active;
         }
         let audible = self.last_watched.filter(|_| self.state.config.player.background_audio || active.is_some());
+        let overlay = self.mode() == Mode::Overlay;
+        if overlay && self.grid.is_none() {
+            self.grid = player::grid_origin(player::cell_size());
+        }
         let geometry = ui::video_area(&self.state, screen)
-            .filter(|_| self.resized_at.is_none())
-            .map(|a| Geometry::new(a, player::cell_size()));
+            .filter(|_| self.resized_at.is_none() && !(overlay && self.away))
+            .map(|a| Geometry::new(a, player::cell_size()))
+            .map(|g| match self.grid.filter(|_| overlay) {
+                Some(grid) => g.on_screen(grid),
+                None => g,
+            });
         let mut hidden_any = false;
         for (id, p) in &mut self.players {
             match geometry.filter(|_| Some(*id) == active) {
@@ -627,4 +719,21 @@ fn expand_home(path: &str) -> PathBuf {
         (Some(rest), Some(dirs)) => dirs.home_dir().join(rest),
         _ => PathBuf::from(path),
     }
+}
+
+/// Whether the terminal sends mouse events. While it does, selecting text
+/// needs Shift.
+fn set_mouse(on: bool) {
+    let mut out = std::io::stdout();
+    let _ = if on { execute!(out, EnableMouseCapture) } else { execute!(out, DisableMouseCapture) };
+}
+
+/// Whether the terminal tells us when it gains or loses the focus.
+fn set_focus_reports(on: bool) {
+    let mut out = std::io::stdout();
+    let _ = if on { execute!(out, EnableFocusChange) } else { execute!(out, DisableFocusChange) };
+}
+
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
 }

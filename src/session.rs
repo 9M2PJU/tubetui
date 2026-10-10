@@ -11,35 +11,69 @@ const ORIGIN: &str = "https://www.youtube.com";
 const COOKIES_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 
 /// Chromium-family browsers: yt-dlp name and config dir relative to `$HOME`.
-const CHROMIUM: &[(&str, &str)] = &[
-    ("brave", ".config/BraveSoftware/Brave-Browser"),
-    ("chrome", ".config/google-chrome"),
-    ("chromium", ".config/chromium"),
-    ("vivaldi", ".config/vivaldi"),
-    ("edge", ".config/microsoft-edge"),
-    ("opera", ".config/opera"),
+/// The first dir of each is where yt-dlp looks by itself; profiles in the
+/// others (snap, flatpak) are passed to it by path.
+const CHROMIUM: &[(&str, &[&str])] = &[
+    ("brave", &[".config/BraveSoftware/Brave-Browser", ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"]),
+    ("chrome", &[".config/google-chrome", ".var/app/com.google.Chrome/config/google-chrome"]),
+    ("chromium", &[".config/chromium", "snap/chromium/common/chromium", ".var/app/org.chromium.Chromium/config/chromium"]),
+    ("vivaldi", &[".config/vivaldi", ".var/app/com.vivaldi.Vivaldi/config/vivaldi"]),
+    ("edge", &[".config/microsoft-edge", ".var/app/com.microsoft.Edge/config/microsoft-edge"]),
+    ("opera", &[".config/opera", ".var/app/com.opera.Opera/config/opera"]),
+];
+
+/// Firefox profile folders: the classic one (yt-dlp's own), the newer XDG
+/// one, snap (Ubuntu's default) and flatpak.
+const FIREFOX: &[&str] = &[
+    ".mozilla/firefox",
+    ".config/mozilla/firefox",
+    "snap/firefox/common/.mozilla/firefox",
+    ".var/app/org.mozilla.firefox/.mozilla/firefox",
 ];
 
 /// Browser profiles with cookies under `home`, as yt-dlp
-/// `--cookies-from-browser` specs (`brave+KEYRING:Default`, `firefox:abcd.default`).
+/// `--cookies-from-browser` specs (`brave+KEYRING:Default`, `firefox:abcd.default`,
+/// `firefox:/home/me/snap/firefox/common/.mozilla/firefox/abcd.default`).
 pub fn scan_browsers(home: &Path, keyring: &str) -> Vec<String> {
     let keyring = if keyring.is_empty() { String::new() } else { format!("+{keyring}") };
     let mut found = Vec::new();
-    for (name, dir) in CHROMIUM {
-        for profile in subdirs(&home.join(dir)) {
-            let is_profile = profile == "Default" || profile.starts_with("Profile ");
-            let base = home.join(dir).join(&profile);
-            if is_profile && (base.join("Cookies").exists() || base.join("Network/Cookies").exists()) {
-                found.push(format!("{name}{keyring}:{profile}"));
+    for (name, dirs) in CHROMIUM {
+        for (i, dir) in dirs.iter().enumerate() {
+            for profile in subdirs(&home.join(dir)) {
+                let is_profile = profile == "Default" || profile.starts_with("Profile ");
+                let base = home.join(dir).join(&profile);
+                if is_profile && (base.join("Cookies").exists() || base.join("Network/Cookies").exists()) {
+                    let profile = if i == 0 { profile } else { base.display().to_string() };
+                    found.push(format!("{name}{keyring}:{profile}"));
+                }
             }
         }
     }
-    for profile in subdirs(&home.join(".mozilla/firefox")) {
-        if home.join(".mozilla/firefox").join(&profile).join("cookies.sqlite").exists() {
-            found.push(format!("firefox:{profile}"));
+    for (i, dir) in FIREFOX.iter().enumerate() {
+        for profile in subdirs(&home.join(dir)) {
+            let base = home.join(dir).join(&profile);
+            if base.join("cookies.sqlite").exists() {
+                let profile = if i == 0 { profile } else { base.display().to_string() };
+                found.push(format!("firefox:{profile}"));
+            }
         }
     }
     found
+}
+
+/// A spec as people read it: `brave · Default`, `firefox (snap) · abcd.default`.
+pub fn label(spec: &str) -> String {
+    let (browser, profile) = spec.split_once(':').unwrap_or((spec, ""));
+    let browser = browser.split('+').next().unwrap_or(browser);
+    let place = if profile.contains("/snap/") {
+        " (snap)"
+    } else if profile.contains("/.var/app/") {
+        " (flatpak)"
+    } else {
+        ""
+    };
+    let profile = profile.rsplit('/').next().unwrap_or(profile);
+    if profile.is_empty() { format!("{browser}{place}") } else { format!("{browser}{place} · {profile}") }
 }
 
 fn subdirs(dir: &Path) -> Vec<String> {
@@ -174,11 +208,25 @@ mod tests {
         touch(".config/BraveSoftware/Brave-Browser/System Profile/Cookies");
         touch(".config/google-chrome/Default/Preferences");
         touch(".mozilla/firefox/ab12.default-release/cookies.sqlite");
+        touch("snap/firefox/common/.mozilla/firefox/cd34.default/cookies.sqlite");
+        touch(".var/app/com.google.Chrome/config/google-chrome/Default/Cookies");
+        let snap = home.join("snap/firefox/common/.mozilla/firefox/cd34.default").display().to_string();
+        let flatpak = home.join(".var/app/com.google.Chrome/config/google-chrome/Default").display().to_string();
         assert_eq!(
             scan_browsers(&home, "GNOMEKEYRING"),
-            ["brave+GNOMEKEYRING:Default", "brave+GNOMEKEYRING:Profile 1", "firefox:ab12.default-release"]
+            [
+                "brave+GNOMEKEYRING:Default".to_string(),
+                "brave+GNOMEKEYRING:Profile 1".into(),
+                format!("chrome+GNOMEKEYRING:{flatpak}"),
+                "firefox:ab12.default-release".into(),
+                format!("firefox:{snap}"),
+            ]
         );
         assert_eq!(scan_browsers(&home, "")[0], "brave:Default");
+        assert_eq!(label(&format!("firefox:{snap}")), "firefox (snap) · cd34.default");
+        assert_eq!(label(&format!("chrome+GNOMEKEYRING:{flatpak}")), "chrome (flatpak) · Default");
+        assert_eq!(label("brave+GNOMEKEYRING:Profile 1"), "brave · Profile 1");
+        assert_eq!(label("firefox"), "firefox");
     }
 
     #[test]

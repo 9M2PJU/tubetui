@@ -62,6 +62,15 @@ pub const IN_LISTS: &[(&str, Text)] = &[
     ("/", Text::new("buscar (dentro de un canal: en ese canal)", "search (inside a channel: in that channel)")),
 ];
 
+pub const WITH_MOUSE: &[(&str, Text)] = &[
+    ("clic", Text::new("elegir · en el menú y las pestañas: abrir", "select · menu and tabs: open")),
+    ("doble clic", Text::new("ver video · abrir canal · cambiar opción", "play · open channel · change option")),
+    ("rueda", Text::new("moverse en la lista · en el video: volumen", "move in the list · on the video: volume")),
+    ("clic video", Text::new("pausa (doble clic: pantalla completa)", "pause (double click: fullscreen)")),
+    ("clic barra", Text::new("saltar a ese momento del video", "jump to that point of the video")),
+    ("Shift", Text::new("mantenela para seleccionar y copiar texto", "hold it to select and copy text")),
+];
+
 pub const IN_SEARCH: &[(&str, Text)] = &[
     ("Enter", Text::new("buscar / aceptar", "search / accept")),
     ("Tab", Text::new("dónde buscar: todo / mis canales / canal", "where: everywhere / my channels / channel")),
@@ -70,6 +79,8 @@ pub const IN_SEARCH: &[(&str, Text)] = &[
 
 pub const IN_TAB: &[(&str, Text)] = &[
     ("espacio", Text::new("pausa", "pause")),
+    ("v", Text::new("calidad: 360p → 480p → 720p → 1080p …", "quality: 360p → 480p → 720p → 1080p …")),
+    ("b", Text::new("compresión: H.264 → VP9 → AV1 → cualquiera", "codec: H.264 → VP9 → AV1 → any")),
     ("f  Esc", Text::new("pantalla completa / salir", "fullscreen / leave")),
     ("← →", Text::new("retroceder / avanzar 5 s", "back / forward 5 s")),
     ("↑ ↓", Text::new("subir / bajar volumen", "volume up / down")),
@@ -77,8 +88,6 @@ pub const IN_TAB: &[(&str, Text)] = &[
     ("j", Text::new("subtítulos sí / no", "subtitles on / off")),
     ("i", Text::new("modo: subtítulos → original → doblado", "mode: subtitles → original → dubbed")),
     ("o", Text::new("otro idioma (es → en → pt …)", "another language (es → en → pt …)")),
-    ("v", Text::new("calidad: 360p → 480p → 720p → 1080p …", "quality: 360p → 480p → 720p → 1080p …")),
-    ("b", Text::new("compresión: H.264 → VP9 → AV1 → cualquiera", "codec: H.264 → VP9 → AV1 → any")),
     (". ,", Text::new("música: siguiente / anterior", "music: next / previous")),
 ];
 
@@ -195,6 +204,7 @@ pub fn help(lang: Lang) -> Vec<(&'static str, Vec<(String, &'static str)>)> {
         (lang.pick("Sobre un video (lista o pestaña)", "On a video (list or tab)"), rows(ON_VIDEO, lang)),
         (lang.pick("Pestaña de video", "Video tab"), rows(IN_TAB, lang)),
         (lang.pick("Cuadro de búsqueda", "Search box"), rows(IN_SEARCH, lang)),
+        ("Mouse", rows(WITH_MOUSE, lang)),
         (lang.pick("Siempre", "Always"), vec![("Ctrl+c".into(), lang.pick("salir", "quit"))]),
     ]
 }

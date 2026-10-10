@@ -22,12 +22,18 @@ their own window elsewhere. Every video opens in its own tab.
   you scroll), only in your channels, or inside a channel (`Tab` switches the
   scope); search channels (with their description, whole in the side panel)
 - A **preview** of the selected video with its **thumbnail** (in kitty)
+- A **progress bar** under the video (played, downloaded, rest) and its
+  volume, resolution and codec on top
+- **Mouse**: click to select, double click to open, wheel to scroll (on the
+  video: volume), click the video to pause, the progress bar to jump
 - **Subscribe / unsubscribe** (`s`, unsubscribing asks first), **watch later**
   (`l`), **download** with subtitles (`d`), open the **channel** (`c`)
 
 **Playback**
-- Embedded video in kitty, or an mpv window; one tab per video, background
-  audio when you go back to browsing
+- Embedded video in kitty, an mpv window, or an **overlay** (X11): an mpv
+  window without borders laid exactly over the app, so it looks embedded
+  but plays with the GPU; one tab per video, background audio when you go
+  back to browsing
 - Volume, mute, seek, **subtitles on/off**, switch **original / subtitles /
   auto-dubbed audio** and the **language** while watching (the video reloads at
   the same second)
@@ -78,6 +84,11 @@ Global commands use a **`Ctrl+y` prefix** (tmux style): press `Ctrl+y`, then:
 | `?` | every shortcut, explained |
 | `q` | quit |
 
+With the mouse: click selects (menu sections and tabs open), double click
+plays / opens, the wheel scrolls lists and sets the volume over the video,
+a click on the video pauses (double click: fullscreen), a click on the
+progress bar jumps there. Hold Shift to select text.
+
 In lists: `↑↓` / `jk`, `Enter`, `Esc` to go back, `Tab` menu ↔ list,
 `l` watch later, `s` subscribe, `d` download, `c` channel.
 While watching: `space` pause, `←→` seek, `↑↓` volume, `m` mute, `j`
@@ -85,7 +96,19 @@ subtitles, `i` original / subtitles / dubbed, `o` language, `v` quality
 (360p–1440p), `b` codec (H.264 / VP9 / AV1 / any), `f` fullscreen, `.` `,`
 next / previous song. Quality, codec and language reload the video at the
 same second and are remembered. If embedded video looks behind the sound,
-the CPU is dropping frames: `v` down to 480p.
+the CPU is dropping frames: `v` down to 480p, or try the overlay.
+
+## Overlay mode (X11)
+
+Embedded video goes through the CPU: every frame is decoded, scaled and sent
+to kitty as an image (on a 2012 laptop: 134 % CPU, a third of the frames
+dropped). `mode = "overlay"` (Settings → Video) instead opens a borderless
+mpv window over the video pane: hardware decoding, every frame, about 10 %
+CPU, and it still looks part of the app. It follows the terminal window when
+it moves, hides when you switch tabs, open the help or focus another
+program, and lets clicks and keys through to the app. It needs X11 and
+`xdotool`, `xwininfo` and `xprop` (`wmctrl` keeps it off the taskbar);
+without them, or on Wayland, it falls back to a separate window.
 
 ## Terminal multiplexers (tmux, zellij, herdr)
 
@@ -107,7 +130,7 @@ browser = "brave+GNOMEKEYRING:Default"  # yt-dlp --cookies-from-browser syntax
 cookies_file = ""                       # imported cookies.txt, wins over browser
 
 [player]
-mode = "auto"            # auto | embedded | window
+mode = "auto"            # auto | embedded | window | overlay
 max_height = 720
 prefer_codec = "avc1"    # H.264 decodes in hardware almost everywhere
 language = "subtitles"   # subtitles | original | dubbed
@@ -122,6 +145,7 @@ music_dirs = ["~/Música", "/mnt/discos"]
 icons = "emoji"          # emoji | nerd | unicode
 lang = "en"              # en | es (unset: the system language)
 thumbnails = true        # thumbnail in the preview panel (kitty)
+mouse = true             # clicks and wheel; hold Shift to select text
 
 [effects]                # animations
 startup = true
