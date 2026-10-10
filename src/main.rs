@@ -216,7 +216,12 @@ impl Runtime {
                     dbg(format!("effect {name} {:?}", t.elapsed()));
                 }
             }
+            // Players whose tab is gone (the video ended or mpv failed).
+            let before = self.players.len();
             self.players.retain(|id, _| self.state.tabs.iter().any(|t| t.id == *id));
+            if self.players.len() < before {
+                player::clear_images();
+            }
             // Leaving fullscreen any way (Esc, another tab, closing) restores the window.
             if self.window_fullscreen && !self.state.fullscreen {
                 player::set_window_fullscreen(false);
@@ -326,7 +331,10 @@ impl Runtime {
                 }
             }
             Effect::Close(id) => {
-                self.players.remove(&id);
+                // Dropping stops mpv; its last frame would stay on top of everything.
+                if self.players.remove(&id).is_some() {
+                    player::clear_images();
+                }
             }
             Effect::Command(id, command) => {
                 if let PlayerCommand::Fullscreen(on) = command
