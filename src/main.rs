@@ -18,6 +18,7 @@ use ratatui::layout::Rect;
 use tubetui::app::{Action, Effect, SettingValue, State};
 use tubetui::config::{self, Config};
 use tubetui::domain::{TabId, Video};
+use tubetui::media::{self, MediaKind};
 use tubetui::player::{self, Geometry, Launch, Mode, Player};
 use tubetui::store::{self, Paths};
 use tubetui::youtube::{self, Items};
@@ -178,6 +179,13 @@ impl Runtime {
                 profiles.push(String::new()); // "Sin sesión"
                 self.send(Action::Loaded(id, Ok(Items::Profiles(profiles))));
             }
+            Effect::ScanMedia { id, kind } => {
+                let roots = self.media_dirs(kind);
+                self.background(move || {
+                    let files = media::scan(&roots, kind);
+                    Action::Loaded(id, Ok(Items::Files(files, kind)))
+                });
+            }
             Effect::StartSession { force } => self.start_session(force),
             Effect::SaveSetting { table, key, value } => {
                 let Some(path) = &self.config_path else { return Ok(()) };
@@ -185,6 +193,9 @@ impl Runtime {
                     SettingValue::Text(text) => config::set_value(path, table, key, text),
                     SettingValue::Number(number) => config::set_value(path, table, key, number),
                     SettingValue::Bool(flag) => config::set_value(path, table, key, flag),
+                    SettingValue::List(items) => {
+                        config::set_value(path, table, key, items.into_iter().collect::<toml_edit::Array>())
+                    }
                 };
                 if let Err(e) = result {
                     self.send(Action::Status(e.to_string()));
@@ -231,13 +242,17 @@ impl Runtime {
                     Err(e) => Action::Status(format!("❌ Falló la descarga de {}: {e}", video.title)),
                 });
             }
-            Effect::Open(id, video) => {
+            Effect::Open(id, playback) => {
                 let mode = self.mode();
                 let screen: Rect = terminal.size()?.into();
                 let geometry = ui::video_area(&self.state, screen).map(|a| Geometry::new(a, player::cell_size()));
-                let url = video.url();
-                let launch =
-                    Launch { config: &self.state.config.player, mode, cookies: self.cookies.as_deref(), url: &url };
+                let launch = Launch {
+                    config: &self.state.config.player,
+                    mode,
+                    cookies: self.cookies.as_deref(),
+                    queue: &playback.queue,
+                    audio_only: playback.audio_only,
+                };
                 match Player::spawn(&launch, geometry) {
                     Ok(p) => {
                         self.players.insert(id, p);
@@ -313,6 +328,23 @@ impl Runtime {
         };
         self.send(Action::ConfigReloaded(result));
         Ok(())
+    }
+
+    /// Configured folders for `kind`, or the system's videos / music folder.
+    fn media_dirs(&self, kind: MediaKind) -> Vec<PathBuf> {
+        let media = &self.state.config.media;
+        let dirs = match kind {
+            MediaKind::Video => &media.video_dirs,
+            MediaKind::Music => &media.music_dirs,
+        };
+        if !dirs.is_empty() {
+            return dirs.iter().map(|d| expand_home(d)).collect();
+        }
+        let system = directories::UserDirs::new().and_then(|d| match kind {
+            MediaKind::Video => d.video_dir().map(Path::to_owned),
+            MediaKind::Music => d.audio_dir().map(Path::to_owned),
+        });
+        system.into_iter().collect()
     }
 
     fn download_dir(&self) -> PathBuf {

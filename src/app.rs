@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use crate::config::{Config, Language, PlayerMode, language_name, next_language, next_quality};
 use crate::domain::{TabId, Video};
 use crate::keymap::KeyContext;
+use crate::media::{LocalFile, MediaKind, parse_dirs};
 use crate::youtube::{Items, Source};
 
 /// Lists that are filtered afterwards ask YouTube for more videos.
@@ -25,12 +26,32 @@ pub enum Section {
     Canales,
     BuscarVideos,
     BuscarCanales,
+    MisVideos,
+    MiMusica,
     Configuracion,
     Salir,
 }
 
+/// Menu groups, drawn with a header each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    YouTube,
+    Local,
+    App,
+}
+
+impl Group {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::YouTube => "YOUTUBE",
+            Self::Local => "EN TU EQUIPO",
+            Self::App => "",
+        }
+    }
+}
+
 impl Section {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Inicio,
         Self::Descubrir,
         Self::Suscripciones,
@@ -38,9 +59,19 @@ impl Section {
         Self::Canales,
         Self::BuscarVideos,
         Self::BuscarCanales,
+        Self::MisVideos,
+        Self::MiMusica,
         Self::Configuracion,
         Self::Salir,
     ];
+
+    pub fn group(self) -> Group {
+        match self {
+            Self::MisVideos | Self::MiMusica => Group::Local,
+            Self::Configuracion | Self::Salir => Group::App,
+            _ => Group::YouTube,
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -51,6 +82,8 @@ impl Section {
             Self::Canales => "Mis canales",
             Self::BuscarVideos => "Buscar videos",
             Self::BuscarCanales => "Buscar canales",
+            Self::MisVideos => "Mis videos",
+            Self::MiMusica => "Mi música",
             Self::Configuracion => "Configuración",
             Self::Salir => "Salir",
         }
@@ -70,12 +103,14 @@ pub enum Setting {
     VideoMode,
     BackgroundAudio,
     Icons,
+    VideoDirs,
+    MusicDirs,
     DownloadDir,
     EditFile,
 }
 
 impl Setting {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::Browser,
         Self::ImportCookies,
         Self::Refresh,
@@ -86,6 +121,8 @@ impl Setting {
         Self::VideoMode,
         Self::BackgroundAudio,
         Self::Icons,
+        Self::VideoDirs,
+        Self::MusicDirs,
         Self::DownloadDir,
         Self::EditFile,
     ];
@@ -102,6 +139,8 @@ impl Setting {
             Self::VideoMode => "Video",
             Self::BackgroundAudio => "Al salir de la pestaña del video",
             Self::Icons => "Íconos",
+            Self::VideoDirs => "Carpetas de videos",
+            Self::MusicDirs => "Carpetas de música",
             Self::DownloadDir => "Carpeta de descargas",
             Self::EditFile => "Editar config.toml",
         }
@@ -149,6 +188,8 @@ pub enum Prompt {
     Channels,
     CookiesFile,
     DownloadDir,
+    /// Comma-separated folders for local videos or music.
+    MediaDirs(MediaKind),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +222,7 @@ pub enum SettingValue {
     Text(String),
     Number(i64),
     Bool(bool),
+    List(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +278,8 @@ pub enum Action {
     Volume(i32),
     ToggleMute,
     CycleSubtitles,
+    NextTrack,
+    PrevTrack,
     /// Next language mode (subtitles → original → dubbed) for this and later videos.
     CycleLanguage,
     /// Next subtitle / dubbing language (es → en → pt …) for this and later videos.
@@ -253,6 +297,11 @@ pub enum Effect {
     },
     ScanBrowsers {
         id: u64,
+    },
+    /// List local media from the configured folders.
+    ScanMedia {
+        id: u64,
+        kind: MediaKind,
     },
     /// (Re)read the login described by `config.session`.
     StartSession {
@@ -273,7 +322,7 @@ pub enum Effect {
         subscribe: bool,
     },
     Download(Video),
-    Open(TabId, Video),
+    Open(TabId, Playback),
     Close(TabId),
     Command(TabId, PlayerCommand),
 }
@@ -285,16 +334,60 @@ pub enum PlayerCommand {
     Volume(i32),
     ToggleMute,
     CycleSubtitles,
+    NextTrack,
+    PrevTrack,
     /// Reload the video with other audio / subtitles, at the same second.
     Language(Language),
     /// Same, with another subtitle / dubbing language code.
     SubLang(&'static str),
 }
 
+/// What a tab plays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Playback {
+    pub title: String,
+    /// Channel or folder.
+    pub subtitle: String,
+    /// The YouTube video, which enables `l`/`s`/`d`/`c`; `None` for local files.
+    pub video: Option<Video>,
+    /// URLs or paths, played in order.
+    pub queue: Vec<String>,
+    /// Music: no video output, `.`/`,` move through the queue.
+    pub audio_only: bool,
+}
+
+impl Playback {
+    pub fn youtube(video: Video) -> Self {
+        Self {
+            title: video.title.clone(),
+            subtitle: video.channel.clone(),
+            queue: vec![video.url()],
+            video: Some(video),
+            audio_only: false,
+        }
+    }
+
+    /// `files[start]` and, for music, everything after it.
+    pub fn local(files: &[LocalFile], start: usize, kind: MediaKind) -> Option<Self> {
+        let first = files.get(start)?;
+        let queue = match kind {
+            MediaKind::Video => vec![first.path.display().to_string()],
+            MediaKind::Music => files[start..].iter().map(|f| f.path.display().to_string()).collect(),
+        };
+        Some(Self {
+            title: first.name.clone(),
+            subtitle: first.folder.clone(),
+            video: None,
+            queue,
+            audio_only: kind == MediaKind::Music,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tab {
     pub id: TabId,
-    pub video: Video,
+    pub playback: Playback,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +516,8 @@ impl State {
                 }
             }
             Setting::Icons => self.config.ui.icons.as_str().into(),
+            Setting::VideoDirs => dirs_label(&self.config.media.video_dirs, "~/Videos"),
+            Setting::MusicDirs => dirs_label(&self.config.media.music_dirs, "~/Música"),
             Setting::DownloadDir => match self.config.download.dir.as_str() {
                 "" => "~/Videos".into(),
                 dir => dir.into(),
@@ -505,6 +600,8 @@ impl State {
             Action::Volume(delta) => return self.command(PlayerCommand::Volume(delta)),
             Action::ToggleMute => return self.command(PlayerCommand::ToggleMute),
             Action::CycleSubtitles => return self.command(PlayerCommand::CycleSubtitles),
+            Action::NextTrack => return self.command(PlayerCommand::NextTrack),
+            Action::PrevTrack => return self.command(PlayerCommand::PrevTrack),
             Action::CycleLanguage => {
                 let player = &mut self.config.player;
                 player.language = player.language.next();
@@ -561,7 +658,11 @@ impl State {
         let selected = listing.selected;
         match &listing.items {
             Items::Videos(videos) => match videos.get(selected).cloned() {
-                Some(video) => self.play(video),
+                Some(video) => self.play(Playback::youtube(video)),
+                None => Vec::new(),
+            },
+            Items::Files(files, kind) => match Playback::local(files, selected, *kind) {
+                Some(playback) => self.play(playback),
                 None => Vec::new(),
             },
             Items::Channels(channels) => match channels.get(selected).cloned() {
@@ -615,6 +716,8 @@ impl State {
                 self.start_prompt(Prompt::Channels, String::new());
                 Vec::new()
             }
+            Section::MisVideos => self.scan_media("Mis videos", MediaKind::Video),
+            Section::MiMusica => self.scan_media("Mi música", MediaKind::Music),
             Section::Configuracion => {
                 self.show(Listing {
                     title: "Configuración".into(),
@@ -629,6 +732,11 @@ impl State {
                 Vec::new()
             }
         }
+    }
+
+    fn scan_media(&mut self, title: &str, kind: MediaKind) -> Vec<Effect> {
+        let id = self.request(title.into(), Filter::None, false, ListKind::Plain);
+        vec![Effect::ScanMedia { id, kind }]
     }
 
     fn show(&mut self, listing: Listing) {
@@ -682,6 +790,16 @@ impl State {
                 self.config.ui.icons = self.config.ui.icons.next();
                 save("ui", "icons", SettingValue::Text(self.config.ui.icons.as_str().into()))
             }
+            Setting::VideoDirs => {
+                let current = self.config.media.video_dirs.join(", ");
+                self.start_prompt(Prompt::MediaDirs(MediaKind::Video), current);
+                Vec::new()
+            }
+            Setting::MusicDirs => {
+                let current = self.config.media.music_dirs.join(", ");
+                self.start_prompt(Prompt::MediaDirs(MediaKind::Music), current);
+                Vec::new()
+            }
             Setting::DownloadDir => {
                 let current = self.config.download.dir.clone();
                 self.start_prompt(Prompt::DownloadDir, current);
@@ -730,7 +848,7 @@ impl State {
 
     fn submit(&mut self, prompt: Prompt) -> Vec<Effect> {
         let query = self.query.trim().to_owned();
-        if query.is_empty() && prompt != Prompt::DownloadDir {
+        if query.is_empty() && !matches!(prompt, Prompt::DownloadDir | Prompt::MediaDirs(_)) {
             return Vec::new();
         }
         self.prompt = None;
@@ -757,6 +875,20 @@ impl State {
             Prompt::DownloadDir => {
                 self.config.download.dir = query.clone();
                 vec![Effect::SaveSetting { table: "download", key: "dir", value: SettingValue::Text(query) }]
+            }
+            Prompt::MediaDirs(kind) => {
+                let dirs = parse_dirs(&query);
+                let key = match kind {
+                    MediaKind::Video => {
+                        self.config.media.video_dirs = dirs.clone();
+                        "video_dirs"
+                    }
+                    MediaKind::Music => {
+                        self.config.media.music_dirs = dirs.clone();
+                        "music_dirs"
+                    }
+                };
+                vec![Effect::SaveSetting { table: "media", key, value: SettingValue::List(dirs) }]
             }
         }
     }
@@ -841,7 +973,7 @@ impl State {
     /// The video the user is pointing at: the open tab, or the selected list row.
     fn selected_video(&self) -> Option<&Video> {
         if let Some(tab) = self.active_tab() {
-            return Some(&tab.video);
+            return tab.playback.video.as_ref();
         }
         match self.stack.last() {
             Some(Listing { items: Items::Videos(videos), selected, .. }) if self.focus == Focus::List => {
@@ -929,8 +1061,8 @@ impl State {
         self.load(Source::Channel(url), name, Filter::None, true, kind)
     }
 
-    fn play(&mut self, video: Video) -> Vec<Effect> {
-        if let Some(i) = self.tabs.iter().position(|t| t.video.id == video.id) {
+    fn play(&mut self, playback: Playback) -> Vec<Effect> {
+        if let Some(i) = self.tabs.iter().position(|t| t.playback.queue.first() == playback.queue.first()) {
             self.active = i + 1;
             return Vec::new();
         }
@@ -940,9 +1072,9 @@ impl State {
         }
         let id = TabId(self.next_tab);
         self.next_tab += 1;
-        self.tabs.push(Tab { id, video: video.clone() });
+        self.tabs.push(Tab { id, playback: playback.clone() });
         self.active = self.tabs.len();
-        vec![Effect::Open(id, video)]
+        vec![Effect::Open(id, playback)]
     }
 
     /// Removes a tab; the active one moves to its right neighbour, like browsers do.
@@ -962,6 +1094,10 @@ impl State {
     fn command(&self, command: PlayerCommand) -> Vec<Effect> {
         self.active_tab().map(|t| Effect::Command(t.id, command)).into_iter().collect()
     }
+}
+
+fn dirs_label(dirs: &[String], default: &str) -> String {
+    if dirs.is_empty() { format!("{default} (del sistema)") } else { dirs.join(", ") }
 }
 
 pub fn language_label(language: Language) -> &'static str {
@@ -1287,7 +1423,7 @@ mod tests {
         let mut s = with_videos(&["a", "b"]);
         let id = play(&mut s, 1);
         assert_eq!(s.active, 1);
-        assert_eq!(s.active_tab().unwrap(), &Tab { id, video: video("b") });
+        assert_eq!(s.active_tab().unwrap(), &Tab { id, playback: Playback::youtube(video("b")) });
     }
 
     #[test]
@@ -1328,7 +1464,7 @@ mod tests {
         assert_eq!(s.active, 3);
         s.update(Action::GoTab(2));
         assert_eq!(s.update(Action::CloseTab), vec![Effect::Close(b)]);
-        assert_eq!(s.active_tab().unwrap().video, video("c"));
+        assert_eq!(s.active_tab().unwrap().playback.video, Some(video("c")));
         s.update(Action::CloseTab);
         s.update(Action::CloseTab);
         assert_eq!(s.active, 0);
@@ -1341,7 +1477,7 @@ mod tests {
         let a = play(&mut s, 0);
         play(&mut s, 1);
         assert!(s.update(Action::PlayerClosed(a, Some("mpv no está".into()))).is_empty());
-        assert_eq!(s.active_tab().unwrap().video, video("b"));
+        assert_eq!(s.active_tab().unwrap().playback.video, Some(video("b")));
         assert_eq!(s.status, "mpv no está");
         s.update(Action::PlayerClosed(TabId(99), None));
         assert_eq!(s.tabs.len(), 1);
@@ -1515,6 +1651,79 @@ mod tests {
             [saved("player", "sub_lang", text("en")), Effect::Command(a, PlayerCommand::SubLang("en"))]
         );
         assert_eq!(s.config.player.sub_lang, "en");
+    }
+
+    fn files(names: &[&str]) -> Vec<LocalFile> {
+        names
+            .iter()
+            .map(|n| LocalFile { path: format!("/m/{n}.mp3").into(), name: n.to_string(), folder: "Disco".into() })
+            .collect()
+    }
+
+    #[test]
+    fn menu_is_grouped() {
+        let groups: Vec<Group> = Section::ALL.iter().map(|s| s.group()).collect();
+        assert_eq!(groups[0], Group::YouTube);
+        assert_eq!(Section::MisVideos.group(), Group::Local);
+        assert_eq!(Section::MiMusica.group(), Group::Local);
+        assert_eq!(groups.last(), Some(&Group::App));
+        // Groups are contiguous, so each header appears once.
+        assert!(groups.windows(2).filter(|w| w[0] != w[1]).count() == 2);
+    }
+
+    #[test]
+    fn local_sections_scan_their_kind() {
+        let mut s = state();
+        assert!(matches!(
+            open(&mut s, Section::MisVideos).as_slice(),
+            [Effect::ScanMedia { kind: MediaKind::Video, .. }]
+        ));
+        assert!(matches!(
+            open(&mut s, Section::MiMusica).as_slice(),
+            [Effect::ScanMedia { kind: MediaKind::Music, .. }]
+        ));
+    }
+
+    #[test]
+    fn music_plays_from_the_chosen_song_to_the_end() {
+        let mut s = state();
+        let id = match open(&mut s, Section::MiMusica).as_slice() {
+            [Effect::ScanMedia { id, .. }] => *id,
+            other => panic!("{other:?}"),
+        };
+        s.update(Action::Loaded(id, Ok(Items::Files(files(&["a", "b", "c"]), MediaKind::Music))));
+        s.update(Action::Down);
+        let playback = match s.update(Action::Enter).as_slice() {
+            [Effect::Open(_, playback)] => playback.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(playback.queue, ["/m/b.mp3", "/m/c.mp3"]);
+        assert!(playback.audio_only);
+        assert_eq!((playback.title.as_str(), playback.video), ("b", None));
+        let tab = s.active_tab().unwrap().id;
+        assert_eq!(s.update(Action::NextTrack), [Effect::Command(tab, PlayerCommand::NextTrack)]);
+        // No YouTube video: watch later / subscribe do nothing.
+        assert!(s.update(Action::ToggleLater).is_empty());
+    }
+
+    #[test]
+    fn a_local_video_plays_alone() {
+        let playback = Playback::local(&files(&["a", "b"]), 0, MediaKind::Video).unwrap();
+        assert_eq!(playback.queue, ["/m/a.mp3"]);
+        assert!(!playback.audio_only);
+        assert!(Playback::local(&files(&["a"]), 5, MediaKind::Video).is_none());
+    }
+
+    #[test]
+    fn media_folders_are_edited_as_a_list() {
+        let mut s = state();
+        assert_eq!(s.setting_value(Setting::MusicDirs), "~/Música (del sistema)");
+        assert!(change(&mut s, Setting::MusicDirs).is_empty());
+        assert_eq!(s.prompt, Some(Prompt::MediaDirs(MediaKind::Music)));
+        type_text(&mut s, "~/Música, /mnt/discos");
+        let list = SettingValue::List(vec!["~/Música".into(), "/mnt/discos".into()]);
+        assert_eq!(s.update(Action::Enter), [saved("media", "music_dirs", list)]);
+        assert_eq!(s.setting_value(Setting::MusicDirs), "~/Música, /mnt/discos");
     }
 
     #[test]

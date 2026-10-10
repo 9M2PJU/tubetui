@@ -100,11 +100,14 @@ pub struct Launch<'a> {
     pub config: &'a PlayerConfig,
     pub mode: Mode,
     pub cookies: Option<&'a std::path::Path>,
-    pub url: &'a str,
+    /// URLs or paths, played in order.
+    pub queue: &'a [String],
+    /// Music: no video output at all.
+    pub audio_only: bool,
 }
 
 pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<String> {
-    let Launch { config, mode, cookies, url } = *launch;
+    let Launch { config, mode, cookies, queue, audio_only } = *launch;
     let lang = &config.sub_lang;
     let raw = raw_options(config, cookies);
     let mut args = vec![
@@ -125,6 +128,7 @@ pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<S
         (true, Mode::Embedded) => "--hwdec=auto-copy".into(),
     });
     match mode {
+        _ if audio_only => args.push("--vid=no".into()),
         Mode::Window => args.push("--force-window=immediate".into()),
         Mode::Embedded => {
             args.extend(["--vo=kitty", "--vo-kitty-alt-screen=no", "--vo-kitty-config-clear=no"].map(String::from));
@@ -136,7 +140,8 @@ pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<S
             }
         }
     }
-    args.push(url.into());
+    args.push("--".into());
+    args.extend(queue.iter().cloned());
     args
 }
 
@@ -173,6 +178,8 @@ pub fn command_lines(config: &PlayerConfig, cookies: Option<&std::path::Path>, c
         PlayerCommand::Volume(delta) => line(json!({ "command": ["add", "volume", delta] })),
         PlayerCommand::ToggleMute => line(json!({ "command": ["cycle", "mute"] })),
         PlayerCommand::CycleSubtitles => line(json!({ "command": ["cycle", "sub"] })),
+        PlayerCommand::NextTrack => line(json!({ "command": ["playlist-next"] })),
+        PlayerCommand::PrevTrack => line(json!({ "command": ["playlist-prev"] })),
         PlayerCommand::Language(_) | PlayerCommand::SubLang(_) => {
             let sid = if config.language == Language::Subtitles { "auto" } else { "no" };
             vec![
@@ -206,7 +213,8 @@ pub struct Player {
 impl Player {
     pub fn spawn(launch: &Launch, geometry: Option<Geometry>) -> std::io::Result<Self> {
         let ipc_path = ipc_path();
-        let mode = launch.mode;
+        // Music has no picture to place: treat it like a window that never shows.
+        let mode = if launch.audio_only { Mode::Window } else { launch.mode };
         let stdout = match mode {
             Mode::Embedded => Stdio::inherit(), // frames go to our terminal
             Mode::Window => Stdio::null(),
@@ -389,8 +397,20 @@ mod tests {
         assert_eq!(g, Geometry { left: 26, top: 3, cols: 80, rows: 20, width_px: 800, height_px: 440 });
     }
 
+    const QUEUE: &[String] = &[];
+
     fn launch(config: &PlayerConfig, mode: Mode) -> Launch<'_> {
-        Launch { config, mode, cookies: None, url: "URL" }
+        Launch { config, mode, cookies: None, queue: QUEUE, audio_only: false }
+    }
+
+    #[test]
+    fn queue_goes_last_after_a_separator() {
+        let config = PlayerConfig::default();
+        let queue = ["/m/a.mp3".to_string(), "-raro.mp3".to_string()];
+        let args = mpv_args(&Launch { queue: &queue, audio_only: true, ..launch(&config, Mode::Embedded) }, None, "s");
+        assert_eq!(&args[args.len() - 3..], ["--", "/m/a.mp3", "-raro.mp3"]);
+        assert!(args.contains(&"--vid=no".into()));
+        assert!(!args.iter().any(|a| a.starts_with("--vo=")), "music needs no video output");
     }
 
     #[test]
@@ -438,7 +458,7 @@ mod tests {
         assert!(args.contains(&"--hwdec=auto".into()));
         assert!(args.contains(&"--force-window=immediate".into()));
         assert!(!args.iter().any(|a| a.starts_with("--vo")));
-        assert_eq!(args.last().unwrap(), "URL");
+        assert_eq!(args.last().unwrap(), "--");
     }
 
     #[test]
@@ -476,6 +496,7 @@ mod tests {
         assert_eq!(one(PlayerCommand::Volume(5)), r#"{"command":["add","volume",5]}"#);
         assert_eq!(one(PlayerCommand::ToggleMute), r#"{"command":["cycle","mute"]}"#);
         assert_eq!(one(PlayerCommand::CycleSubtitles), r#"{"command":["cycle","sub"]}"#);
+        assert_eq!(one(PlayerCommand::NextTrack), r#"{"command":["playlist-next"]}"#);
     }
 
     #[test]

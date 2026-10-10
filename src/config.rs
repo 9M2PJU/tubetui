@@ -17,6 +17,16 @@ pub struct Config {
     pub ui: UiConfig,
     pub search: SearchConfig,
     pub download: DownloadConfig,
+    pub media: MediaConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MediaConfig {
+    /// Folders with videos to play; empty means the system videos folder.
+    pub video_dirs: Vec<String>,
+    /// Folders with music; empty means the system music folder.
+    pub music_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -346,6 +356,17 @@ mod tests {
         assert_eq!(next_language("xx"), "es");
         assert_eq!(language_name("pt"), "portugués (pt)");
         assert_eq!(language_name("eu"), "eu");
+    }
+
+    #[test]
+    fn media_folders_are_lists() {
+        let c = Config::from_toml("[media]\nvideo_dirs = [\"~/Videos\", \"/mnt/pelis\"]\n").unwrap();
+        assert_eq!(c.media.video_dirs, ["~/Videos", "/mnt/pelis"]);
+        assert!(c.media.music_dirs.is_empty());
+        let path = temp_dir("lists").join("config.toml");
+        let list: toml_edit::Array = ["~/Música", "/mnt/discos"].into_iter().collect();
+        set_value(&path, "media", "music_dirs", list).unwrap();
+        assert_eq!(Config::load(&path).unwrap().media.music_dirs, ["~/Música", "/mnt/discos"]);
     }
 
     #[test]

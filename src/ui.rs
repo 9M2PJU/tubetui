@@ -7,10 +7,11 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Tabs};
 
-use crate::app::{Focus, Listing, Prompt, Section, Setting, State, language_label};
+use crate::app::{Focus, Group, Listing, Prompt, Section, Setting, State, Tab, language_label};
 use crate::config::IconSet;
 use crate::domain::{Channel, Live, Video, date_labels};
 use crate::keymap;
+use crate::media::{LocalFile, MediaKind};
 use crate::youtube::Items;
 
 pub const SIDEBAR_WIDTH: u16 = 26;
@@ -33,13 +34,13 @@ const TEAL: Color = Color::Rgb(115, 218, 202);
 const PURPLE: Color = Color::Rgb(157, 124, 216);
 
 /// One colour per menu entry, in `Section::ALL` order.
-const SECTION_COLORS: [Color; 9] = [BLUE, CYAN, RED, YELLOW, ORANGE, GREEN, TEAL, PURPLE, MUTED];
+const SECTION_COLORS: [Color; 11] = [BLUE, CYAN, RED, YELLOW, ORANGE, GREEN, TEAL, PURPLE, MAGENTA, BLUE, MUTED];
 
 pub struct Icons {
     /// In `Section::ALL` order.
-    pub sections: [&'static str; 9],
+    pub sections: [&'static str; 11],
     /// In `Setting::ALL` order.
-    pub settings: [&'static str; 12],
+    pub settings: [&'static str; 14],
     pub logo: &'static str,
     pub tab: &'static str,
     pub live: &'static str,
@@ -51,8 +52,8 @@ pub struct Icons {
 }
 
 const EMOJI: Icons = Icons {
-    sections: ["🏠", "🧭", "📺", "🕒", "⭐", "🔎", "📡", "🔧", "🚪"],
-    settings: ["👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "😀", "📁", "📝"],
+    sections: ["🏠", "🧭", "📺", "🕒", "⭐", "🔎", "📡", "📼", "🎵", "🔧", "🚪"],
+    settings: ["👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "😀", "📼", "🎵", "📁", "📝"],
     logo: "▶️",
     tab: "🎬",
     live: "🔴",
@@ -72,12 +73,14 @@ const NERD: Icons = Icons {
         "\u{f005}",
         "\u{f002}",
         "\u{f2ce}",
+        "\u{f03d}",
+        "\u{f001}",
         "\u{f013}",
         "\u{f08b}",
     ],
     settings: [
         "\u{f007}", "\u{f15b}", "\u{f021}", "\u{f08b}", "\u{f1ab}", "\u{f075}", "\u{f1de}", "\u{f008}", "\u{f025}",
-        "\u{f118}", "\u{f07b}", "\u{f044}",
+        "\u{f118}", "\u{f03d}", "\u{f001}", "\u{f07b}", "\u{f044}",
     ],
     logo: "\u{f16a}",
     tab: "\u{f144}",
@@ -90,8 +93,8 @@ const NERD: Icons = Icons {
 };
 
 const UNICODE: Icons = Icons {
-    sections: ["⌂", "◎", "▣", "◷", "★", "⌕", "⌁", "⚙", "⏻"],
-    settings: ["☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "☻", "▭", "✎"],
+    sections: ["⌂", "◎", "▣", "◷", "★", "⌕", "⌁", "▷", "♫", "⚙", "⏻"],
+    settings: ["☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "☻", "▷", "♫", "▭", "✎"],
     logo: "▶",
     tab: "▶",
     live: "●",
@@ -142,7 +145,7 @@ pub fn video_area(state: &State, area: Rect) -> Option<Rect> {
     if state.help || state.confirm.is_some() {
         return None;
     }
-    state.active_tab()?;
+    state.active_tab().filter(|t| !t.playback.audio_only)?;
     Some(Block::bordered().inner(areas(area, state.sidebar).content))
 }
 
@@ -156,13 +159,28 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
     match state.active_tab() {
         None => draw_inicio(frame, state, icons, view, areas.content),
         Some(tab) => {
+            let playback = &tab.playback;
             let title = Line::from(vec![
-                Span::raw(format!(" {} ", icons.tab)),
-                Span::styled(tab.video.title.clone(), Style::new().fg(FG).bold()),
-                Span::styled(format!(" · {} ", tab.video.channel), MAGENTA),
+                Span::raw(format!(" {} ", tab_icon(icons, tab))),
+                Span::styled(playback.title.clone(), Style::new().fg(FG).bold()),
+                Span::styled(format!(" · {} ", playback.subtitle), MAGENTA),
             ]);
-            let note = if view.embedded { "" } else { "Reproduciendo en una ventana de mpv" };
-            frame.render_widget(Paragraph::new(note).fg(MUTED).block(panel(title, BLUE)), areas.content);
+            let body = if playback.audio_only {
+                let songs = playback.queue.len();
+                Paragraph::new(vec![
+                    Line::from(""),
+                    Line::from(format!("{}  {}", icons.sections[8], playback.title)).fg(FG).bold(),
+                    Line::from(playback.subtitle.clone()).fg(MAGENTA),
+                    Line::from(""),
+                    Line::from(format!("{songs} canciones en la cola · . siguiente · , anterior")).fg(MUTED),
+                ])
+                .alignment(Alignment::Center)
+            } else if view.embedded {
+                Paragraph::new("")
+            } else {
+                Paragraph::new("Reproduciendo en una ventana de mpv").fg(MUTED)
+            };
+            frame.render_widget(body.block(panel(title, BLUE)), areas.content);
         }
     }
     draw_status(frame, state, icons, areas.status);
@@ -175,42 +193,56 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
     }
 }
 
+fn tab_icon<'a>(icons: &'a Icons, tab: &Tab) -> &'a str {
+    if tab.playback.audio_only { icons.sections[8] } else { icons.tab }
+}
+
 fn panel<'a>(title: impl Into<Line<'a>>, color: Color) -> Block<'a> {
     Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(color)).title(title)
 }
 
 fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
     let on_inicio = state.active == 0;
-    let mut items: Vec<ListItem> = Section::ALL
-        .iter()
-        .enumerate()
-        .map(|(i, section)| {
-            let mut label = section.label().to_owned();
-            if *section == Section::VerDespues && !state.later.is_empty() {
-                label.push_str(&format!(" ({})", state.later.len()));
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut group = None;
+    for (i, section) in Section::ALL.iter().enumerate() {
+        if group != Some(section.group()) {
+            group = Some(section.group());
+            if i > 0 {
+                items.push(ListItem::new(""));
             }
-            let selected = i == state.menu;
-            let focused = selected && on_inicio && state.focus == Focus::Menu;
-            let color = SECTION_COLORS[i];
-            let mut style = Style::new().fg(if selected { color } else { FG });
-            if focused {
-                style = style.bg(HIGHLIGHT).add_modifier(Modifier::BOLD);
+            if section.group() != Group::App {
+                items.push(ListItem::new(Line::from(format!(" {}", section.group().label())).fg(MUTED).bold()));
             }
+        }
+        let mut label = section.label().to_owned();
+        if *section == Section::VerDespues && !state.later.is_empty() {
+            label.push_str(&format!(" ({})", state.later.len()));
+        }
+        let selected = i == state.menu;
+        let focused = selected && on_inicio && state.focus == Focus::Menu;
+        let color = SECTION_COLORS[i];
+        let mut style = Style::new().fg(if selected { color } else { FG });
+        if focused {
+            style = style.bg(HIGHLIGHT).add_modifier(Modifier::BOLD);
+        }
+        items.push(
             ListItem::new(Line::from(vec![
                 Span::styled(if focused { "▌" } else { " " }, color),
                 Span::raw(format!("{} ", icons.sections[i])),
                 Span::raw(label),
             ]))
-            .style(style)
-        })
-        .collect();
+            .style(style),
+        );
+    }
     if !state.tabs.is_empty() {
         items.push(ListItem::new(""));
         items.push(ListItem::new(Line::from(" PESTAÑAS").fg(MUTED).bold()));
         for (i, tab) in state.tabs.iter().enumerate() {
             let active = state.active == i + 1;
             let style = if active { Style::new().fg(MAGENTA).bg(HIGHLIGHT).bold() } else { Style::new().fg(FG) };
-            let line = format!("{}{} {} {}", if active { "▌" } else { " " }, i + 1, icons.tab, tab.video.title);
+            let line =
+                format!("{}{} {} {}", if active { "▌" } else { " " }, i + 1, tab_icon(icons, tab), tab.playback.title);
             items.push(ListItem::new(line).style(style));
         }
     }
@@ -224,7 +256,11 @@ fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
 
 fn draw_tabs(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
     let titles = std::iter::once(format!("{} Inicio", icons.sections[0])).chain(
-        state.tabs.iter().enumerate().map(|(i, t)| format!("{} {} {}", i + 1, icons.tab, truncate(&t.video.title, 20))),
+        state
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| format!("{} {} {}", i + 1, tab_icon(icons, t), truncate(&t.playback.title, 20))),
     );
     let tabs = Tabs::new(titles)
         .select(state.active)
@@ -245,7 +281,14 @@ fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, are
                 ]),
                 Prompt::Channels => Line::from(format!(" {} Buscar canales ", icons.sections[6])),
                 Prompt::CookiesFile => Line::from(format!(" {} Ruta del cookies.txt ", icons.settings[1])),
-                Prompt::DownloadDir => Line::from(format!(" {} Carpeta de descargas ", icons.settings[10])),
+                Prompt::DownloadDir => Line::from(format!(" {} Carpeta de descargas ", icons.settings[12])),
+                Prompt::MediaDirs(kind) => {
+                    let (icon, what) = match kind {
+                        MediaKind::Video => (icons.settings[10], "videos"),
+                        MediaKind::Music => (icons.settings[11], "música"),
+                    };
+                    Line::from(format!(" {icon} Carpetas de {what}, separadas por coma (vacío = la del sistema) "))
+                }
             };
             frame.render_widget(Paragraph::new(state.query.as_str()).block(panel(title, CYAN)), input);
             let x = input.x + 1 + state.query.chars().count() as u16;
@@ -317,6 +360,7 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
         Items::Settings => {
             Setting::ALL.iter().enumerate().map(|(i, s)| setting_row(state, icons.settings[i], *s)).collect()
         }
+        Items::Files(files, kind) => files.iter().map(|f| file_row(icons, f, *kind)).collect(),
     };
     let focused = state.focus == Focus::List;
     let highlight = if focused { Style::new().bg(HIGHLIGHT).add_modifier(Modifier::BOLD) } else { Style::new() };
@@ -369,6 +413,18 @@ fn profile_row<'a>(state: &State, icons: &Icons, spec: &'a str) -> ListItem<'a> 
         Span::styled(format!(" {current}"), GREEN),
         Span::raw(format!("{} ", icons.user)),
         Span::styled(label, FG),
+    ]))
+}
+
+fn file_row<'a>(icons: &Icons, file: &'a LocalFile, kind: MediaKind) -> ListItem<'a> {
+    let icon = match kind {
+        MediaKind::Video => icons.sections[7],
+        MediaKind::Music => icons.sections[8],
+    };
+    ListItem::new(Line::from(vec![
+        Span::raw(format!(" {icon} ")),
+        Span::styled(format!("{} ", pad(&file.folder, 28)), MAGENTA),
+        Span::styled(file.name.as_str(), FG),
     ]))
 }
 
@@ -435,6 +491,8 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
                 vec![("Enter".into(), "ver sus videos"), ("s".into(), "suscribirse / desuscribirse"), back]
             }
             Some(Items::Profiles(_)) => vec![("Enter".into(), "usar esta sesión"), back],
+            Some(Items::Files(_, MediaKind::Music)) => vec![("Enter".into(), "escuchar desde esta canción"), back],
+            Some(Items::Files(_, MediaKind::Video)) => vec![("Enter".into(), "ver"), back],
             _ => vec![("Enter".into(), "cambiar / abrir"), back],
         }
     };
@@ -764,6 +822,27 @@ mod tests {
         let screen = render(&s);
         assert!(screen.contains("brave:Default"));
         assert!(screen.contains("original + subtítulos"));
+    }
+
+    #[test]
+    fn menu_shows_group_headers() {
+        let screen = render(&state());
+        assert!(screen.contains("YOUTUBE"));
+        assert!(screen.contains("EN TU EQUIPO"));
+        assert!(screen.contains("▷ Mis videos") && screen.contains("♫ Mi música"));
+    }
+
+    #[test]
+    fn music_tab_shows_the_song_and_takes_no_video_area() {
+        let file = |n: &str| LocalFile { path: format!("/m/{n}.mp3").into(), name: n.into(), folder: "Disco".into() };
+        let mut s = with_items(Items::Files(vec![file("Tema uno"), file("Tema dos")], MediaKind::Music));
+        let screen = render(&s);
+        assert!(screen.contains("♫ Disco"), "{screen}");
+        assert!(screen.contains("escuchar desde esta canción"));
+        s.update(Action::Enter);
+        let screen = render(&s);
+        assert!(screen.contains("2 canciones en la cola"), "{screen}");
+        assert_eq!(video_area(&s, Rect::new(0, 0, 100, 30)), None);
     }
 
     #[test]

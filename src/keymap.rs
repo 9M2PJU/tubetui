@@ -63,6 +63,7 @@ pub const IN_TAB: &[(&str, &str)] = &[
     ("j", "subtítulos sí / no"),
     ("i", "modo: subtítulos → original → doblado"),
     ("o", "otro idioma (es → en → pt …)"),
+    (". ,", "música: siguiente / anterior"),
 ];
 
 pub fn map(key: KeyEvent, ctx: KeyContext) -> Option<Action> {
@@ -130,6 +131,8 @@ fn player(code: KeyCode) -> Option<Action> {
         KeyCode::Char('j') => Some(Action::CycleSubtitles),
         KeyCode::Char('i') => Some(Action::CycleLanguage),
         KeyCode::Char('o') => Some(Action::CycleSubLang),
+        KeyCode::Char('.') => Some(Action::NextTrack),
+        KeyCode::Char(',') => Some(Action::PrevTrack),
         _ => None,
     }
 }
@@ -270,6 +273,8 @@ mod tests {
         assert_eq!(map(char('j'), TAB), Some(Action::CycleSubtitles));
         assert_eq!(map(char('i'), TAB), Some(Action::CycleLanguage));
         assert_eq!(map(char('o'), TAB), Some(Action::CycleSubLang));
+        assert_eq!(map(char('.'), TAB), Some(Action::NextTrack));
+        assert_eq!(map(char(','), TAB), Some(Action::PrevTrack));
         assert_eq!(map(key(KeyCode::Enter), TAB), None);
     }
 

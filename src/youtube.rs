@@ -88,6 +88,8 @@ pub enum Items {
     Profiles(Vec<String>),
     /// The settings screen; rows come from `app::Setting::ALL`.
     Settings,
+    /// Local media files.
+    Files(Vec<crate::media::LocalFile>, crate::media::MediaKind),
 }
 
 impl Items {
@@ -97,6 +99,7 @@ impl Items {
             Self::Channels(c) => c.len(),
             Self::Profiles(p) => p.len(),
             Self::Settings => crate::app::Setting::ALL.len(),
+            Self::Files(files, _) => files.len(),
         }
     }
 

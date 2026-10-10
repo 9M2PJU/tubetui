@@ -9,6 +9,7 @@ pub mod app;
 pub mod config;
 pub mod domain;
 pub mod keymap;
+pub mod media;
 pub mod player;
 pub mod session;
 pub mod store;
