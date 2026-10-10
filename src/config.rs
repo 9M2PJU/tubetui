@@ -53,7 +53,8 @@ pub struct PlayerConfig {
     /// Preferred video codec prefix (`avc1` decodes in hardware almost
     /// everywhere). Empty means any codec.
     pub prefer_codec: String,
-    /// Hardware decoding.
+    /// Hardware decoding, in window mode (embedded video decodes in software
+    /// to stay in sync).
     pub hwdec: bool,
     pub language: Language,
     /// Subtitle / dubbing language code.

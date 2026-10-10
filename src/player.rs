@@ -5,7 +5,9 @@
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use ratatui::layout::Rect;
 use serde_json::{Value, json};
@@ -127,17 +129,21 @@ pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<S
         "--really-quiet".into(),
         "--input-terminal=no".into(),
     ];
-    // Embedded frames are copied back to the CPU, so they need the `-copy` decoders.
+    // Embedded frames are scaled on the CPU. Copying hardware-decoded frames
+    // back is slower than decoding them in software: measured on Intel, the
+    // picture fell behind the sound (1.7 s after 20 s); in software it stays in sync.
     args.push(match (config.hwdec, mode) {
-        (false, _) => "--hwdec=no".into(),
         (true, Mode::Window) => "--hwdec=auto".into(),
-        (true, Mode::Embedded) => "--hwdec=auto-copy".into(),
+        _ => "--hwdec=no".into(),
     });
     match mode {
         _ if audio_only => args.push("--vid=no".into()),
         Mode::Window => args.push("--force-window=immediate".into()),
         Mode::Embedded => {
-            args.extend(["--vo=kitty", "--vo-kitty-alt-screen=no", "--vo-kitty-config-clear=no"].map(String::from));
+            args.extend(
+                ["--vo=kitty", "--vo-kitty-alt-screen=no", "--vo-kitty-config-clear=no", "--sws-scaler=fast-bilinear"]
+                    .map(String::from),
+            );
             if cfg!(unix) {
                 args.push("--vo-kitty-use-shm=yes".into());
             }
@@ -233,6 +239,9 @@ pub struct Player {
     shown_at: Option<Geometry>,
     /// We paused it because another video took over; a user pause is left alone.
     paused_by_us: bool,
+    opened_at: Instant,
+    /// mpv reports a playback position: the video is loaded.
+    started: Arc<AtomicBool>,
 }
 
 impl Player {
@@ -252,7 +261,26 @@ impl Player {
             .spawn()?;
         let shown_at = if mode == Mode::Embedded { geometry } else { None };
         let (config, cookies) = (launch.config.clone(), launch.cookies.map(Into::into));
-        Ok(Self { child, ipc_path, ipc: None, mode, config, cookies, shown_at, paused_by_us: false })
+        let started = Arc::new(AtomicBool::new(false));
+        watch_start(ipc_path.clone(), Arc::clone(&started));
+        let opened_at = Instant::now();
+        Ok(Self {
+            child,
+            ipc_path,
+            ipc: None,
+            mode,
+            config,
+            cookies,
+            shown_at,
+            paused_by_us: false,
+            opened_at,
+            started,
+        })
+    }
+
+    /// How long it has been loading, until it starts playing.
+    pub fn opening(&self) -> Option<Duration> {
+        (!self.started.load(Ordering::Relaxed)).then(|| self.opened_at.elapsed())
     }
 
     pub fn send(&mut self, command: PlayerCommand) {
@@ -274,19 +302,8 @@ impl Player {
         }
     }
 
-    /// Reads a property on a separate connection; `None` if mpv does not answer quickly.
     fn query(&self, property: &str) -> Option<Value> {
-        use std::io::{BufRead, BufReader};
-        let mut stream = connect_stream(&self.ipc_path).ok()?;
-        #[cfg(unix)]
-        stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).ok()?;
-        writeln!(stream, "{}", json!({ "command": ["get_property", property], "request_id": 1 })).ok()?;
-        BufReader::new(stream)
-            .lines()
-            .map_while(Result::ok)
-            .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
-            .find(|reply| reply["request_id"] == 1)
-            .map(|reply| reply["data"].clone())
+        query(&self.ipc_path, property)
     }
 
     /// Shows the video at `geometry`, resuming it if we had paused it.
@@ -366,15 +383,45 @@ impl Drop for Player {
     /// image; kills it if it does not exit promptly.
     fn drop(&mut self) {
         self.write(&json!({ "command": ["quit"] }).to_string());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while std::time::Instant::now() < deadline && !self.has_exited() {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline && !self.has_exited() {
+            std::thread::sleep(Duration::from_millis(20));
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
         #[cfg(unix)]
         let _ = std::fs::remove_file(&self.ipc_path);
     }
+}
+
+/// Reads a property on a separate connection; `None` if mpv does not answer quickly.
+fn query(ipc_path: &str, property: &str) -> Option<Value> {
+    use std::io::{BufRead, BufReader};
+    let mut stream = connect_stream(ipc_path).ok()?;
+    #[cfg(unix)]
+    stream.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
+    writeln!(stream, "{}", json!({ "command": ["get_property", property], "request_id": 1 })).ok()?;
+    BufReader::new(stream)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .find(|reply| reply["request_id"] == 1)
+        .map(|reply| reply["data"].clone())
+}
+
+/// Sets `started` once mpv has a playback position. Gives up when the
+/// player is dropped or after two minutes.
+fn watch_start(ipc_path: String, started: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < deadline && Arc::strong_count(&started) > 1 {
+            if query(&ipc_path, "time-pos").is_some_and(|v| v.is_f64()) {
+                started.store(true, Ordering::Relaxed);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    });
 }
 
 fn ipc_path() -> String {
@@ -412,6 +459,34 @@ mod tests {
 
     fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |key| vars.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
+    }
+
+    /// A fake mpv that answers every `get_property` with `data`.
+    #[cfg(unix)]
+    fn fake_mpv(data: Value) -> String {
+        use std::io::{BufRead, BufReader};
+        let path = ipc_path();
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().map_while(Result::ok) {
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                writeln!(stream, "{}", json!({ "data": data, "request_id": 1, "error": "success" })).unwrap();
+            }
+        });
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_is_detected_when_mpv_reports_a_position() {
+        let loading = Arc::new(AtomicBool::new(false));
+        watch_start(fake_mpv(Value::Null), Arc::clone(&loading));
+        let playing = Arc::new(AtomicBool::new(false));
+        watch_start(fake_mpv(json!(0.5)), Arc::clone(&playing));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(playing.load(Ordering::Relaxed));
+        assert!(!loading.load(Ordering::Relaxed), "no position yet: still loading");
     }
 
     #[test]
@@ -511,7 +586,8 @@ mod tests {
             "--vo=kitty",
             "--vo-kitty-alt-screen=no",
             "--vo-kitty-config-clear=no",
-            "--hwdec=auto-copy",
+            "--hwdec=no",
+            "--sws-scaler=fast-bilinear",
             "--vo-kitty-left=1",
             "--vo-kitty-top=2",
             "--vo-kitty-width=400",
@@ -525,7 +601,7 @@ mod tests {
     #[test]
     fn hwdec_can_be_disabled() {
         let config = PlayerConfig { hwdec: false, ..Default::default() };
-        assert!(mpv_args(&launch(&config, Mode::Embedded), None, "s").contains(&"--hwdec=no".into()));
+        assert!(mpv_args(&launch(&config, Mode::Window), None, "s").contains(&"--hwdec=no".into()));
     }
 
     #[test]

@@ -118,6 +118,17 @@ struct Runtime {
     window_fullscreen: bool,
     /// When the list being loaded was requested, for the loading indicator.
     loading_since: Option<Instant>,
+    /// Players of closed tabs, quitting in the background.
+    closing: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Runtime {
+    /// Every mpv must be gone before the final cleanup, or a late frame stays.
+    fn drop(&mut self) {
+        for handle in self.closing.drain(..) {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl Runtime {
@@ -138,6 +149,7 @@ impl Runtime {
             clear_at: None,
             window_fullscreen: false,
             loading_since: None,
+            closing: Vec::new(),
         };
         runtime.start_session(false);
         runtime
@@ -149,6 +161,7 @@ impl Runtime {
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
         let mut dirty = true;
+        let mut was_opening = false;
         while !self.state.quit {
             // Animate the loading indicator.
             match (&self.state.loading, self.loading_since) {
@@ -156,10 +169,14 @@ impl Runtime {
                 (None, Some(_)) => self.loading_since = None,
                 _ => {}
             }
+            // The video of the active tab still loading: animate its bar, then
+            // redraw once more when it starts.
+            let opening = self.state.active_tab().and_then(|t| self.players.get(&t.id)).and_then(Player::opening);
             // Each loop waits up to 100 ms for input: one spinner frame.
-            if self.loading_since.is_some() {
+            if self.loading_since.is_some() || opening.is_some() || was_opening {
                 dirty = true;
             }
+            was_opening = opening.is_some();
             if self.resized_at.is_some_and(|t| t.elapsed() >= RESIZE_SETTLE) {
                 self.resized_at = None;
                 dirty = true;
@@ -173,7 +190,7 @@ impl Runtime {
             // Redraw only on change: every redraw competes with mpv for the terminal.
             if dirty {
                 let loading = self.loading_since.map(|t| t.elapsed());
-                let view = ui::View { embedded: self.mode() == Mode::Embedded, now: now(), loading };
+                let view = ui::View { embedded: self.mode() == Mode::Embedded, now: now(), loading, opening };
                 let t = Instant::now();
                 terminal.draw(|f| ui::draw(f, &self.state, &view))?;
                 dbg(format!("draw {:?}", t.elapsed()));
@@ -217,11 +234,12 @@ impl Runtime {
                 }
             }
             // Players whose tab is gone (the video ended or mpv failed).
-            let before = self.players.len();
-            self.players.retain(|id, _| self.state.tabs.iter().any(|t| t.id == *id));
-            if self.players.len() < before {
-                player::clear_images();
+            let gone: Vec<TabId> =
+                self.players.keys().filter(|id| !self.state.tabs.iter().any(|t| t.id == **id)).copied().collect();
+            for id in gone {
+                self.stop(id);
             }
+            self.closing.retain(|handle| !handle.is_finished());
             // Leaving fullscreen any way (Esc, another tab, closing) restores the window.
             if self.window_fullscreen && !self.state.fullscreen {
                 player::set_window_fullscreen(false);
@@ -330,12 +348,7 @@ impl Runtime {
                     Err(e) => self.send(Action::PlayerClosed(id, Some(format!("No se pudo iniciar mpv: {e}")))),
                 }
             }
-            Effect::Close(id) => {
-                // Dropping stops mpv; its last frame would stay on top of everything.
-                if self.players.remove(&id).is_some() {
-                    player::clear_images();
-                }
-            }
+            Effect::Close(id) => self.stop(id),
             Effect::Command(id, command) => {
                 if let PlayerCommand::Fullscreen(on) = command
                     && self.mode() == Mode::Embedded
@@ -348,6 +361,18 @@ impl Runtime {
             }
         }
         Ok(())
+    }
+
+    /// Stops the player of `id` without waiting for mpv to exit: a frozen UI
+    /// makes people press the close key again and lose another tab.
+    fn stop(&mut self, id: TabId) {
+        let Some(mut player) = self.players.remove(&id) else { return };
+        // No more frames; the last one would stay on top of everything.
+        if player.hide(false) {
+            player::clear_images();
+            self.clear_at = Some(Instant::now() + LATE_FRAME);
+        }
+        self.closing.push(std::thread::spawn(move || drop(player)));
     }
 
     /// Reads the login in `config.session` and my channels in the
