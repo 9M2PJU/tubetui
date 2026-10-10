@@ -146,11 +146,25 @@ pub fn video_area(state: &State, area: Rect) -> Option<Rect> {
         return None;
     }
     state.active_tab().filter(|t| !t.playback.audio_only)?;
+    if state.fullscreen {
+        return Some(area);
+    }
     Some(Block::bordered().inner(areas(area, state.sidebar).content))
 }
 
 pub fn draw(frame: &mut Frame, state: &State, view: &View) {
     let icons = icons(state.config.ui.icons);
+    if state.fullscreen {
+        // Nothing but the video (embedded) or a hint (window mode).
+        if !view.embedded {
+            let note = Paragraph::new("Pantalla completa en la ventana de mpv · f o Esc para salir").fg(MUTED);
+            frame.render_widget(note.alignment(Alignment::Center), frame.area());
+        }
+        if state.help {
+            draw_help(frame);
+        }
+        return;
+    }
     let areas = areas(frame.area(), state.sidebar);
     if let Some(side) = areas.sidebar {
         draw_sidebar(frame, state, icons, side);
@@ -786,7 +800,7 @@ mod tests {
     #[test]
     fn hints_follow_the_context() {
         let mut s = state();
-        assert_eq!(hint_keys(&s), ["↑ ↓", "Enter", "/", "C-y ?"]);
+        assert_eq!(hint_keys(&s), ["↑ ↓", "Enter", "Tab", "/", "C-y ?"]);
         s.update(Action::Prefix);
         assert!(hint_keys(&s).contains(&"b".to_string()) && hint_keys(&s).contains(&"0-9".to_string()));
         let tab = with_tab();
@@ -843,6 +857,15 @@ mod tests {
         let screen = render(&s);
         assert!(screen.contains("2 canciones en la cola"), "{screen}");
         assert_eq!(video_area(&s, Rect::new(0, 0, 100, 30)), None);
+    }
+
+    #[test]
+    fn fullscreen_gives_the_whole_terminal_to_the_video() {
+        let mut s = with_tab();
+        s.update(Action::ToggleFullscreen);
+        let area = Rect::new(0, 0, 100, 30);
+        assert_eq!(video_area(&s, area), Some(area));
+        assert!(!render(&s).contains("tubetui"), "no sidebar or bars");
     }
 
     #[test]

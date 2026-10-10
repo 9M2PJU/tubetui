@@ -284,6 +284,12 @@ pub enum Action {
     CycleLanguage,
     /// Next subtitle / dubbing language (es → en → pt …) for this and later videos.
     CycleSubLang,
+    /// Jump to the section menu from anywhere.
+    FocusMenu,
+    /// Switch focus between the menu and the list.
+    ToggleFocus,
+    /// The video fills the whole terminal (or screen, in window mode).
+    ToggleFullscreen,
     Quit,
 }
 
@@ -340,6 +346,8 @@ pub enum PlayerCommand {
     Language(Language),
     /// Same, with another subtitle / dubbing language code.
     SubLang(&'static str),
+    /// Only meaningful for the mpv window.
+    Fullscreen(bool),
 }
 
 /// What a tab plays.
@@ -414,6 +422,8 @@ pub struct State {
     pub sidebar: bool,
     pub prefix: bool,
     pub help: bool,
+    /// The active video fills the terminal.
+    pub fullscreen: bool,
     pub focus: Focus,
     /// Selected entry of `Section::ALL`.
     pub menu: usize,
@@ -446,6 +456,7 @@ impl State {
             config,
             prefix: false,
             help: false,
+            fullscreen: false,
             menu: 0,
             prompt: None,
             query: String::new(),
@@ -527,6 +538,15 @@ impl State {
 
     pub fn update(&mut self, action: Action) -> Vec<Effect> {
         self.prefix = matches!(action, Action::Prefix);
+        let effects = self.apply(action);
+        // Fullscreen belongs to a video tab; leaving it ends fullscreen.
+        if self.active_tab().is_none() {
+            self.fullscreen = false;
+        }
+        effects
+    }
+
+    fn apply(&mut self, action: Action) -> Vec<Effect> {
         match action {
             Action::Prefix | Action::CancelPrefix => {}
             Action::ToggleSidebar => {
@@ -534,6 +554,23 @@ impl State {
                 self.focus = if self.sidebar && self.stack.is_empty() { Focus::Menu } else { Focus::List };
             }
             Action::ToggleHelp => self.help = !self.help,
+            Action::FocusMenu => {
+                self.active = 0;
+                self.prompt = None;
+                self.sidebar = true;
+                self.focus = Focus::Menu;
+            }
+            Action::ToggleFocus => {
+                self.focus = match self.focus {
+                    Focus::Menu if !self.stack.is_empty() => Focus::List,
+                    Focus::List if self.sidebar => Focus::Menu,
+                    focus => focus,
+                };
+            }
+            Action::ToggleFullscreen => {
+                self.fullscreen = !self.fullscreen && self.active_tab().is_some();
+                return self.command(PlayerCommand::Fullscreen(self.fullscreen));
+            }
             Action::Up => self.move_selection(-1),
             Action::Down => self.move_selection(1),
             Action::Enter => return self.enter(),
@@ -942,6 +979,10 @@ impl State {
 
     fn back(&mut self) {
         if self.prompt.take().is_some() {
+            return;
+        }
+        if self.fullscreen {
+            self.fullscreen = false;
             return;
         }
         if self.focus == Focus::List {
@@ -1724,6 +1765,42 @@ mod tests {
         let list = SettingValue::List(vec!["~/Música".into(), "/mnt/discos".into()]);
         assert_eq!(s.update(Action::Enter), [saved("media", "music_dirs", list)]);
         assert_eq!(s.setting_value(Setting::MusicDirs), "~/Música, /mnt/discos");
+    }
+
+    #[test]
+    fn menu_is_reachable_from_anywhere() {
+        let mut s = with_videos(&["a"]);
+        play(&mut s, 0);
+        s.update(Action::ToggleSidebar);
+        s.update(Action::FocusMenu);
+        assert_eq!((s.active, s.focus, s.sidebar), (0, Focus::Menu, true));
+    }
+
+    #[test]
+    fn tab_switches_between_menu_and_list() {
+        let mut s = state();
+        s.update(Action::ToggleFocus);
+        assert_eq!(s.focus, Focus::Menu, "nothing to focus yet");
+        let mut s = with_videos(&["a"]);
+        s.update(Action::ToggleFocus);
+        assert_eq!(s.focus, Focus::Menu);
+        s.update(Action::ToggleFocus);
+        assert_eq!(s.focus, Focus::List);
+    }
+
+    #[test]
+    fn fullscreen_only_for_a_video_and_esc_leaves_it() {
+        let mut s = with_videos(&["a"]);
+        s.update(Action::ToggleFullscreen);
+        assert!(!s.fullscreen, "no video on Inicio");
+        let a = play(&mut s, 0);
+        assert_eq!(s.update(Action::ToggleFullscreen), [Effect::Command(a, PlayerCommand::Fullscreen(true))]);
+        assert!(s.fullscreen);
+        s.update(Action::Back);
+        assert!(!s.fullscreen);
+        s.update(Action::ToggleFullscreen);
+        s.update(Action::GoTab(0));
+        assert!(!s.fullscreen, "leaving the tab ends fullscreen");
     }
 
     #[test]

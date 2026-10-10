@@ -1,7 +1,7 @@
 //! mpv, driven through its JSON IPC.
 //!
 //! In embedded mode mpv draws into a pane using the kitty graphics protocol;
-//! hidden tabs drop their video track (`vid=no`) so they stop decoding.
+//! hidden tabs switch to a null video output, so coming back is quick.
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
@@ -179,6 +179,7 @@ pub fn command_lines(config: &PlayerConfig, cookies: Option<&std::path::Path>, c
         PlayerCommand::ToggleMute => line(json!({ "command": ["cycle", "mute"] })),
         PlayerCommand::CycleSubtitles => line(json!({ "command": ["cycle", "sub"] })),
         PlayerCommand::NextTrack => line(json!({ "command": ["playlist-next"] })),
+        PlayerCommand::Fullscreen(on) => line(set_property("fullscreen", on.into())),
         PlayerCommand::PrevTrack => line(json!({ "command": ["playlist-prev"] })),
         PlayerCommand::Language(_) | PlayerCommand::SubLang(_) => {
             let sid = if config.language == Language::Subtitles { "auto" } else { "no" };
@@ -276,15 +277,20 @@ impl Player {
             for (name, value) in geometry.options() {
                 self.write(&set_property(&format!("options/vo-kitty-{name}"), value.into()).to_string());
             }
-            // Recreating the video output applies the new geometry and keeps the position.
-            self.write(&set_property("vid", "no".into()).to_string());
-            self.write(&set_property("vid", "auto".into()).to_string());
+            // kitty's output reads its geometry only when created, so recreate
+            // the output alone. Toggling the video track instead makes mpv seek
+            // the stream again: measured 6 s on YouTube, against 1.4 s for this.
+            if self.shown_at.is_some() {
+                self.write(&set_property("vo", "null".into()).to_string());
+            }
+            self.write(&set_property("vo", "kitty".into()).to_string());
             self.shown_at = Some(geometry);
         }
         self.resume();
     }
 
-    /// Stops drawing and decoding video. With `keep_audio` it keeps playing
+    /// Stops drawing video (it keeps decoding, so showing it again is quick).
+    /// With `keep_audio` it keeps playing
     /// (background listening); otherwise it is paused until shown again.
     /// Returns whether it was on screen (its last frame must be cleared).
     pub fn hide(&mut self, keep_audio: bool) -> bool {
@@ -293,7 +299,7 @@ impl Player {
         }
         let was_shown = self.shown_at.take().is_some();
         if was_shown {
-            self.write(&set_property("vid", "no".into()).to_string());
+            self.write(&set_property("vo", "null".into()).to_string());
         }
         if keep_audio {
             self.resume();

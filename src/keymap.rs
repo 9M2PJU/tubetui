@@ -27,6 +27,8 @@ pub const VOLUME_STEP: i32 = 5;
 /// `Ctrl+y` commands. Digits (`0`–`9`, go to tab) are handled apart.
 pub const PREFIX: &[(char, Action, &str)] = &[
     ('b', Action::ToggleSidebar, "mostrar / ocultar el menú"),
+    ('m', Action::FocusMenu, "ir al menú"),
+    ('f', Action::ToggleFullscreen, "pantalla completa"),
     ('n', Action::NextTab, "pestaña siguiente"),
     ('p', Action::PrevTab, "pestaña anterior"),
     ('x', Action::CloseTab, "cerrar la pestaña"),
@@ -43,12 +45,14 @@ pub const ON_VIDEO: &[(&str, &str)] = &[
     ("c", "ver los videos del canal"),
 ];
 
-pub const IN_MENU: &[(&str, &str)] = &[("↑ ↓", "elegir sección"), ("Enter", "abrir"), ("/", "buscar videos")];
+pub const IN_MENU: &[(&str, &str)] =
+    &[("↑ ↓", "elegir sección"), ("Enter", "abrir"), ("Tab", "ir a la lista"), ("/", "buscar videos")];
 
 pub const IN_LISTS: &[(&str, &str)] = &[
     ("↑ ↓  j k", "moverse"),
     ("Enter", "ver video · abrir canal · cambiar opción"),
     ("Esc  ←  h", "volver"),
+    ("Tab", "ir al menú"),
     ("/", "buscar (dentro de un canal: en ese canal)"),
 ];
 
@@ -57,6 +61,7 @@ pub const IN_SEARCH: &[(&str, &str)] =
 
 pub const IN_TAB: &[(&str, &str)] = &[
     ("espacio", "pausa"),
+    ("f  Esc", "pantalla completa / salir"),
     ("← →", "retroceder / avanzar 5 s"),
     ("↑ ↓", "subir / bajar volumen"),
     ("m", "silenciar"),
@@ -132,6 +137,8 @@ fn player(code: KeyCode) -> Option<Action> {
         KeyCode::Char('i') => Some(Action::CycleLanguage),
         KeyCode::Char('o') => Some(Action::CycleSubLang),
         KeyCode::Char('.') => Some(Action::NextTrack),
+        KeyCode::Char('f') => Some(Action::ToggleFullscreen),
+        KeyCode::Esc => Some(Action::Back),
         KeyCode::Char(',') => Some(Action::PrevTrack),
         _ => None,
     }
@@ -144,6 +151,7 @@ fn lists(code: KeyCode) -> Option<Action> {
         KeyCode::Enter => Some(Action::Enter),
         KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => Some(Action::Back),
         KeyCode::Char('/') => Some(Action::FocusSearch),
+        KeyCode::Tab => Some(Action::ToggleFocus),
         _ => None,
     }
 }
@@ -152,7 +160,7 @@ fn lists(code: KeyCode) -> Option<Action> {
 pub fn help() -> Vec<(&'static str, Vec<(String, &'static str)>)> {
     let rows = |table: &[(&str, &'static str)]| table.iter().map(|(k, d)| (k.to_string(), *d)).collect();
     let mut commands: Vec<(String, &'static str)> = PREFIX.iter().map(|(k, _, d)| (k.to_string(), *d)).collect();
-    commands.insert(4, ("0-9".into(), "ir a la pestaña (0 = Inicio)"));
+    commands.insert(6, ("0-9".into(), "ir a la pestaña (0 = Inicio)"));
     vec![
         ("Comandos: Ctrl+y y después una tecla", commands),
         ("Menú", rows(IN_MENU)),
@@ -250,6 +258,7 @@ mod tests {
         assert_eq!(map(key(KeyCode::Esc), LISTS), Some(Action::Back));
         assert_eq!(map(char('h'), LISTS), Some(Action::Back));
         assert_eq!(map(char('/'), LISTS), Some(Action::FocusSearch));
+        assert_eq!(map(key(KeyCode::Tab), LISTS), Some(Action::ToggleFocus));
     }
 
     #[test]
@@ -274,6 +283,8 @@ mod tests {
         assert_eq!(map(char('i'), TAB), Some(Action::CycleLanguage));
         assert_eq!(map(char('o'), TAB), Some(Action::CycleSubLang));
         assert_eq!(map(char('.'), TAB), Some(Action::NextTrack));
+        assert_eq!(map(char('f'), TAB), Some(Action::ToggleFullscreen));
+        assert_eq!(map(key(KeyCode::Esc), TAB), Some(Action::Back));
         assert_eq!(map(char(','), TAB), Some(Action::PrevTrack));
         assert_eq!(map(key(KeyCode::Enter), TAB), None);
     }
