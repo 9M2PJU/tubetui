@@ -53,6 +53,9 @@ fn main() -> anyhow::Result<()> {
     let mut runtime = Runtime::new(config, config_path, paths, later);
     let mut terminal = ratatui::init();
     let result = runtime.run(&mut terminal);
+    // Stop every mpv first so no frame arrives after the cleanup.
+    drop(runtime);
+    player::clear_images();
     ratatui::restore();
     result
 }
