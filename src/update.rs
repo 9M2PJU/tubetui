@@ -98,10 +98,9 @@ pub fn update_for(current: &str, tag: &str, assets: &[String], exe: &str, os: &s
     let from_cargo = exe.contains(".cargo/bin") || exe.contains(r".cargo\bin");
     let how = match (os, arch) {
         _ if from_cargo => cargo,
-        ("linux", "x86_64") if exe.starts_with("/usr/bin/") && has("tubetui_amd64.deb") => Install::Command(format!(
-            "curl -LO {} && sudo apt install ./tubetui_amd64.deb",
-            url("tubetui_amd64.deb")
-        )),
+        ("linux", "x86_64") if exe.starts_with("/usr/bin/") && has("tubetui_amd64.deb") => {
+            Install::Command(format!("curl -LO {} && sudo apt install ./tubetui_amd64.deb", url("tubetui_amd64.deb")))
+        }
         ("linux", "x86_64") if has("tubetui-x86_64-linux.tar.gz") => Install::Command(format!(
             "curl -L {} | tar xz && install -m755 tubetui/tubetui {exe}",
             url("tubetui-x86_64-linux.tar.gz")
@@ -160,13 +159,24 @@ mod tests {
             )
         );
         let Install::Command(tar) = how("/home/u/.local/bin/tubetui", "linux", "x86_64") else { panic!() };
-        assert!(tar.contains("tubetui-x86_64-linux.tar.gz | tar xz && install -m755 tubetui/tubetui /home/u/.local/bin/tubetui"));
-        assert_eq!(how("/home/u/.cargo/bin/tubetui", "linux", "x86_64"), Install::Command("cargo install tubetui".into()));
+        assert!(tar.contains(
+            "tubetui-x86_64-linux.tar.gz | tar xz && install -m755 tubetui/tubetui /home/u/.local/bin/tubetui"
+        ));
+        assert_eq!(
+            how("/home/u/.cargo/bin/tubetui", "linux", "x86_64"),
+            Install::Command("cargo install tubetui".into())
+        );
         assert_eq!(
             how(r"C:\Users\u\AppData\Local\Programs\tubetui\tubetui.exe", "windows", "x86_64"),
-            Install::Link("https://github.com/polblancoo/tubetui/releases/download/v0.6.0/tubetui-x86_64-windows-setup.exe".into())
+            Install::Link(
+                "https://github.com/polblancoo/tubetui/releases/download/v0.6.0/tubetui-x86_64-windows-setup.exe"
+                    .into()
+            )
         );
-        assert_eq!(how(r"C:\Users\u\.cargo\bin\tubetui.exe", "windows", "x86_64"), Install::Command("cargo install tubetui".into()));
+        assert_eq!(
+            how(r"C:\Users\u\.cargo\bin\tubetui.exe", "windows", "x86_64"),
+            Install::Command("cargo install tubetui".into())
+        );
         let Install::Command(mac) = how("/usr/local/bin/tubetui", "macos", "aarch64") else { panic!() };
         assert!(mac.contains("tubetui-aarch64-macos.tar.gz"));
         // No package for these machines: build it.
@@ -183,7 +193,10 @@ mod tests {
         let json = serde_json::json!({ "tag_name": "v0.6.0", "assets": [{ "name": "a.deb" }, { "name": "b.zip" }] });
         assert_eq!(parse_latest(&json), Some(("v0.6.0".into(), vec!["a.deb".into(), "b.zip".into()])));
         assert_eq!(parse_latest(&serde_json::json!({ "message": "Not Found" })), None);
-        assert_eq!(parse_cache("1700000000 v0.6.0 a.deb b.zip"), Some((1_700_000_000, "v0.6.0".into(), vec!["a.deb".into(), "b.zip".into()])));
+        assert_eq!(
+            parse_cache("1700000000 v0.6.0 a.deb b.zip"),
+            Some((1_700_000_000, "v0.6.0".into(), vec!["a.deb".into(), "b.zip".into()]))
+        );
         assert_eq!(parse_cache(""), None);
     }
 }

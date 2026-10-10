@@ -91,6 +91,8 @@ pub enum Items {
     Settings,
     /// The "About" page.
     About,
+    /// What the system has and lacks (mpv, yt-dlp…).
+    System,
     /// Local media files.
     Files(Vec<crate::media::LocalFile>, crate::media::MediaKind),
 }
@@ -102,7 +104,7 @@ impl Items {
             Self::Channels(c) => c.len(),
             Self::Profiles(p) => p.len(),
             Self::Settings => crate::app::Setting::ALL.len(),
-            Self::About => 0,
+            Self::About | Self::System => 0,
             Self::Files(files, _) => files.len(),
         }
     }
@@ -166,6 +168,30 @@ pub fn my_channels(cookies: &Path) -> Result<Vec<Channel>, YoutubeError> {
     }
     let mut seen = HashSet::new();
     Ok(pages.into_iter().flatten().filter(|c| seen.insert(c.id.clone())).collect())
+}
+
+/// Ids of the videos in my YouTube watch history (its first page, the most
+/// recent couple of hundred).
+pub fn watch_history(cookies: &Path) -> Result<HashSet<String>, YoutubeError> {
+    let page = InnerTube::new(cookies)?.call("browse", json!({ "browseId": "FEhistory" }))?;
+    Ok(collect_video_ids(&page))
+}
+
+/// Video ids in a page, in both of YouTube's formats.
+pub fn collect_video_ids(page: &Value) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    walk(page, &mut |map| {
+        if let Some(id) = map.get("videoRenderer").and_then(|r| r["videoId"].as_str()) {
+            ids.insert(id.to_owned());
+        }
+        if let Some(lockup) = map.get("lockupViewModel")
+            && lockup["contentType"] == "LOCKUP_CONTENT_TYPE_VIDEO"
+            && let Some(id) = lockup["contentId"].as_str()
+        {
+            ids.insert(id.to_owned());
+        }
+    });
+    ids
 }
 
 /// Ids of the channels I am subscribed to.
@@ -307,11 +333,16 @@ fn lockup_video(lockup: &Value, now: i64) -> Option<Video> {
         .into_iter()
         .flatten()
         .map(|row| {
-            row["metadataParts"].as_array().into_iter().flatten().filter_map(|p| p["text"]["content"].as_str()).collect()
+            row["metadataParts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p["text"]["content"].as_str())
+                .collect()
         })
         .collect();
-    let channel = &metadata["image"]["decoratedAvatarViewModel"]["rendererContext"]["commandContext"]["onTap"]
-        ["innertubeCommand"]["browseEndpoint"];
+    let channel = &metadata["image"]["decoratedAvatarViewModel"]["rendererContext"]["commandContext"]["onTap"]["innertubeCommand"]
+        ["browseEndpoint"];
     let mut badges = Vec::new();
     walk(&lockup["contentImage"], &mut |o| {
         if let Some(text) = o.get("thumbnailBadgeViewModel").and_then(|b| b["text"].as_str()) {
@@ -898,6 +929,16 @@ mod tests {
                 lockup("a", "LOCKUP_CONTENT_TYPE_VIDEO", json!([]), "1:00"),
                 { "continuationItemRenderer": {} }
             ] } } } } })
+    }
+
+    #[test]
+    fn collects_history_ids_in_both_formats() {
+        let page = json!({ "contents": [
+            { "videoRenderer": { "videoId": "old" } },
+            { "lockupViewModel": { "contentId": "new", "contentType": "LOCKUP_CONTENT_TYPE_VIDEO" } },
+            { "lockupViewModel": { "contentId": "PLx", "contentType": "LOCKUP_CONTENT_TYPE_PLAYLIST" } }
+        ] });
+        assert_eq!(collect_video_ids(&page), HashSet::from(["old".to_string(), "new".to_string()]));
     }
 
     #[test]

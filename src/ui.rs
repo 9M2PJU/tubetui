@@ -11,15 +11,16 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 
 use crate::app::{Confirm, Focus, Group, Listing, Prompt, Section, Setting, State, Tab, language_label};
 use crate::config::{IconSet, donations};
+use crate::doctor::Manager;
 use crate::domain::{Channel, Live, Video, clock, date_labels};
 use crate::i18n::Lang;
-use crate::{keymap, session};
 use crate::media::{LocalFile, MediaKind};
 use crate::player::Info;
 use crate::update::Install;
 #[cfg(test)]
 use crate::youtube::Watch;
 use crate::youtube::{Items, compact};
+use crate::{keymap, session};
 
 pub const SIDEBAR_WIDTH: u16 = 26;
 /// Width of the preview panel next to video lists.
@@ -37,6 +38,8 @@ const DATE_WIDTH: usize = 14;
 const FG: Color = Color::Rgb(192, 202, 245);
 const MUTED: Color = Color::Rgb(86, 95, 137);
 const HIGHLIGHT: Color = Color::Rgb(41, 46, 66);
+/// Separator lines inside dialogs: visible but quieter than text.
+const LINE: Color = Color::Rgb(59, 66, 97);
 const BLUE: Color = Color::Rgb(122, 162, 247);
 const CYAN: Color = Color::Rgb(125, 207, 255);
 const MAGENTA: Color = Color::Rgb(187, 154, 247);
@@ -55,7 +58,7 @@ pub struct Icons {
     /// In `Section::ALL` order.
     pub sections: [&'static str; 12],
     /// In `Setting::ALL` order.
-    pub settings: [&'static str; 21],
+    pub settings: [&'static str; 23],
     pub logo: &'static str,
     pub tab: &'static str,
     pub live: &'static str,
@@ -66,13 +69,15 @@ pub struct Icons {
     pub language: &'static str,
     pub volume: &'static str,
     pub muted: &'static str,
+    /// A video already watched.
+    pub watched: &'static str,
 }
 
 const EMOJI: Icons = Icons {
     sections: ["🏠", "🧭", "📺", "🕒", "⭐", "🔎", "📡", "📼", "🎵", "🔧", "💜", "🚪"],
     settings: [
         "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "🗣", "😀", "🖼", "🖱", "✨", "🌊", "💥", "📼", "🎵", "📁",
-        "⬆", "📝",
+        "🩺", "👁", "⬆", "📝",
     ],
     logo: "▶️",
     tab: "🎬",
@@ -84,6 +89,7 @@ const EMOJI: Icons = Icons {
     language: "🌐",
     volume: "🔊",
     muted: "🔇",
+    watched: "👁",
 };
 
 const NERD: Icons = Icons {
@@ -104,7 +110,7 @@ const NERD: Icons = Icons {
     settings: [
         "\u{f007}", "\u{f15b}", "\u{f021}", "\u{f08b}", "\u{f1ab}", "\u{f075}", "\u{f1de}", "\u{f008}", "\u{f025}",
         "\u{f0ac}", "\u{f118}", "\u{f03e}", "\u{f245}", "\u{f0d0}", "\u{f0e7}", "\u{f0a1}", "\u{f03d}", "\u{f001}",
-        "\u{f07b}", "\u{f01b}", "\u{f044}",
+        "\u{f07b}", "\u{f0f1}", "\u{f06e}", "\u{f01b}", "\u{f044}",
     ],
     logo: "\u{f16a}",
     tab: "\u{f144}",
@@ -116,11 +122,15 @@ const NERD: Icons = Icons {
     language: "\u{f1ab}",
     volume: "\u{f028}",
     muted: "\u{f026}",
+    watched: "\u{f06e}",
 };
 
 const UNICODE: Icons = Icons {
     sections: ["⌂", "◎", "▣", "◷", "★", "⌕", "⌁", "▷", "♫", "⚙", "♥", "⏻"],
-    settings: ["☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "↑", "✎"],
+    settings: [
+        "☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "✚", "◉", "↑",
+        "✎",
+    ],
     logo: "▶",
     tab: "▶",
     live: "●",
@@ -131,6 +141,7 @@ const UNICODE: Icons = Icons {
     language: "⇄",
     volume: "♪",
     muted: "✕",
+    watched: "◉",
 };
 
 pub fn icons(set: IconSet) -> &'static Icons {
@@ -260,7 +271,7 @@ pub fn spot(state: &State, playing: Option<&Info>, screen: Rect, x: u16, y: u16)
     let (_, rest) = split_prompt(state, areas.content);
     let list = match listing.items {
         Items::Videos(_) | Items::Channels(_) => split_preview(rest).0,
-        Items::About => return None,
+        Items::About | Items::System => return None,
         _ => rest,
     };
     list_row(Block::bordered().inner(list), listing.selected, listing.items.len(), at)
@@ -533,7 +544,10 @@ fn sidebar_items(state: &State, icons: &Icons) -> Vec<(ListItem<'static>, Option
                 items.push((ListItem::new(""), None));
             }
             if section.group() != Group::App {
-                items.push((ListItem::new(Line::from(format!(" {}", section.group().label(lang))).fg(MUTED).bold()), None));
+                items.push((
+                    ListItem::new(Line::from(format!(" {}", section.group().label(lang))).fg(MUTED).bold()),
+                    None,
+                ));
             }
         }
         let mut label = section.label(lang).to_owned();
@@ -785,11 +799,28 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
         draw_about(frame, state, icons, area);
         return;
     }
+    if listing.items == Items::System {
+        draw_system(frame, state, area);
+        return;
+    }
     let breadcrumb: Vec<&str> = state.stack.iter().map(|l| l.title.as_str()).collect();
     let title = match &state.loading {
         Some(loading) => format!(" {} ", loading_text(loading, view.loading.unwrap_or_default(), state.lang())),
         None if listing.items == Items::Settings => format!(" {} ", breadcrumb.join(" › ")),
         None => match &listing.items {
+            Items::Videos(videos) if listing.all.is_some() => {
+                let hidden = listing.all.as_ref().map_or(0, Vec::len) - videos.len();
+                let note = match (state.show_watched, hidden) {
+                    (true, _) => {
+                        format!(" · {} {}", icons.watched, state.lang().pick("con los vistos", "watched included"))
+                    }
+                    (false, 0) => String::new(),
+                    (false, n) => {
+                        format!(" · {} {n} {}", icons.watched, state.lang().pick("vistos ocultos", "watched hidden"))
+                    }
+                };
+                format!(" {} · {}{note} ", breadcrumb.join(" › "), videos.len())
+            }
             Items::Files(files, _) if files.iter().any(|f| state.marked.contains(&f.path)) => {
                 let marked = files.iter().filter(|f| state.marked.contains(&f.path)).count();
                 let label = state.lang().pick("marcados", "marked");
@@ -812,7 +843,7 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
         Items::Files(files, kind) => {
             files.iter().map(|f| file_row(icons, f, *kind, state.marked.contains(&f.path))).collect()
         }
-        Items::About => Vec::new(),
+        Items::About | Items::System => Vec::new(),
     };
     let focused = state.focus == Focus::List;
     let highlight = if focused { Style::new().bg(HIGHLIGHT).add_modifier(Modifier::BOLD) } else { Style::new() };
@@ -926,7 +957,13 @@ fn video_row<'a>(state: &State, icons: &Icons, view: &View, v: &'a Video) -> Lis
     if state.later.iter().any(|l| l.id == v.id) {
         spans.push(Span::raw(format!("{} ", icons.later)));
     }
-    spans.push(Span::styled(v.title.as_str(), FG));
+    if state.watched.contains(&v.id) {
+        // Already seen: marked and dimmed.
+        spans.push(Span::styled(format!("{} ", icons.watched), MUTED));
+        spans.push(Span::styled(v.title.as_str(), MUTED));
+    } else {
+        spans.push(Span::styled(v.title.as_str(), FG));
+    }
     spans.push(Span::styled(format!("  {}", v.duration_label()), MUTED));
     ListItem::new(Line::from(spans))
 }
@@ -959,8 +996,11 @@ fn profile_row<'a>(state: &State, icons: &Icons, spec: &'a str) -> ListItem<'a> 
     } else {
         "  "
     };
-    let label =
-        if spec.is_empty() { state.lang().pick("Sin sesión", "Not logged in").to_owned() } else { session::label(spec) };
+    let label = if spec.is_empty() {
+        state.lang().pick("Sin sesión", "Not logged in").to_owned()
+    } else {
+        session::label(spec)
+    };
     ListItem::new(Line::from(vec![
         Span::styled(format!(" {current}"), GREEN),
         Span::raw(format!("{} ", icons.user)),
@@ -1056,6 +1096,20 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
     } else {
         let back = key("Esc", "volver", "back");
         match state.listing().map(|l| &l.items) {
+            Some(Items::Videos(_)) if state.listing().is_some_and(|l| l.all.is_some()) => vec![
+                key("Enter", "ver", "play"),
+                if state.show_watched {
+                    key("v", "ocultar vistos", "hide watched")
+                } else {
+                    key("v", "mostrar vistos", "show watched")
+                },
+                key("l", "ver después", "watch later"),
+                key("s", "suscribirse", "subscribe"),
+                key("d", "descargar", "download"),
+                key("c", "canal", "channel"),
+                key("/", "buscar", "search"),
+                back,
+            ],
             Some(Items::Videos(_)) => vec![
                 key("Enter", "ver", "play"),
                 key("l", "ver después", "watch later"),
@@ -1081,6 +1135,7 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
                 back,
             ],
             Some(Items::About) => vec![back],
+            Some(Items::System) => vec![key("Enter", "revisar de nuevo", "check again"), back],
             _ => vec![key("Enter", "cambiar / abrir", "change / open"), back],
         }
     };
@@ -1113,49 +1168,75 @@ fn draw_hints(frame: &mut Frame, hints: &[(String, &str)], area: Rect) {
 /// Where the help or the confirmation dialog is drawn, if one is open.
 pub fn dialog_area(state: &State, screen: Rect) -> Option<Rect> {
     if state.help {
-        let (left, right) = help_columns(state.lang());
-        Some(centered(screen, 118, left.len().max(right.len()) as u16 + 3))
+        Some(help_area(screen, state.lang()))
     } else {
         state.confirm.as_ref().map(|_| centered(screen, 56, 5))
     }
 }
 
 /// The help screen's two balanced columns, so everything fits on a laptop screen.
-fn help_columns(lang: Lang) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
-    let lines_of = |sections: &[(&'static str, Vec<(String, &'static str)>)]| {
-        let mut lines = Vec::new();
-        for (title, rows) in sections {
-            lines.push(Line::from(*title).fg(BLUE).bold());
-            for (keys, description) in rows {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {keys:<11}"), Style::new().fg(CYAN).bold()),
-                    Span::styled(*description, FG),
-                ]));
-            }
-            lines.push(Line::from(""));
-        }
-        lines
-    };
+type HelpSection = (&'static str, Vec<(String, &'static str)>);
+
+/// The help's sections in two columns of about the same height.
+fn help_columns(lang: Lang) -> (Vec<HelpSection>, Vec<HelpSection>) {
     let mut sections = keymap::help(lang);
-    let sizes: Vec<usize> = sections.iter().map(|(_, rows)| rows.len() + 2).collect();
+    let sizes: Vec<usize> = sections.iter().map(|(_, rows)| help_box_height(rows.len()) as usize).collect();
     let split =
         (1..sections.len()).min_by_key(|&k| sizes[..k].iter().sum::<usize>().max(sizes[k..].iter().sum())).unwrap_or(1);
     let right = sections.split_off(split);
-    (lines_of(&sections), lines_of(&right))
+    (sections, right)
+}
+
+/// A section's box: its rows between two border lines.
+fn help_box_height(rows: usize) -> u16 {
+    rows as u16 + 2
+}
+
+fn help_column_height(sections: &[HelpSection]) -> u16 {
+    sections.iter().map(|(_, rows)| help_box_height(rows.len())).sum()
+}
+
+/// The help's size: the taller column inside the outer border.
+fn help_area(screen: Rect, lang: Lang) -> Rect {
+    let (left, right) = help_columns(lang);
+    centered(screen, 118, help_column_height(&left).max(help_column_height(&right)) + 2)
 }
 
 fn draw_help(frame: &mut Frame, lang: Lang) {
     let (left, right) = help_columns(lang);
-    let area = centered(frame.area(), 118, left.len().max(right.len()) as u16 + 3);
+    let area = help_area(frame.area(), lang);
     frame.render_widget(Clear, area);
     let title =
         lang.pick(" ⌨  Atajos de teclado · cualquier tecla cierra ", " ⌨  Keyboard shortcuts · any key closes ");
     let block = panel(title, MAGENTA);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [l, r] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).spacing(2).areas(inner);
-    frame.render_widget(Paragraph::new(left), l);
-    frame.render_widget(Paragraph::new(right), r);
+    let columns: [Rect; 2] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).spacing(1).areas(inner);
+    for (sections, column) in [left, right].iter().zip(columns) {
+        let heights = sections.iter().map(|(_, rows)| Constraint::Length(help_box_height(rows.len())));
+        for ((title, rows), cell) in sections.iter().zip(Layout::vertical(heights).split(column).iter()) {
+            draw_help_section(frame, title, rows, *cell);
+        }
+    }
+}
+
+/// One section of the help in its own box: keys aligned, then what they do.
+fn draw_help_section(frame: &mut Frame, title: &str, rows: &[(String, &'static str)], area: Rect) {
+    let width = rows.iter().map(|(keys, _)| Span::raw(keys.as_str()).width()).max().unwrap_or(0) + 2;
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|(keys, description)| {
+            Line::from(vec![
+                Span::styled(format!(" {}", pad_cells(keys, width)), Style::new().fg(CYAN).bold()),
+                Span::styled(*description, FG),
+            ])
+        })
+        .collect();
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(LINE))
+        .title(Line::from(format!(" {title} ")).fg(BLUE).bold());
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_confirm(frame: &mut Frame, confirm: &Confirm, lang: Lang) {
@@ -1188,6 +1269,63 @@ fn draw_confirm(frame: &mut Frame, confirm: &Confirm, lang: Lang) {
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel(title, RED)), area);
 }
 
+/// What the system has and lacks, with the command that installs it.
+fn draw_system(frame: &mut Frame, state: &State, area: Rect) {
+    let lang = state.lang();
+    let title = format!(" {} ", lang.pick("Revisión del sistema", "System check"));
+    let block = panel(title, BLUE);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some((manager, checks)) = &state.system else {
+        let wait = lang.pick("Revisando…", "Checking…");
+        frame.render_widget(Paragraph::new(wait).fg(YELLOW).alignment(Alignment::Center), inner);
+        return;
+    };
+    let mut lines = vec![Line::from("")];
+    let width = checks.iter().map(|c| c.tool.program().len()).max().unwrap_or(0) + 2;
+    for check in checks {
+        let (mark, color, note) = match (&check.found, check.outdated) {
+            (Some(_), false) => ("✓", GREEN, String::new()),
+            (Some(_), true) => {
+                ("⚠", YELLOW, lang.pick("viejo: YouTube cambia seguido", "too old: YouTube changes often").into())
+            }
+            (None, _) if check.tool.required() => ("✗", RED, lang.pick("falta · necesario", "missing · needed").into()),
+            (None, _) => ("·", MUTED, lang.pick("no está · opcional", "not installed · optional").into()),
+        };
+        let version = check.found.as_ref().and_then(|(_, v)| v.clone()).unwrap_or_default();
+        let mut row = vec![
+            Span::styled(format!("  {mark} "), Style::new().fg(color).bold()),
+            Span::styled(pad(check.tool.program(), width), Style::new().fg(FG).bold()),
+            Span::styled(pad(&version, 16), MUTED),
+            Span::styled(check.tool.purpose().get(lang), FG),
+        ];
+        if !note.is_empty() {
+            row.push(Span::styled(format!("  ({note})"), color));
+        }
+        lines.push(Line::from(row));
+        if let Some(fix) = &check.fix {
+            lines.push(Line::from(vec![Span::raw(" ".repeat(width + 5)), Span::styled(fix.as_str(), CYAN)]));
+        } else if check.found.is_none() {
+            let how =
+                lang.pick("instalalo con el gestor de paquetes de tu sistema", "install it with your package manager");
+            lines.push(Line::from(vec![Span::raw(" ".repeat(width + 5)), Span::styled(how, MUTED)]));
+        }
+    }
+    lines.push(Line::from(""));
+    let footer = match manager {
+        Manager::Unknown => lang.pick("Gestor de paquetes no reconocido", "Package manager not recognized").to_owned(),
+        manager => format!("{}: {}", lang.pick("Comandos para", "Commands for"), manager.name()),
+    };
+    lines.push(
+        Line::from(format!(
+            "  {footer} · {}",
+            lang.pick("Shift + arrastrar copia · Enter revisa de nuevo", "Shift + drag copies · Enter checks again",)
+        ))
+        .fg(MUTED),
+    );
+    frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }), inner);
+}
+
 /// Version, links and the donation addresses from `donate.toml`.
 fn draw_about(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
     let lang = state.lang();
@@ -1217,9 +1355,13 @@ fn draw_about(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
     if let Some(update) = &state.update {
         lines.push(Line::from(""));
         lines.push(
-            Line::from(format!("⬆ {} {}", lang.pick("Hay una versión nueva:", "A new version is out:"), update.version))
-                .fg(GREEN)
-                .bold(),
+            Line::from(format!(
+                "⬆ {} {}",
+                lang.pick("Hay una versión nueva:", "A new version is out:"),
+                update.version
+            ))
+            .fg(GREEN)
+            .bold(),
         );
         let (how, value) = match &update.how {
             Install::Command(command) => (lang.pick("Actualizá con:", "Update with:"), command),
@@ -1228,11 +1370,8 @@ fn draw_about(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
         lines.push(Line::from(how).fg(FG));
         lines.push(Line::from(value.as_str()).fg(CYAN));
         lines.push(
-            Line::from(lang.pick(
-                "(Shift + arrastrar para seleccionar y copiar)",
-                "(Shift + drag to select and copy)",
-            ))
-            .fg(MUTED),
+            Line::from(lang.pick("(Shift + arrastrar para seleccionar y copiar)", "(Shift + drag to select and copy)"))
+                .fg(MUTED),
         );
     }
     let wallets = donations();
@@ -1510,7 +1649,7 @@ mod tests {
         let tab = with_tab();
         assert!(hint_keys(&tab).contains(&"espacio".to_string()) && hint_keys(&tab).contains(&"m".to_string()));
         let list = with_items(Items::Videos(vec![video("a")]));
-        assert_eq!(hint_keys(&list), ["Enter", "l", "s", "d", "c", "/", "Esc", "C-y ?"]);
+        assert_eq!(hint_keys(&list), ["Enter", "v", "l", "s", "d", "c", "/", "Esc", "C-y ?"], "Inicio: a feed");
         let mut search = state();
         search.update(Action::FocusSearch);
         assert!(hint_keys(&search).contains(&"Tab".to_string()));
@@ -1758,7 +1897,8 @@ mod tests {
         s.update(Action::Watched(tab, Ok(watch)));
         let view = View { embedded: false, ..VIEW };
         let screen = render_with(&s, &view);
-        for text in ["title a", "chan a · 559K suscriptores", "5 k vistas", "A continuación · 2 · Tab", "title r2"] {
+        for text in ["title a", "chan a · 559K suscriptores", "5 k vistas", "A continuación · 2 · Tab", "title r2"]
+        {
             assert!(screen.contains(text), "{text}\n{screen}");
         }
         assert!(!screen.contains("ventana de mpv"));
@@ -1780,10 +1920,8 @@ mod tests {
     #[test]
     fn a_new_version_is_announced_with_how_to_get_it() {
         let mut s = state();
-        let update = crate::update::Update {
-            version: "9.9.9".into(),
-            how: Install::Command("cargo install tubetui".into()),
-        };
+        let update =
+            crate::update::Update { version: "9.9.9".into(), how: Install::Command("cargo install tubetui".into()) };
         s.update(Action::UpdateFound(update));
         assert!(s.status.contains("⬆ tubetui 9.9.9 disponible"), "{}", s.status);
         let screen = render(&s);
@@ -1793,6 +1931,57 @@ mod tests {
         let screen = render(&s);
         assert!(screen.contains("Hay una versión nueva: 9.9.9"), "{screen}");
         assert!(screen.contains("cargo install tubetui"));
+    }
+
+    #[test]
+    fn feeds_say_how_many_watched_videos_they_hide() {
+        let mut s = state();
+        s.watched.insert("b".into());
+        let id = match s.update(Action::Enter).as_slice() {
+            [Effect::Load { id, .. }, ..] => *id,
+            other => panic!("{other:?}"),
+        };
+        s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a"), video("b")]))));
+        let screen = render(&s);
+        assert!(screen.contains("Inicio · 1 · ◉ 1 vistos ocultos"), "{screen}");
+        assert!(hints(&s).iter().any(|(k, d)| k == "v" && *d == "mostrar vistos"));
+        s.update(Action::ToggleWatched);
+        let screen = render(&s);
+        assert!(screen.contains("◉ con los vistos"), "{screen}");
+        assert!(screen.contains("◉ title b"), "marked: {screen}");
+    }
+
+    #[test]
+    fn system_check_page_says_what_to_install() {
+        use crate::doctor::{Check, Tool};
+        let mut s = state();
+        let missing = Check { tool: Tool::Mpv, found: None, outdated: false, fix: Some("sudo apt install mpv".into()) };
+        let old = Check {
+            tool: Tool::YtDlp,
+            found: Some(("/usr/bin/yt-dlp".into(), Some("2024.04.09".into()))),
+            outdated: true,
+            fix: Some("sudo apt install pipx && pipx install yt-dlp".into()),
+        };
+        let fine = Check {
+            tool: Tool::Kitty,
+            found: Some(("/usr/bin/kitty".into(), Some("0.39.1".into()))),
+            outdated: false,
+            fix: None,
+        };
+        s.update(Action::SystemChecked(Manager::Apt, vec![missing, old, fine]));
+        let screen = render(&s);
+        for text in [
+            "✗ mpv",
+            "falta · necesario",
+            "sudo apt install mpv",
+            "⚠ yt-dlp",
+            "2024.04.09",
+            "pipx install yt-dlp",
+            "✓ kitty",
+            "Comandos para: apt",
+        ] {
+            assert!(screen.contains(text), "{text}\n{screen}");
+        }
     }
 
     #[test]

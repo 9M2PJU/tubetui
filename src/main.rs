@@ -175,6 +175,7 @@ impl Runtime {
     fn new(config: Config, config_path: Option<PathBuf>, paths: Paths, later: Vec<Video>) -> Self {
         let mut state = State::new(config, later);
         state.update(Action::SubsLoaded(store::load_subs(&paths.subs)));
+        state.update(Action::HistoryLoaded(store::load_watched(&paths.watched)));
         let (tx, rx) = mpsc::channel();
         let runtime = Self {
             config_path,
@@ -201,6 +202,10 @@ impl Runtime {
         };
         runtime.start_session(false);
         runtime.send(Action::AskBrowser);
+        runtime.background(|| {
+            let (manager, checks) = tubetui::doctor::run();
+            Action::SystemChecked(manager, checks)
+        });
         if runtime.state.config.ui.check_updates {
             // Quietly: no network or no news means nothing to say.
             let (tx, cache) = (runtime.tx.clone(), runtime.paths.cache.join("latest-release.txt"));
@@ -283,9 +288,11 @@ impl Runtime {
                 if thumbnails {
                     let tab = self.state.active_tab();
                     let current = tab.and_then(|t| t.playback.video.as_ref()).map(|v| v.id.as_str());
-                    self.thumbs.want(current.into_iter().chain(
-                        self.state.videos_from_selection(THUMBS_AHEAD).iter().map(|v| v.id.as_str()),
-                    ));
+                    self.thumbs.want(
+                        current
+                            .into_iter()
+                            .chain(self.state.videos_from_selection(THUMBS_AHEAD).iter().map(|v| v.id.as_str())),
+                    );
                     self.thumbs.show(ui::thumbnail_area(&self.state, terminal.size()?.into()));
                 } else {
                     self.thumbs.show(None);
@@ -328,9 +335,9 @@ impl Runtime {
                     }
                     Event::Mouse(m) => {
                         let double = m.kind == MouseEventKind::Down(MouseButton::Left) && {
-                            let again = self.last_click.is_some_and(|(at, x, y)| {
-                                at.elapsed() < DOUBLE_CLICK && (x, y) == (m.column, m.row)
-                            });
+                            let again = self
+                                .last_click
+                                .is_some_and(|(at, x, y)| at.elapsed() < DOUBLE_CLICK && (x, y) == (m.column, m.row));
                             // A third click starts over.
                             self.last_click = (!again).then(|| (Instant::now(), m.column, m.row));
                             again
@@ -399,6 +406,25 @@ impl Runtime {
                 self.background(move || {
                     Action::Page(id, youtube::search(&query, next.as_deref()).map_err(|e| e.to_string()))
                 });
+            }
+            Effect::CheckSystem => {
+                self.background(|| {
+                    let (manager, checks) = tubetui::doctor::run();
+                    Action::SystemChecked(manager, checks)
+                });
+            }
+            Effect::LoadHistory => {
+                if let Some(cookies) = self.cookies.clone() {
+                    // Without it only the local history hides videos.
+                    self.background(move || {
+                        Action::HistoryLoaded(youtube::watch_history(&cookies).unwrap_or_default())
+                    });
+                }
+            }
+            Effect::SaveWatched(id) => {
+                if let Err(e) = store::add_watched(&self.paths.watched, &id) {
+                    dbg(format!("watched.txt: {e}"));
+                }
             }
             Effect::Trash(paths) => {
                 self.background(move || {
@@ -511,12 +537,12 @@ impl Runtime {
         if self.mode() == Mode::Overlay {
             self.grid = player::grid_origin(player::cell_size());
         }
-        let geometry = ui::video_area(&self.state, screen)
-            .map(|a| Geometry::new(a, player::cell_size()))
-            .map(|g| match self.grid.filter(|_| self.mode() == Mode::Overlay) {
+        let geometry = ui::video_area(&self.state, screen).map(|a| Geometry::new(a, player::cell_size())).map(|g| {
+            match self.grid.filter(|_| self.mode() == Mode::Overlay) {
                 Some(grid) => g.on_screen(grid),
                 None => g,
-            });
+            }
+        });
         let launch = Launch {
             config: &self.state.config.player,
             mode: self.mode(),

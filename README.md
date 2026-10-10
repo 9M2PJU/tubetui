@@ -2,8 +2,9 @@
 
 YouTube — and your own videos and music — in the terminal, written in Rust
 with [ratatui](https://ratatui.rs). Videos play through [mpv](https://mpv.io):
-drawn **inside the app** in [kitty](https://sw.kovidgoyal.net/kitty/), or in
-their own window elsewhere. Every video opens in its own tab.
+in their own window by default (its tab shows the video's details and what to
+watch next), or drawn **inside the app** in [kitty](https://sw.kovidgoyal.net/kitty/).
+Every video opens in its own tab.
 
 > Interface in English and Spanish (`Ctrl+y l` switches). Early but usable:
 > feedback welcome.
@@ -66,6 +67,12 @@ their own window elsewhere. Every video opens in its own tab.
 - [`mpv`](https://mpv.io) and [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) in `PATH`
 - For embedded video: the [kitty](https://sw.kovidgoyal.net/kitty/) terminal
 - Optional: `wmctrl` (X11) for window fullscreen
+
+tubetui checks this itself: when something needed is missing (or yt-dlp is
+too old for YouTube) it opens a **system check** that lists what is there,
+what is not and the command that installs it with your package manager
+(apt, pacman, dnf, zypper, Homebrew or winget). It is also in Settings →
+*Check the system*.
 
 ## Install
 
@@ -150,7 +157,7 @@ browser = "brave+GNOMEKEYRING:Default"  # yt-dlp --cookies-from-browser syntax
 cookies_file = ""                       # imported cookies.txt, wins over browser
 
 [player]
-mode = "auto"            # auto | embedded | window | overlay
+mode = "window"          # window (default) | auto | embedded | overlay
 max_height = 720
 prefer_codec = "avc1"    # H.264 decodes in hardware almost everywhere
 language = "subtitles"   # subtitles | original | dubbed

@@ -62,6 +62,7 @@ pub const IN_LISTS: &[(&str, Text)] = &[
     ("Esc  ←  h", Text::new("volver", "back")),
     ("Tab", Text::new("ir al menú", "go to the menu")),
     ("/", Text::new("buscar (dentro de un canal: en ese canal)", "search (inside a channel: in that channel)")),
+    ("v", Text::new("mostrar / ocultar los ya vistos (Inicio…)", "show / hide watched videos (Home…)")),
     ("espacio", Text::new("marcar archivo (Mis videos, Mi música)", "mark a file (My videos, My music)")),
     ("x  Supr", Text::new("marcados o el elegido: a la papelera", "marked or selected: to the trash")),
 ];
@@ -208,6 +209,7 @@ fn lists(code: KeyCode) -> Option<Action> {
     match code {
         KeyCode::Char(' ') => Some(Action::ToggleMark),
         KeyCode::Char('x') | KeyCode::Delete => Some(Action::Trash),
+        KeyCode::Char('v') => Some(Action::ToggleWatched),
         KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
         KeyCode::Enter => Some(Action::Enter),
@@ -249,7 +251,8 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
-    const LISTS: KeyContext = KeyContext { prefix: false, help: false, confirm: false, typing: false, in_tab: false, related: false };
+    const LISTS: KeyContext =
+        KeyContext { prefix: false, help: false, confirm: false, typing: false, in_tab: false, related: false };
     const TYPING: KeyContext = KeyContext { typing: true, ..LISTS };
     const TAB: KeyContext = KeyContext { in_tab: true, ..LISTS };
     const PREFIXED: KeyContext = KeyContext { prefix: true, ..LISTS };

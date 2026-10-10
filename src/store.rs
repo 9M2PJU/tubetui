@@ -14,6 +14,8 @@ pub struct Paths {
     pub subs: PathBuf,
     /// Cookie exports.
     pub cache: PathBuf,
+    /// Videos watched in tubetui, one id per line, oldest first.
+    pub watched: PathBuf,
 }
 
 impl Paths {
@@ -24,7 +26,12 @@ impl Paths {
     }
 
     pub fn new(data: &Path, cache: &Path) -> Self {
-        Self { later: data.join("later.json"), subs: cache.join("subs.txt"), cache: cache.into() }
+        Self {
+            later: data.join("later.json"),
+            subs: cache.join("subs.txt"),
+            cache: cache.into(),
+            watched: data.join("watched.txt"),
+        }
     }
 }
 
@@ -48,6 +55,22 @@ pub fn save_subs(path: &Path, subs: &HashSet<String>) -> io::Result<()> {
     let mut ids: Vec<&str> = subs.iter().map(String::as_str).collect();
     ids.sort_unstable();
     write_atomic(path, &(ids.join("\n") + "\n"))
+}
+
+/// Ids kept in `watched.txt`; older ones are dropped beyond this.
+const WATCHED_MAX: usize = 5000;
+
+pub fn load_watched(path: &Path) -> HashSet<String> {
+    load_subs(path)
+}
+
+/// Adds `id` to `watched.txt`, keeping the newest [`WATCHED_MAX`].
+pub fn add_watched(path: &Path, id: &str) -> io::Result<()> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut ids: Vec<&str> = text.lines().filter(|line| !line.is_empty() && *line != id).collect();
+    ids.push(id);
+    let keep = &ids[ids.len().saturating_sub(WATCHED_MAX)..];
+    write_atomic(path, &(keep.join("\n") + "\n"))
 }
 
 /// Reads the "Ver después" list of the old `ytv` script
@@ -110,6 +133,17 @@ mod tests {
     use super::*;
     use crate::config::temp_dir;
     use crate::domain::video;
+
+    #[test]
+    fn watched_ids_are_remembered_once() {
+        let path = temp_dir("watched").join("data/watched.txt");
+        assert!(load_watched(&path).is_empty());
+        add_watched(&path, "a").unwrap();
+        add_watched(&path, "b").unwrap();
+        add_watched(&path, "a").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "b\na\n", "no repeats, newest last");
+        assert_eq!(load_watched(&path), HashSet::from(["a".to_string(), "b".to_string()]));
+    }
 
     #[test]
     fn later_round_trips_and_missing_is_empty() {

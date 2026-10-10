@@ -906,7 +906,9 @@ mod tests {
         let config = PlayerConfig::default();
         let g = Geometry::new(Rect::new(28, 3, 50, 20), (10, 20)).on_screen((118, 153));
         let args = mpv_args(&launch(&config, Mode::Overlay), Some(g), "/tmp/s");
-        for arg in ["--no-border", "--ontop", "--input-cursor-passthrough=yes", "--hwdec=auto", "--geometry=500x400+398+213"] {
+        for arg in
+            ["--no-border", "--ontop", "--input-cursor-passthrough=yes", "--hwdec=auto", "--geometry=500x400+398+213"]
+        {
             assert!(args.contains(&arg.to_string()), "{arg}: {args:?}");
         }
         assert!(!args.iter().any(|a| a.starts_with("--vo=")), "mpv's own video output");

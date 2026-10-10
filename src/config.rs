@@ -72,11 +72,12 @@ pub struct PlayerConfig {
 #[serde(rename_all = "lowercase")]
 pub enum PlayerMode {
     /// Embedded when the terminal speaks the kitty graphics protocol.
-    #[default]
     Auto,
     /// Video drawn inside the app pane.
     Embedded,
-    /// Video in its own mpv window.
+    /// Video in its own mpv window: hardware decoding, and the tab shows
+    /// the video's details and what to watch next. The default.
+    #[default]
     Window,
     /// An mpv window without borders laid over the app pane (X11): looks
     /// embedded, plays like a window.
@@ -149,6 +150,9 @@ pub struct UiConfig {
     pub mouse: bool,
     /// Ask GitHub once a day whether there is a newer version.
     pub check_updates: bool,
+    /// Inicio, Descubrir and Suscripciones leave out the videos I watched
+    /// (`v` shows them for a while).
+    pub hide_watched: bool,
 }
 
 /// Short animations, each one can be turned off.
@@ -289,7 +293,7 @@ pub struct DownloadConfig {
 impl Default for PlayerConfig {
     fn default() -> Self {
         Self {
-            mode: PlayerMode::Auto,
+            mode: PlayerMode::Window,
             max_height: 720,
             prefer_codec: "avc1".into(),
             hwdec: true,
@@ -302,7 +306,16 @@ impl Default for PlayerConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { sidebar: true, max_tabs: 9, icons: IconSet::Emoji, lang: None, thumbnails: true, mouse: true, check_updates: true }
+        Self {
+            sidebar: true,
+            max_tabs: 9,
+            icons: IconSet::Emoji,
+            lang: None,
+            thumbnails: true,
+            mouse: true,
+            check_updates: true,
+            hide_watched: true,
+        }
     }
 }
 
@@ -382,7 +395,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.session.browser, "");
         assert_eq!(c.session.cookies_file, "");
-        assert_eq!(c.player.mode, PlayerMode::Auto);
+        assert_eq!(c.player.mode, PlayerMode::Window);
         assert_eq!(c.player.max_height, 720);
         assert_eq!(c.player.prefer_codec, "avc1");
         assert!(c.player.hwdec);

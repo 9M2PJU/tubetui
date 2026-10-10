@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use crate::config::{
     Config, EffectsConfig, Language, PlayerMode, codec_name, language_name, next_codec, next_language, next_quality,
 };
+use crate::doctor::{Check, Manager};
 use crate::domain::{TabId, Video};
 use crate::i18n::Lang;
 use crate::keymap::KeyContext;
@@ -122,12 +123,14 @@ pub enum Setting {
     VideoDirs,
     MusicDirs,
     DownloadDir,
+    SystemCheck,
+    HideWatched,
     CheckUpdates,
     EditFile,
 }
 
 impl Setting {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 23] = [
         Self::Browser,
         Self::ImportCookies,
         Self::Refresh,
@@ -147,6 +150,8 @@ impl Setting {
         Self::VideoDirs,
         Self::MusicDirs,
         Self::DownloadDir,
+        Self::SystemCheck,
+        Self::HideWatched,
         Self::CheckUpdates,
         Self::EditFile,
     ];
@@ -174,6 +179,10 @@ impl Setting {
             Self::VideoDirs => ("Carpetas de videos", "Video folders"),
             Self::MusicDirs => ("Carpetas de música", "Music folders"),
             Self::DownloadDir => ("Carpeta de descargas", "Downloads folder"),
+            Self::SystemCheck => ("Revisar el sistema (mpv, yt-dlp…)", "Check the system (mpv, yt-dlp…)"),
+            Self::HideWatched => {
+                ("Ocultar los vistos en Inicio (v los muestra)", "Hide watched in Home (v shows them)")
+            }
             Self::CheckUpdates => ("Buscar versiones nuevas (una vez por día)", "Look for new versions (once a day)"),
             Self::EditFile => ("Editar config.toml", "Edit config.toml"),
         };
@@ -235,6 +244,8 @@ pub enum ListKind {
     Channel(ChannelRef),
     /// "Mis canales": unsubscribing takes the channel out.
     MyChannels,
+    /// Inicio, Descubrir, Suscripciones: videos already watched can be hidden.
+    Feed,
     Settings,
 }
 
@@ -248,18 +259,23 @@ pub struct Listing {
     pub next: Option<String>,
     /// The request loading that page.
     pub more: Option<u64>,
+    /// Feeds: every video, watched ones included (`items` may leave them out).
+    pub all: Option<Vec<Video>>,
 }
 
 impl Listing {
     pub fn new(title: String, items: Items, kind: ListKind) -> Self {
-        Self { title, items, selected: 0, kind, next: None, more: None }
+        Self { title, items, selected: 0, kind, next: None, more: None, all: None }
     }
 }
 
 /// A yes/no question before something hard to undo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirm {
-    Unsubscribe { channel_id: String, name: String },
+    Unsubscribe {
+        channel_id: String,
+        name: String,
+    },
     /// Local files to move to the trash.
     Trash(Vec<PathBuf>),
 }
@@ -350,6 +366,12 @@ pub enum Action {
     ToggleFocus,
     /// First start without a login: offer the browsers found.
     AskBrowser,
+    /// What the system has (mpv, yt-dlp…), with its package manager.
+    SystemChecked(Manager, Vec<Check>),
+    /// Ids of watched videos: my YouTube history, or the local one at start.
+    HistoryLoaded(HashSet<String>),
+    /// Feeds: show / hide the videos already watched.
+    ToggleWatched,
     /// GitHub has a newer version (and how to get it here).
     UpdateFound(Update),
     /// Mark / unmark the selected local file and go to the next one.
@@ -372,6 +394,12 @@ pub enum Action {
 /// Side effects requested by `update`, performed by the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    /// Look for mpv, yt-dlp and the optional helpers.
+    CheckSystem,
+    /// Fetch my YouTube watch history (to hide what I watched).
+    LoadHistory,
+    /// Remember a video as watched.
+    SaveWatched(String),
     /// Move these files to the system trash.
     Trash(Vec<PathBuf>),
     /// Fetch the details and related videos of a tab's video.
@@ -552,6 +580,12 @@ pub struct State {
     pub marked: HashSet<PathBuf>,
     /// A newer version, shown in "Acerca de".
     pub update: Option<Update>,
+    /// Videos I watched, here or on YouTube.
+    pub watched: HashSet<String>,
+    /// The last system check.
+    pub system: Option<(Manager, Vec<Check>)>,
+    /// Feeds show the watched videos too (`v`).
+    pub show_watched: bool,
     pub tabs: Vec<Tab>,
     /// 0 = Inicio, n = `tabs[n - 1]`.
     pub active: usize,
@@ -569,6 +603,7 @@ impl State {
     pub fn new(config: Config, later: Vec<Video>) -> Self {
         Self {
             sidebar: config.ui.sidebar,
+            show_watched: !config.ui.hide_watched,
             focus: if config.ui.sidebar { Focus::Menu } else { Focus::List },
             config,
             prefix: false,
@@ -584,6 +619,8 @@ impl State {
             confirm: None,
             marked: HashSet::new(),
             update: None,
+            watched: HashSet::new(),
+            system: None,
             tabs: Vec::new(),
             active: 0,
             status: String::new(),
@@ -705,6 +742,18 @@ impl State {
                 let (es, en) = on_off(self.config.ui.check_updates);
                 self.tr(es, en).into()
             }
+            Setting::SystemCheck => match &self.system {
+                None => String::new(),
+                Some((_, checks)) if checks.iter().any(|c| c.tool.required() && !c.ok()) => {
+                    self.tr("falta algo necesario", "something needed is missing").into()
+                }
+                Some((_, checks)) if checks.iter().all(Check::ok) => self.tr("todo instalado", "all installed").into(),
+                Some(_) => self.tr("lo necesario está", "the essentials are there").into(),
+            },
+            Setting::HideWatched => {
+                let (es, en) = on_off(self.config.ui.hide_watched);
+                self.tr(es, en).into()
+            }
             Setting::FxStartup | Setting::FxPages | Setting::FxDialogs => {
                 let mut effects = self.config.effects.clone();
                 let on = effect_flag(&mut effects, setting).is_some_and(|(_, on)| *on);
@@ -749,7 +798,8 @@ impl State {
                 if session.asked || !session.browser.is_empty() || !session.cookies_file.is_empty() {
                     return Vec::new();
                 }
-                let title = self.tr("¿De qué navegador tomo tu sesión de YouTube?", "Which browser has your YouTube login?");
+                let title =
+                    self.tr("¿De qué navegador tomo tu sesión de YouTube?", "Which browser has your YouTube login?");
                 let id = self.request(title.into(), Filter::None, false, ListKind::Plain);
                 return vec![Effect::ScanBrowsers { id }];
             }
@@ -851,6 +901,24 @@ impl State {
                 }
                 None => {}
             },
+            Action::SystemChecked(manager, checks) => self.system_checked(manager, checks),
+            Action::HistoryLoaded(ids) => {
+                self.watched.extend(ids);
+                self.refilter_watched();
+            }
+            Action::ToggleWatched => {
+                self.show_watched = !self.show_watched;
+                self.refilter_watched();
+                self.status = if self.show_watched {
+                    self.tr("Mostrando también los vistos (v los oculta)", "Showing watched videos too (v hides them)")
+                } else {
+                    self.tr("Vistos ocultos (v los muestra)", "Watched videos hidden (v shows them)")
+                }
+                .into();
+                if !self.show_watched && self.logged_in() {
+                    return vec![Effect::LoadHistory];
+                }
+            }
             Action::UpdateFound(update) => {
                 let (available, see) = (self.tr("disponible", "available"), self.tr("mirá Acerca de", "see About"));
                 self.status = format!("⬆ tubetui {} {available} · {see}", update.version);
@@ -1037,11 +1105,8 @@ impl State {
             Items::Profiles(profiles) => match profiles.get(selected).cloned() {
                 Some(spec) => {
                     self.config.session.asked = true;
-                    let mut effects = vec![Effect::SaveSetting {
-                        table: "session",
-                        key: "asked",
-                        value: SettingValue::Bool(true),
-                    }];
+                    let mut effects =
+                        vec![Effect::SaveSetting { table: "session", key: "asked", value: SettingValue::Bool(true) }];
                     self.status = if spec.is_empty() {
                         self.tr("Cerrando sesión…", "Logging out…").into()
                     } else {
@@ -1058,15 +1123,17 @@ impl State {
                 None => Vec::new(),
             },
             Items::About => Vec::new(),
+            // Check again, after installing something.
+            Items::System => vec![Effect::CheckSystem],
         }
     }
 
     fn open_section(&mut self, section: Section) -> Vec<Effect> {
         let title = section.label(self.lang()).to_owned();
         match section {
-            Section::Inicio => self.load(Source::Recommended, title, Filter::None, false, ListKind::Plain),
-            Section::Descubrir => self.load(Source::Recommended, title, Filter::NotMine, false, ListKind::Plain),
-            Section::Suscripciones => self.load(Source::Subscriptions, title, Filter::None, false, ListKind::Plain),
+            Section::Inicio => self.load_feed(Source::Recommended, title, Filter::None),
+            Section::Descubrir => self.load_feed(Source::Recommended, title, Filter::NotMine),
+            Section::Suscripciones => self.load_feed(Source::Subscriptions, title, Filter::None),
             Section::Canales => self.load(Source::MyChannels, title, Filter::None, false, ListKind::MyChannels),
             Section::VerDespues => {
                 let items = Items::Videos(self.later.clone());
@@ -1166,6 +1233,16 @@ impl State {
             Setting::Mouse => {
                 self.config.ui.mouse = !self.config.ui.mouse;
                 save("ui", "mouse", SettingValue::Bool(self.config.ui.mouse))
+            }
+            Setting::SystemCheck => {
+                self.show_system();
+                vec![Effect::CheckSystem]
+            }
+            Setting::HideWatched => {
+                self.config.ui.hide_watched = !self.config.ui.hide_watched;
+                self.show_watched = !self.config.ui.hide_watched;
+                self.refilter_watched();
+                save("ui", "hide_watched", SettingValue::Bool(self.config.ui.hide_watched))
             }
             Setting::CheckUpdates => {
                 self.config.ui.check_updates = !self.config.ui.check_updates;
@@ -1360,12 +1437,70 @@ impl State {
         } else {
             format!("{} · {}", pending.title, items.len())
         };
-        let listing = Listing { next, ..Listing::new(pending.title, items, pending.kind) };
+        let mut listing = Listing { next, ..Listing::new(pending.title, items, pending.kind) };
+        if listing.kind == ListKind::Feed
+            && let Items::Videos(videos) = &listing.items
+        {
+            listing.all = Some(videos.clone());
+            let hidden = filter_watched(&mut listing, &self.watched, self.show_watched);
+            if hidden > 0 {
+                let note = self.tr("vistos ocultos (v los muestra)", "watched hidden (v shows them)");
+                self.status = format!("{} · {} · {hidden} {note}", listing.title, listing.items.len());
+            }
+        }
         if pending.push {
             self.stack.push(listing);
             self.focus = Focus::List;
         } else {
             self.show(listing);
+        }
+    }
+
+    fn show_system(&mut self) {
+        let title = self.tr("Revisión del sistema", "System check").to_owned();
+        if self.stack.last().is_none_or(|l| l.items != Items::System) {
+            self.active = 0;
+            self.stack.push(Listing::new(title, Items::System, ListKind::Plain));
+            self.focus = Focus::List;
+        }
+    }
+
+    /// Something needed missing (or yt-dlp too old): the check opens by
+    /// itself with what to install; missing extras only get a line.
+    fn system_checked(&mut self, manager: Manager, checks: Vec<Check>) {
+        let lacking: Vec<&str> =
+            checks.iter().filter(|c| c.tool.required() && !c.ok()).map(|c| c.tool.program()).collect();
+        let extras = checks.iter().filter(|c| !c.tool.required() && !c.ok()).count();
+        let on_screen = self.stack.last().is_some_and(|l| l.items == Items::System);
+        if !lacking.is_empty() {
+            self.status =
+                format!("⚠ {}: {}", self.tr("Falta o hay que actualizar", "Missing or outdated"), lacking.join(", "));
+            self.show_system();
+        } else if !on_screen && extras > 0 {
+            let note = self.tr(
+                "opcionales sin instalar · Configuración → Revisar el sistema",
+                "optional tools not installed · Settings → Check the system",
+            );
+            self.status = format!("{extras} {note}");
+        } else if on_screen {
+            self.status = self.tr("Sistema revisado", "System checked").into();
+        }
+        self.system = Some((manager, checks));
+    }
+
+    /// A feed, and my YouTube history to hide what I already watched.
+    fn load_feed(&mut self, source: Source, title: String, filter: Filter) -> Vec<Effect> {
+        let mut effects = self.load(source, title, filter, false, ListKind::Feed);
+        if self.logged_in() && !self.show_watched {
+            effects.push(Effect::LoadHistory);
+        }
+        effects
+    }
+
+    /// Hides or shows the watched videos of every feed.
+    fn refilter_watched(&mut self) {
+        for listing in &mut self.stack {
+            filter_watched(listing, &self.watched, self.show_watched);
         }
     }
 
@@ -1481,7 +1616,8 @@ impl State {
             self.marked.insert(path);
         }
         let marked = self.marked_files().len();
-        self.status = format!("{marked} {}", self.tr("marcados · x o Supr: a la papelera", "marked · x or Del: to the trash"));
+        self.status =
+            format!("{marked} {}", self.tr("marcados · x o Supr: a la papelera", "marked · x or Del: to the trash"));
         self.move_selection(1)
     }
 
@@ -1509,7 +1645,10 @@ impl State {
         let paths = match result {
             Ok(paths) => paths,
             Err(error) => {
-                self.status = format!("❌ {} {error}", self.tr("No se pudo mandar a la papelera:", "Could not move to the trash:"));
+                self.status = format!(
+                    "❌ {} {error}",
+                    self.tr("No se pudo mandar a la papelera:", "Could not move to the trash:")
+                );
                 return;
             }
         };
@@ -1584,8 +1723,13 @@ impl State {
         self.next_tab += 1;
         self.tabs.push(Tab::new(id, playback.clone()));
         self.active = self.tabs.len();
-        let watch = playback.video.as_ref().map(|v| Effect::Watch { tab: id, video: v.id.clone() });
-        std::iter::once(Effect::Open(id, playback)).chain(watch).collect()
+        let mut effects = vec![Effect::Open(id, playback.clone())];
+        if let Some(video) = &playback.video {
+            self.watched.insert(video.id.clone());
+            effects.push(Effect::Watch { tab: id, video: video.id.clone() });
+            effects.push(Effect::SaveWatched(video.id.clone()));
+        }
+        effects
     }
 
     /// Removes a tab; the active one moves to its right neighbour, like browsers do.
@@ -1612,6 +1756,23 @@ impl State {
     fn command(&self, command: PlayerCommand) -> Vec<Effect> {
         self.active_tab().map(|t| Effect::Command(t.id, command)).into_iter().collect()
     }
+}
+
+/// A feed's videos without the watched ones (unless `show`), keeping the
+/// selection on the same video; how many it hides.
+fn filter_watched(listing: &mut Listing, watched: &HashSet<String>, show: bool) -> usize {
+    let Some(all) = &listing.all else { return 0 };
+    let current = match &listing.items {
+        Items::Videos(videos) => videos.get(listing.selected).map(|v| v.id.clone()),
+        _ => None,
+    };
+    let videos: Vec<Video> = all.iter().filter(|v| show || !watched.contains(&v.id)).cloned().collect();
+    let hidden = all.len() - videos.len();
+    listing.selected = current
+        .and_then(|id| videos.iter().position(|v| v.id == id))
+        .unwrap_or(listing.selected.min(videos.len().saturating_sub(1)));
+    listing.items = Items::Videos(videos);
+    hidden
 }
 
 fn dirs_label(dirs: &[String], default: &str, lang: Lang) -> String {
@@ -1667,7 +1828,7 @@ mod tests {
 
     fn load_id(effects: &[Effect]) -> u64 {
         match effects {
-            [Effect::Load { id, .. }] | [Effect::ScanBrowsers { id }] | [Effect::ScanMedia { id, .. }] => *id,
+            [Effect::Load { id, .. }, ..] | [Effect::ScanBrowsers { id }] | [Effect::ScanMedia { id, .. }] => *id,
             other => panic!("expected a load, got {other:?}"),
         }
     }
@@ -1684,7 +1845,7 @@ mod tests {
         s.update(Action::GoTab(0));
         s.stack.last_mut().unwrap().selected = index;
         match s.update(Action::Enter).as_slice() {
-            [Effect::Open(id, _), Effect::Watch { tab, .. }] if tab == id => *id,
+            [Effect::Open(id, _), Effect::Watch { tab, .. }, Effect::SaveWatched(_)] if tab == id => *id,
             other => panic!("expected Open and Watch, got {other:?}"),
         }
     }
@@ -2172,6 +2333,65 @@ mod tests {
         assert!(s.status.contains("403"));
     }
 
+    fn check(tool: crate::doctor::Tool, found: bool) -> Check {
+        let found = found.then(|| (format!("/usr/bin/{}", tool.program()), Some("1.0".to_string())));
+        Check { tool, found, outdated: false, fix: None }
+    }
+
+    #[test]
+    fn the_system_check_opens_by_itself_only_when_something_needed_is_missing() {
+        use crate::doctor::Tool;
+        let mut s = state();
+        s.update(Action::SystemChecked(
+            Manager::Apt,
+            vec![check(Tool::Mpv, true), check(Tool::YtDlp, true), check(Tool::Ffmpeg, false)],
+        ));
+        assert!(s.stack.is_empty(), "all needed is there: no page");
+        assert!(s.status.starts_with("1 opcionales"), "{}", s.status);
+        s.update(Action::SystemChecked(Manager::Apt, vec![check(Tool::Mpv, false), check(Tool::YtDlp, true)]));
+        assert_eq!(s.listing().unwrap().items, Items::System);
+        assert!(s.status.contains("mpv"), "{}", s.status);
+        assert_eq!(s.update(Action::Enter), [Effect::CheckSystem], "Enter checks again");
+        assert_eq!(s.stack.len(), 1, "not opened twice");
+        assert_eq!(s.setting_value(Setting::SystemCheck), "falta algo necesario");
+    }
+
+    #[test]
+    fn feeds_hide_watched_videos_and_v_shows_them() {
+        let mut s = state();
+        s.watched.insert("b".into());
+        let id = load_id(&open(&mut s, Section::Inicio));
+        s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a"), video("b"), video("c")]))));
+        let ids = |s: &State| match &s.listing().unwrap().items {
+            Items::Videos(v) => v.iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
+            _ => panic!(),
+        };
+        assert_eq!(ids(&s), ["a", "c"]);
+        assert!(s.status.contains("1 vistos ocultos"), "{}", s.status);
+        // My YouTube history arrives later: c goes too, the selection stays on a.
+        s.update(Action::HistoryLoaded(HashSet::from(["c".to_string()])));
+        assert_eq!(ids(&s), ["a"]);
+        s.update(Action::ToggleWatched);
+        assert_eq!(ids(&s), ["a", "b", "c"]);
+        assert_eq!(s.listing().unwrap().selected, 0, "still on a");
+        s.stack[0].selected = 2;
+        s.update(Action::ToggleWatched);
+        assert_eq!(ids(&s), ["a"]);
+        assert_eq!(s.listing().unwrap().selected, 0, "c is hidden: clamped");
+    }
+
+    #[test]
+    fn playing_marks_the_video_watched() {
+        let mut s = with_videos(&["a"]);
+        let effects = s.update(Action::Enter);
+        assert_eq!(effects.last(), Some(&Effect::SaveWatched("a".into())));
+        assert!(s.watched.contains("a"));
+        let mut logged = state();
+        logged.config.session.browser = "brave".into();
+        assert!(open(&mut logged, Section::Inicio).contains(&Effect::LoadHistory), "my history, to hide it");
+        assert!(!open(&mut logged, Section::Canales).contains(&Effect::LoadHistory));
+    }
+
     #[test]
     fn marked_files_go_to_the_trash_after_asking() {
         let mut s = state();
@@ -2264,8 +2484,8 @@ mod tests {
         assert_eq!(change(&mut s, Setting::Language), [saved("player", "language", text("original"))]);
         assert_eq!(s.config.player.language, Language::Original);
         assert_eq!(change(&mut s, Setting::Quality), [saved("player", "max_height", SettingValue::Number(1080))]);
-        assert_eq!(change(&mut s, Setting::VideoMode), [saved("player", "mode", text("embedded"))]);
-        assert_eq!(s.config.player.mode, PlayerMode::Embedded);
+        assert_eq!(change(&mut s, Setting::VideoMode), [saved("player", "mode", text("overlay"))], "from the default, window");
+        assert_eq!(s.config.player.mode, PlayerMode::Overlay);
         assert_eq!(change(&mut s, Setting::Icons), [saved("ui", "icons", text("nerd"))]);
         assert_eq!(s.config.ui.icons, IconSet::Nerd);
         assert_eq!(change(&mut s, Setting::EditFile), [Effect::EditConfig]);
@@ -2325,8 +2545,11 @@ mod tests {
         s.update(Action::Up);
         assert_eq!(s.selected_video().unwrap().id, "r2", "l / s / d / c act on it");
         let effects = s.update(Action::Enter);
-        assert!(matches!(effects.as_slice(), [Effect::Open(_, p), Effect::Watch { video, .. }]
-            if p.video.as_ref().unwrap().id == "r2" && video == "r2"), "{effects:?}");
+        assert!(
+            matches!(effects.as_slice(), [Effect::Open(_, p), Effect::Watch { video, .. }, Effect::SaveWatched(_)]
+            if p.video.as_ref().unwrap().id == "r2" && video == "r2"),
+            "{effects:?}"
+        );
         assert_eq!(s.tabs.len(), 2);
         s.update(Action::GoTab(1));
         s.update(Action::Select(0));

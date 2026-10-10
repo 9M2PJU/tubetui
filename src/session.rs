@@ -15,9 +15,15 @@ const COOKIES_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// others (snap, flatpak) are passed to it by path.
 #[cfg(not(any(windows, target_os = "macos")))]
 const CHROMIUM: &[(&str, &[&str])] = &[
-    ("brave", &[".config/BraveSoftware/Brave-Browser", ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"]),
+    (
+        "brave",
+        &[".config/BraveSoftware/Brave-Browser", ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"],
+    ),
     ("chrome", &[".config/google-chrome", ".var/app/com.google.Chrome/config/google-chrome"]),
-    ("chromium", &[".config/chromium", "snap/chromium/common/chromium", ".var/app/org.chromium.Chromium/config/chromium"]),
+    (
+        "chromium",
+        &[".config/chromium", "snap/chromium/common/chromium", ".var/app/org.chromium.Chromium/config/chromium"],
+    ),
     ("vivaldi", &[".config/vivaldi", ".var/app/com.vivaldi.Vivaldi/config/vivaldi"]),
     ("edge", &[".config/microsoft-edge", ".var/app/com.microsoft.Edge/config/microsoft-edge"]),
     ("opera", &[".config/opera", ".var/app/com.opera.Opera/config/opera"]),
