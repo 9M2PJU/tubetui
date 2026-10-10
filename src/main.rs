@@ -201,6 +201,15 @@ impl Runtime {
         };
         runtime.start_session(false);
         runtime.send(Action::AskBrowser);
+        if runtime.state.config.ui.check_updates {
+            // Quietly: no network or no news means nothing to say.
+            let (tx, cache) = (runtime.tx.clone(), runtime.paths.cache.join("latest-release.txt"));
+            std::thread::spawn(move || {
+                if let Ok(Some(update)) = tubetui::update::check(&cache) {
+                    let _ = tx.send(Action::UpdateFound(update));
+                }
+            });
+        }
         runtime
     }
 
@@ -389,6 +398,11 @@ impl Runtime {
             Effect::Search { id, query, next } => {
                 self.background(move || {
                     Action::Page(id, youtube::search(&query, next.as_deref()).map_err(|e| e.to_string()))
+                });
+            }
+            Effect::Trash(paths) => {
+                self.background(move || {
+                    Action::Trashed(trash::delete_all(&paths).map(|()| paths).map_err(|e| e.to_string()))
                 });
             }
             Effect::Watch { tab, video } => {

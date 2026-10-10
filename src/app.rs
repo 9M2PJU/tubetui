@@ -15,6 +15,7 @@ use crate::domain::{TabId, Video};
 use crate::i18n::Lang;
 use crate::keymap::KeyContext;
 use crate::media::{LocalFile, MediaKind, parse_dirs};
+use crate::update::Update;
 use crate::youtube::{Items, SearchPage, Source, Watch};
 
 /// Lists that are filtered afterwards ask YouTube for more videos.
@@ -121,11 +122,12 @@ pub enum Setting {
     VideoDirs,
     MusicDirs,
     DownloadDir,
+    CheckUpdates,
     EditFile,
 }
 
 impl Setting {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Browser,
         Self::ImportCookies,
         Self::Refresh,
@@ -145,6 +147,7 @@ impl Setting {
         Self::VideoDirs,
         Self::MusicDirs,
         Self::DownloadDir,
+        Self::CheckUpdates,
         Self::EditFile,
     ];
 
@@ -171,6 +174,7 @@ impl Setting {
             Self::VideoDirs => ("Carpetas de videos", "Video folders"),
             Self::MusicDirs => ("Carpetas de música", "Music folders"),
             Self::DownloadDir => ("Carpeta de descargas", "Downloads folder"),
+            Self::CheckUpdates => ("Buscar versiones nuevas (una vez por día)", "Look for new versions (once a day)"),
             Self::EditFile => ("Editar config.toml", "Edit config.toml"),
         };
         lang.pick(es, en)
@@ -252,10 +256,12 @@ impl Listing {
     }
 }
 
+/// A yes/no question before something hard to undo.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Unsubscribe {
-    pub channel_id: String,
-    pub name: String,
+pub enum Confirm {
+    Unsubscribe { channel_id: String, name: String },
+    /// Local files to move to the trash.
+    Trash(Vec<PathBuf>),
 }
 
 /// A value written to `config.toml`.
@@ -344,6 +350,14 @@ pub enum Action {
     ToggleFocus,
     /// First start without a login: offer the browsers found.
     AskBrowser,
+    /// GitHub has a newer version (and how to get it here).
+    UpdateFound(Update),
+    /// Mark / unmark the selected local file and go to the next one.
+    ToggleMark,
+    /// Ask to move the marked files (or the selected one) to the trash.
+    Trash,
+    /// The files went to the trash (or the reason they did not).
+    Trashed(Result<Vec<PathBuf>, String>),
     /// Open this section of the menu (a click on it).
     OpenSection(usize),
     /// Select this row of the list (a click on it).
@@ -358,6 +372,8 @@ pub enum Action {
 /// Side effects requested by `update`, performed by the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    /// Move these files to the system trash.
+    Trash(Vec<PathBuf>),
     /// Fetch the details and related videos of a tab's video.
     Watch {
         tab: TabId,
@@ -531,7 +547,11 @@ pub struct State {
     pub later: Vec<Video>,
     /// Ids of my channels.
     pub subs: HashSet<String>,
-    pub confirm: Option<Unsubscribe>,
+    pub confirm: Option<Confirm>,
+    /// Local files marked (space) for the next delete.
+    pub marked: HashSet<PathBuf>,
+    /// A newer version, shown in "Acerca de".
+    pub update: Option<Update>,
     pub tabs: Vec<Tab>,
     /// 0 = Inicio, n = `tabs[n - 1]`.
     pub active: usize,
@@ -562,6 +582,8 @@ impl State {
             later,
             subs: HashSet::new(),
             confirm: None,
+            marked: HashSet::new(),
+            update: None,
             tabs: Vec::new(),
             active: 0,
             status: String::new(),
@@ -677,6 +699,10 @@ impl State {
             }
             Setting::Mouse => {
                 let (es, en) = on_off(self.config.ui.mouse);
+                self.tr(es, en).into()
+            }
+            Setting::CheckUpdates => {
+                let (es, en) = on_off(self.config.ui.check_updates);
                 self.tr(es, en).into()
             }
             Setting::FxStartup | Setting::FxPages | Setting::FxDialogs => {
@@ -814,12 +840,25 @@ impl State {
             }
             Action::ToggleLater => return self.toggle_later(),
             Action::ToggleSubscription => return self.toggle_subscription(),
-            Action::Confirm(yes) => {
-                if let Some(u) = self.confirm.take().filter(|_| yes) {
-                    self.status = format!("{} {}…", self.tr("Desuscribiendo de", "Unsubscribing from"), u.name);
-                    return vec![Effect::Subscribe { channel_id: u.channel_id, name: u.name, subscribe: false }];
+            Action::Confirm(yes) => match self.confirm.take().filter(|_| yes) {
+                Some(Confirm::Unsubscribe { channel_id, name }) => {
+                    self.status = format!("{} {name}…", self.tr("Desuscribiendo de", "Unsubscribing from"));
+                    return vec![Effect::Subscribe { channel_id, name, subscribe: false }];
                 }
+                Some(Confirm::Trash(paths)) => {
+                    self.status = format!("🗑 {} {}…", self.tr("A la papelera:", "To the trash:"), paths.len());
+                    return vec![Effect::Trash(paths)];
+                }
+                None => {}
+            },
+            Action::UpdateFound(update) => {
+                let (available, see) = (self.tr("disponible", "available"), self.tr("mirá Acerca de", "see About"));
+                self.status = format!("⬆ tubetui {} {available} · {see}", update.version);
+                self.update = Some(update);
             }
+            Action::ToggleMark => return self.toggle_mark(),
+            Action::Trash => self.ask_trash(),
+            Action::Trashed(result) => self.trashed(result),
             Action::SubscriptionDone { channel_id, name, result } => {
                 return self.subscription_done(channel_id, name, result);
             }
@@ -1128,6 +1167,10 @@ impl State {
                 self.config.ui.mouse = !self.config.ui.mouse;
                 save("ui", "mouse", SettingValue::Bool(self.config.ui.mouse))
             }
+            Setting::CheckUpdates => {
+                self.config.ui.check_updates = !self.config.ui.check_updates;
+                save("ui", "check_updates", SettingValue::Bool(self.config.ui.check_updates))
+            }
             Setting::FxStartup | Setting::FxPages | Setting::FxDialogs => {
                 match effect_flag(&mut self.config.effects, setting) {
                     Some((key, on)) => {
@@ -1416,12 +1459,72 @@ impl State {
             return Vec::new();
         };
         if self.subs.contains(&channel_id) {
-            self.confirm = Some(Unsubscribe { channel_id, name });
+            self.confirm = Some(Confirm::Unsubscribe { channel_id, name });
             Vec::new()
         } else {
             self.status = format!("{} {name}…", self.tr("Suscribiendo a", "Subscribing to"));
             vec![Effect::Subscribe { channel_id, name, subscribe: true }]
         }
+    }
+
+    /// The selected file of a local files list.
+    fn selected_file(&self) -> Option<&LocalFile> {
+        match self.stack.last() {
+            Some(Listing { items: Items::Files(files, _), selected, .. }) if self.active == 0 => files.get(*selected),
+            _ => None,
+        }
+    }
+
+    fn toggle_mark(&mut self) -> Vec<Effect> {
+        let Some(path) = self.selected_file().map(|f| f.path.clone()) else { return Vec::new() };
+        if !self.marked.remove(&path) {
+            self.marked.insert(path);
+        }
+        let marked = self.marked_files().len();
+        self.status = format!("{marked} {}", self.tr("marcados · x o Supr: a la papelera", "marked · x or Del: to the trash"));
+        self.move_selection(1)
+    }
+
+    /// The marked files of the shown list, in its order.
+    fn marked_files(&self) -> Vec<PathBuf> {
+        match self.stack.last() {
+            Some(Listing { items: Items::Files(files, _), .. }) if self.active == 0 => {
+                files.iter().filter(|f| self.marked.contains(&f.path)).map(|f| f.path.clone()).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn ask_trash(&mut self) {
+        let mut paths = self.marked_files();
+        if paths.is_empty() {
+            paths.extend(self.selected_file().map(|f| f.path.clone()));
+        }
+        if !paths.is_empty() {
+            self.confirm = Some(Confirm::Trash(paths));
+        }
+    }
+
+    fn trashed(&mut self, result: Result<Vec<PathBuf>, String>) {
+        let paths = match result {
+            Ok(paths) => paths,
+            Err(error) => {
+                self.status = format!("❌ {} {error}", self.tr("No se pudo mandar a la papelera:", "Could not move to the trash:"));
+                return;
+            }
+        };
+        for listing in &mut self.stack {
+            if let Items::Files(files, _) = &mut listing.items {
+                files.retain(|f| !paths.contains(&f.path));
+                listing.selected = listing.selected.min(files.len().saturating_sub(1));
+            }
+        }
+        self.marked.retain(|p| !paths.contains(p));
+        let (sent, recover) = (
+            self.tr("a la papelera", "moved to the trash"),
+            self.tr("(se recuperan desde la papelera del sistema)", "(recover them from the system trash)"),
+        );
+        self.status = format!("🗑 {} {sent} {recover}", paths.len());
     }
 
     fn subscription_done(&mut self, channel_id: String, name: String, result: Result<bool, String>) -> Vec<Effect> {
@@ -1564,7 +1667,7 @@ mod tests {
 
     fn load_id(effects: &[Effect]) -> u64 {
         match effects {
-            [Effect::Load { id, .. }] | [Effect::ScanBrowsers { id }] => *id,
+            [Effect::Load { id, .. }] | [Effect::ScanBrowsers { id }] | [Effect::ScanMedia { id, .. }] => *id,
             other => panic!("expected a load, got {other:?}"),
         }
     }
@@ -2067,6 +2170,42 @@ mod tests {
         assert!(s.update(done).is_empty());
         assert!(s.subs.is_empty());
         assert!(s.status.contains("403"));
+    }
+
+    #[test]
+    fn marked_files_go_to_the_trash_after_asking() {
+        let mut s = state();
+        let id = load_id(&open(&mut s, Section::MiMusica));
+        s.update(Action::Loaded(id, Ok(Items::Files(files(&["a", "b", "c"]), MediaKind::Music))));
+        s.update(Action::ToggleMark); // a, and moves to b
+        s.update(Action::Down); // c
+        s.update(Action::ToggleMark);
+        assert_eq!(s.marked.len(), 2);
+        assert!(s.status.starts_with("2 marcados"), "{}", s.status);
+        s.update(Action::Trash);
+        let marked = vec![PathBuf::from("/m/a.mp3"), PathBuf::from("/m/c.mp3")];
+        assert_eq!(s.confirm, Some(Confirm::Trash(marked.clone())));
+        assert!(s.key_context().confirm);
+        assert_eq!(s.update(Action::Confirm(true)), [Effect::Trash(marked.clone())]);
+        s.update(Action::Trashed(Ok(marked)));
+        assert_eq!(s.listing().unwrap().items, Items::Files(files(&["b"]), MediaKind::Music));
+        assert!(s.marked.is_empty());
+        assert!(s.status.contains("2 a la papelera"), "{}", s.status);
+        // Nothing marked: the selected file; saying no keeps it.
+        s.update(Action::Trash);
+        assert_eq!(s.confirm, Some(Confirm::Trash(vec![PathBuf::from("/m/b.mp3")])));
+        assert!(s.update(Action::Confirm(false)).is_empty());
+        s.update(Action::Trashed(Err("permiso denegado".into())));
+        assert!(s.status.contains("permiso denegado"));
+        assert_eq!(s.listing().unwrap().items.len(), 1);
+    }
+
+    #[test]
+    fn marking_does_nothing_outside_file_lists() {
+        let mut s = with_videos(&["a"]);
+        assert!(s.update(Action::ToggleMark).is_empty());
+        s.update(Action::Trash);
+        assert_eq!(s.confirm, None);
     }
 
     #[test]

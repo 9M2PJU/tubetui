@@ -62,6 +62,8 @@ pub const IN_LISTS: &[(&str, Text)] = &[
     ("Esc  ←  h", Text::new("volver", "back")),
     ("Tab", Text::new("ir al menú", "go to the menu")),
     ("/", Text::new("buscar (dentro de un canal: en ese canal)", "search (inside a channel: in that channel)")),
+    ("espacio", Text::new("marcar archivo (Mis videos, Mi música)", "mark a file (My videos, My music)")),
+    ("x  Supr", Text::new("marcados o el elegido: a la papelera", "marked or selected: to the trash")),
 ];
 
 pub const WITH_MOUSE: &[(&str, Text)] = &[
@@ -204,6 +206,8 @@ fn related(code: KeyCode) -> Option<Action> {
 
 fn lists(code: KeyCode) -> Option<Action> {
     match code {
+        KeyCode::Char(' ') => Some(Action::ToggleMark),
+        KeyCode::Char('x') | KeyCode::Delete => Some(Action::Trash),
         KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
         KeyCode::Enter => Some(Action::Enter),
@@ -339,6 +343,9 @@ mod tests {
         assert_eq!(map(char('i'), TAB), Some(Action::CycleLanguage));
         assert_eq!(map(char('o'), TAB), Some(Action::CycleSubLang));
         assert_eq!(map(char('v'), TAB), Some(Action::CycleQuality));
+        assert_eq!(map(char(' '), LISTS), Some(Action::ToggleMark));
+        assert_eq!(map(char('x'), LISTS), Some(Action::Trash));
+        assert_eq!(map(key(KeyCode::Delete), LISTS), Some(Action::Trash));
         assert_eq!(map(char('b'), TAB), Some(Action::CycleCodec));
         assert_eq!(map(char('.'), TAB), Some(Action::NextTrack));
         assert_eq!(map(char('f'), TAB), Some(Action::ToggleFullscreen));

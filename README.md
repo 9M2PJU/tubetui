@@ -108,7 +108,9 @@ a click on the video pauses (double click: fullscreen), a click on the
 progress bar jumps there. Hold Shift to select text.
 
 In lists: `↑↓` / `jk`, `Enter`, `Esc` to go back, `Tab` menu ↔ list,
-`l` watch later, `s` subscribe, `d` download, `c` channel.
+`l` watch later, `s` subscribe, `d` download, `c` channel. In **My videos**
+and **My music**: `space` marks files, `x` / `Del` moves the marked ones (or
+the selected one) to the system trash, after asking.
 While watching: `space` pause, `←→` seek, `↑↓` volume, `m` mute, `j`
 subtitles, `i` original / subtitles / dubbed, `o` language, `v` quality
 (360p–1440p), `b` codec (H.264 / VP9 / AV1 / any), `f` fullscreen, `.` `,`
@@ -164,6 +166,7 @@ icons = "emoji"          # emoji | nerd | unicode
 lang = "en"              # en | es (unset: the system language)
 thumbnails = true        # thumbnail in the preview panel (kitty)
 mouse = true             # clicks and wheel; hold Shift to select text
+check_updates = true     # once a day, tell me about new versions and how to install them here
 
 [effects]                # animations
 startup = true

@@ -147,6 +147,8 @@ pub struct UiConfig {
     pub thumbnails: bool,
     /// Clicks and the wheel (selecting text then needs Shift).
     pub mouse: bool,
+    /// Ask GitHub once a day whether there is a newer version.
+    pub check_updates: bool,
 }
 
 /// Short animations, each one can be turned off.
@@ -300,7 +302,7 @@ impl Default for PlayerConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { sidebar: true, max_tabs: 9, icons: IconSet::Emoji, lang: None, thumbnails: true, mouse: true }
+        Self { sidebar: true, max_tabs: 9, icons: IconSet::Emoji, lang: None, thumbnails: true, mouse: true, check_updates: true }
     }
 }
 

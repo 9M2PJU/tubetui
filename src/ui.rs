@@ -9,13 +9,14 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Tabs};
 
-use crate::app::{Focus, Group, Listing, Prompt, Section, Setting, State, Tab, language_label};
+use crate::app::{Confirm, Focus, Group, Listing, Prompt, Section, Setting, State, Tab, language_label};
 use crate::config::{IconSet, donations};
 use crate::domain::{Channel, Live, Video, clock, date_labels};
 use crate::i18n::Lang;
 use crate::{keymap, session};
 use crate::media::{LocalFile, MediaKind};
 use crate::player::Info;
+use crate::update::Install;
 #[cfg(test)]
 use crate::youtube::Watch;
 use crate::youtube::{Items, compact};
@@ -54,7 +55,7 @@ pub struct Icons {
     /// In `Section::ALL` order.
     pub sections: [&'static str; 12],
     /// In `Setting::ALL` order.
-    pub settings: [&'static str; 20],
+    pub settings: [&'static str; 21],
     pub logo: &'static str,
     pub tab: &'static str,
     pub live: &'static str,
@@ -71,7 +72,7 @@ const EMOJI: Icons = Icons {
     sections: ["🏠", "🧭", "📺", "🕒", "⭐", "🔎", "📡", "📼", "🎵", "🔧", "💜", "🚪"],
     settings: [
         "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "🗣", "😀", "🖼", "🖱", "✨", "🌊", "💥", "📼", "🎵", "📁",
-        "📝",
+        "⬆", "📝",
     ],
     logo: "▶️",
     tab: "🎬",
@@ -103,7 +104,7 @@ const NERD: Icons = Icons {
     settings: [
         "\u{f007}", "\u{f15b}", "\u{f021}", "\u{f08b}", "\u{f1ab}", "\u{f075}", "\u{f1de}", "\u{f008}", "\u{f025}",
         "\u{f0ac}", "\u{f118}", "\u{f03e}", "\u{f245}", "\u{f0d0}", "\u{f0e7}", "\u{f0a1}", "\u{f03d}", "\u{f001}",
-        "\u{f07b}", "\u{f044}",
+        "\u{f07b}", "\u{f01b}", "\u{f044}",
     ],
     logo: "\u{f16a}",
     tab: "\u{f144}",
@@ -119,7 +120,7 @@ const NERD: Icons = Icons {
 
 const UNICODE: Icons = Icons {
     sections: ["⌂", "◎", "▣", "◷", "★", "⌕", "⌁", "▷", "♫", "⚙", "♥", "⏻"],
-    settings: ["☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "✎"],
+    settings: ["☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "↑", "✎"],
     logo: "▶",
     tab: "▶",
     live: "●",
@@ -368,8 +369,8 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
     if state.help {
         draw_help(frame, lang);
     }
-    if let Some(u) = &state.confirm {
-        draw_confirm(frame, &u.name, lang);
+    if let Some(confirm) = &state.confirm {
+        draw_confirm(frame, confirm, lang);
     }
 }
 
@@ -538,6 +539,9 @@ fn sidebar_items(state: &State, icons: &Icons) -> Vec<(ListItem<'static>, Option
         let mut label = section.label(lang).to_owned();
         if *section == Section::VerDespues && !state.later.is_empty() {
             label.push_str(&format!(" ({})", state.later.len()));
+        }
+        if *section == Section::AcercaDe && state.update.is_some() {
+            label.push_str(" ⬆");
         }
         let selected = i == state.menu;
         let focused = selected && on_inicio && state.focus == Focus::Menu;
@@ -785,7 +789,14 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
     let title = match &state.loading {
         Some(loading) => format!(" {} ", loading_text(loading, view.loading.unwrap_or_default(), state.lang())),
         None if listing.items == Items::Settings => format!(" {} ", breadcrumb.join(" › ")),
-        None => format!(" {} · {} ", breadcrumb.join(" › "), listing.items.len()),
+        None => match &listing.items {
+            Items::Files(files, _) if files.iter().any(|f| state.marked.contains(&f.path)) => {
+                let marked = files.iter().filter(|f| state.marked.contains(&f.path)).count();
+                let label = state.lang().pick("marcados", "marked");
+                format!(" {} · {} · ✗ {marked} {label} ", breadcrumb.join(" › "), listing.items.len())
+            }
+            _ => format!(" {} · {} ", breadcrumb.join(" › "), listing.items.len()),
+        },
     };
     let items: Vec<ListItem> = match &listing.items {
         Items::Videos(videos) => videos.iter().map(|v| video_row(state, icons, view, v)).collect(),
@@ -798,7 +809,9 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
         Items::Settings => {
             Setting::ALL.iter().enumerate().map(|(i, s)| setting_row(state, icons.settings[i], *s)).collect()
         }
-        Items::Files(files, kind) => files.iter().map(|f| file_row(icons, f, *kind)).collect(),
+        Items::Files(files, kind) => {
+            files.iter().map(|f| file_row(icons, f, *kind, state.marked.contains(&f.path))).collect()
+        }
         Items::About => Vec::new(),
     };
     let focused = state.focus == Focus::List;
@@ -955,13 +968,14 @@ fn profile_row<'a>(state: &State, icons: &Icons, spec: &'a str) -> ListItem<'a> 
     ]))
 }
 
-fn file_row<'a>(icons: &Icons, file: &'a LocalFile, kind: MediaKind) -> ListItem<'a> {
+fn file_row<'a>(icons: &Icons, file: &'a LocalFile, kind: MediaKind, marked: bool) -> ListItem<'a> {
     let icon = match kind {
         MediaKind::Video => icons.sections[7],
         MediaKind::Music => icons.sections[8],
     };
     ListItem::new(Line::from(vec![
-        Span::raw(format!(" {icon} ")),
+        Span::styled(if marked { "✗" } else { " " }, Style::new().fg(RED).bold()),
+        Span::raw(format!("{icon} ")),
         Span::styled(format!("{} ", pad(&file.folder, 28)), MAGENTA),
         Span::styled(file.name.as_str(), FG),
     ]))
@@ -1006,8 +1020,12 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
     let rows = |table| keymap::rows(table, lang);
     let key = |k: &str, es, en| (k.to_string(), lang.pick(es, en));
     let all_keys = key("C-y ?", "todos los atajos", "every shortcut");
-    let mut hints = if state.confirm.is_some() {
-        vec![key("s", "sí, desuscribirme", "yes, unsubscribe"), key(lang.pick("otra tecla", "other key"), "no", "no")]
+    let mut hints = if let Some(confirm) = &state.confirm {
+        let yes = match confirm {
+            Confirm::Unsubscribe { .. } => key("s", "sí, desuscribirme", "yes, unsubscribe"),
+            Confirm::Trash(_) => key("s", "sí, a la papelera", "yes, to the trash"),
+        };
+        vec![yes, key(lang.pick("otra tecla", "other key"), "no", "no")]
     } else if state.help {
         vec![key(lang.pick("cualquier tecla", "any key"), "cerrar la ayuda", "close the help")]
     } else if state.prefix {
@@ -1053,10 +1071,15 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
                 back,
             ],
             Some(Items::Profiles(_)) => vec![key("Enter", "usar esta sesión", "use this login"), back],
-            Some(Items::Files(_, MediaKind::Music)) => {
-                vec![key("Enter", "escuchar desde esta canción", "play from this song"), back]
-            }
-            Some(Items::Files(_, MediaKind::Video)) => vec![key("Enter", "ver", "play"), back],
+            Some(Items::Files(_, kind)) => vec![
+                match kind {
+                    MediaKind::Music => key("Enter", "escuchar desde esta canción", "play from this song"),
+                    MediaKind::Video => key("Enter", "ver", "play"),
+                },
+                key(lang.pick("espacio", "space"), "marcar", "mark"),
+                key("x", "a la papelera", "to the trash"),
+                back,
+            ],
             Some(Items::About) => vec![back],
             _ => vec![key("Enter", "cambiar / abrir", "change / open"), back],
         }
@@ -1135,15 +1158,29 @@ fn draw_help(frame: &mut Frame, lang: Lang) {
     frame.render_widget(Paragraph::new(right), r);
 }
 
-fn draw_confirm(frame: &mut Frame, name: &str, lang: Lang) {
+fn draw_confirm(frame: &mut Frame, confirm: &Confirm, lang: Lang) {
     let area = centered(frame.area(), 56, 5);
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
+    let question = match confirm {
+        Confirm::Unsubscribe { name, .. } => Line::from(vec![
             Span::raw(lang.pick("¿Desuscribirte de ", "Unsubscribe from ")),
-            Span::styled(name, Style::new().fg(MAGENTA).bold()),
+            Span::styled(name.as_str(), Style::new().fg(MAGENTA).bold()),
             Span::raw("?"),
         ]),
+        Confirm::Trash(paths) => {
+            let what = match paths.as_slice() {
+                [one] => one.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                many => format!("{} {}", many.len(), lang.pick("archivos", "files")),
+            };
+            Line::from(vec![
+                Span::raw(lang.pick("¿Mandar a la papelera ", "Move to the trash ")),
+                Span::styled(truncate(&what, 30), Style::new().fg(MAGENTA).bold()),
+                Span::raw("?"),
+            ])
+        }
+    };
+    let lines = vec![
+        Line::from(""),
+        question,
         Line::from(lang.pick("s = sí · cualquier otra tecla = no", "y = yes · any other key = no")).fg(MUTED),
     ];
     let title = lang.pick(" Confirmar ", " Confirm ");
@@ -1177,6 +1214,27 @@ fn draw_about(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
             Span::styled(concat!(env!("CARGO_PKG_REPOSITORY"), "/issues"), CYAN),
         ]),
     ];
+    if let Some(update) = &state.update {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(format!("⬆ {} {}", lang.pick("Hay una versión nueva:", "A new version is out:"), update.version))
+                .fg(GREEN)
+                .bold(),
+        );
+        let (how, value) = match &update.how {
+            Install::Command(command) => (lang.pick("Actualizá con:", "Update with:"), command),
+            Install::Link(url) => (lang.pick("Bajá el instalador:", "Get the installer:"), url),
+        };
+        lines.push(Line::from(how).fg(FG));
+        lines.push(Line::from(value.as_str()).fg(CYAN));
+        lines.push(
+            Line::from(lang.pick(
+                "(Shift + arrastrar para seleccionar y copiar)",
+                "(Shift + drag to select and copy)",
+            ))
+            .fg(MUTED),
+        );
+    }
     let wallets = donations();
     if !wallets.is_empty() {
         lines.push(Line::from(""));
@@ -1196,7 +1254,9 @@ fn draw_about(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
         }
     }
     let title = format!(" {} {} ", icons.sections[10], Section::AcercaDe.label(lang));
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel(title, PURPLE)), area);
+    // Wrapped: the update command can be longer than the panel.
+    let about = Paragraph::new(lines).alignment(Alignment::Center).wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(about.block(panel(title, PURPLE)), area);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -1715,6 +1775,24 @@ mod tests {
         assert_eq!(hints(&s)[0].1, "ver");
         s.video_window = false;
         assert_eq!(thumbnail_area(&s, screen_area), None, "embedded: the video covers the tab");
+    }
+
+    #[test]
+    fn a_new_version_is_announced_with_how_to_get_it() {
+        let mut s = state();
+        let update = crate::update::Update {
+            version: "9.9.9".into(),
+            how: Install::Command("cargo install tubetui".into()),
+        };
+        s.update(Action::UpdateFound(update));
+        assert!(s.status.contains("⬆ tubetui 9.9.9 disponible"), "{}", s.status);
+        let screen = render(&s);
+        assert!(screen.contains("Acerca de ⬆"), "{screen}");
+        let about = Section::ALL.iter().position(|x| *x == Section::AcercaDe).unwrap();
+        s.update(Action::OpenSection(about));
+        let screen = render(&s);
+        assert!(screen.contains("Hay una versión nueva: 9.9.9"), "{screen}");
+        assert!(screen.contains("cargo install tubetui"));
     }
 
     #[test]

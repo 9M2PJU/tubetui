@@ -1,6 +1,6 @@
 [package]
 name = "tubetui"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.88"
 description = "YouTube and your local videos and music in the terminal: tabs, video embedded in kitty via mpv, subscriptions, watch later, browser login and a settings screen"
@@ -26,6 +26,7 @@ tachyonfx = "0.25"
 thiserror = "2.0.21"
 toml = "1.1.8"
 toml_edit = "0.25.17"
+trash = "5.2.9"
 ureq = "3.4.2"
 
 # `cargo deb`: the Debian / Ubuntu package attached to each release.

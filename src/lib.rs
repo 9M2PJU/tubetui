@@ -18,4 +18,5 @@ pub mod session;
 pub mod store;
 pub mod thumbs;
 pub mod ui;
+pub mod update;
 pub mod youtube;
