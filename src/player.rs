@@ -19,15 +19,21 @@ pub enum Mode {
     Window,
 }
 
-/// `Auto` embeds only in kitty and not inside a multiplexer, which would
-/// swallow the graphics protocol.
+/// Terminal multiplexers relay keys and images with a delay, or drop images.
+const MULTIPLEXERS: [&str; 3] = ["TMUX", "ZELLIJ", "HERDR_ENV"];
+
+pub fn in_multiplexer(env: impl Fn(&str) -> Option<String>) -> bool {
+    MULTIPLEXERS.iter().any(|var| env(var).is_some())
+}
+
+/// `Auto` embeds only in kitty itself, not inside a multiplexer.
 pub fn resolve_mode(mode: PlayerMode, env: impl Fn(&str) -> Option<String>) -> Mode {
     match mode {
         PlayerMode::Embedded => Mode::Embedded,
         PlayerMode::Window => Mode::Window,
         PlayerMode::Auto => {
             let kitty = env("KITTY_WINDOW_ID").is_some() || env("TERM").as_deref() == Some("xterm-kitty");
-            if kitty && env("TMUX").is_none() && env("ZELLIJ").is_none() { Mode::Embedded } else { Mode::Window }
+            if kitty && !in_multiplexer(&env) { Mode::Embedded } else { Mode::Window }
         }
     }
 }
@@ -158,6 +164,10 @@ pub fn clear_images() {
 /// Puts the terminal window itself in fullscreen, where the platform allows
 /// it (X11 with `wmctrl`; kitty and most terminals export `WINDOWID`).
 pub fn set_window_fullscreen(on: bool) {
+    // Inside a multiplexer the window holds more than this app.
+    if in_multiplexer(|var| std::env::var(var).ok()) {
+        return;
+    }
     let Ok(window) = std::env::var("WINDOWID") else { return };
     let action = if on { "add,fullscreen" } else { "remove,fullscreen" };
     let _ = Command::new("wmctrl")
@@ -415,7 +425,11 @@ mod tests {
         assert_eq!(resolve_mode(PlayerMode::Auto, env(&[("KITTY_WINDOW_ID", "1")])), Mode::Embedded);
         assert_eq!(resolve_mode(PlayerMode::Auto, env(&[("TERM", "xterm-kitty")])), Mode::Embedded);
         assert_eq!(resolve_mode(PlayerMode::Auto, env(&[("TERM", "xterm-256color")])), Mode::Window);
-        assert_eq!(resolve_mode(PlayerMode::Auto, env(&[("KITTY_WINDOW_ID", "1"), ("TMUX", "/tmp/t")])), Mode::Window);
+        for multiplexer in MULTIPLEXERS {
+            let vars = [("KITTY_WINDOW_ID", "1"), (multiplexer, "1")];
+            assert_eq!(resolve_mode(PlayerMode::Auto, env(&vars)), Mode::Window, "{multiplexer}");
+            assert_eq!(resolve_mode(PlayerMode::Embedded, env(&vars)), Mode::Embedded, "explicit wins");
+        }
     }
 
     #[test]

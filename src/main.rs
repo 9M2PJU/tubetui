@@ -49,6 +49,8 @@ fn main() -> anyhow::Result<()> {
     };
     let paths = Paths::system().context("no se encontró la carpeta personal")?;
     let later = load_later(&paths)?;
+    let crash_log = paths.cache.join("crash.log");
+    log_panics(crash_log.clone());
 
     let mut runtime = Runtime::new(config, config_path, paths, later);
     let mut terminal = ratatui::init();
@@ -57,7 +59,30 @@ fn main() -> anyhow::Result<()> {
     drop(runtime);
     player::clear_images();
     ratatui::restore();
+    if let Err(e) = &result {
+        append(&crash_log, &format!("error: {e:#}"));
+    }
     result
+}
+
+/// Launched from a window manager shortcut, the terminal closes with the
+/// app and takes any error message with it; keep a copy on disk.
+fn log_panics(path: PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        append(&path, &format!("panic: {info}\n{}", std::backtrace::Backtrace::force_capture()));
+        previous(info);
+    }));
+}
+
+fn append(path: &Path, message: &str) {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "[{}] {message}", now());
+    }
 }
 
 /// "Ver después", migrating the old ytv list the first time.
@@ -135,14 +160,21 @@ impl Runtime {
             // Redraw only on change: every redraw competes with mpv for the terminal.
             if dirty {
                 let view = ui::View { embedded: self.mode() == Mode::Embedded, now: now() };
+                let t = Instant::now();
                 terminal.draw(|f| ui::draw(f, &self.state, &view))?;
+                dbg(format!("draw {:?}", t.elapsed()));
+                let t = Instant::now();
                 self.place_videos(terminal.size()?.into());
+                dbg(format!("place {:?}", t.elapsed()));
                 dirty = false;
             }
             let mut pending = Vec::new();
             if event::poll(Duration::from_millis(100)).context("reading terminal events")? {
                 match event::read()? {
-                    Event::Key(key) => pending.extend(keymap::map(key, self.state.key_context())),
+                    Event::Key(key) => {
+                        dbg(format!("key {:?} {:?}", key.code, key.kind));
+                        pending.extend(keymap::map(key, self.state.key_context()))
+                    }
                     Event::Resize(..) => {
                         terminal.clear()?;
                         self.resized_at = Some(Instant::now());
@@ -162,7 +194,10 @@ impl Runtime {
                     self.cookies = cookies.clone().filter(|_| subs.is_ok());
                 }
                 for effect in self.state.update(action) {
+                    let t = Instant::now();
+                    let name = format!("{effect:?}").chars().take(40).collect::<String>();
                     self.perform(effect, terminal)?;
+                    dbg(format!("effect {name} {:?}", t.elapsed()));
                 }
             }
             self.players.retain(|id, _| self.state.tabs.iter().any(|t| t.id == *id));
@@ -428,6 +463,18 @@ fn import_cookies(source: &Path, dest: &Path) -> Result<String, String> {
         std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
     }
     Ok(dest.display().to_string())
+}
+
+fn dbg(msg: impl AsRef<str>) {
+    use std::io::Write;
+    use std::sync::OnceLock;
+    static START: OnceLock<Instant> = OnceLock::new();
+    let start = *START.get_or_init(Instant::now);
+    if let Ok(path) = std::env::var("TUBETUI_DEBUG")
+        && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+    {
+        let _ = writeln!(f, "{:>8.1} {}", start.elapsed().as_secs_f64() * 1000.0, msg.as_ref());
+    }
 }
 
 fn now() -> i64 {
