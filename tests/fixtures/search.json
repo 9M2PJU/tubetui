@@ -1,0 +1,46 @@
+{
+ "_type": "playlist",
+ "id": "big buck bunny",
+ "title": "big buck bunny",
+ "entries": [
+  {
+   "_type": "url",
+   "ie_key": "Youtube",
+   "id": "f7NwyBnIRTE",
+   "url": "https://www.youtube.com/watch?v=f7NwyBnIRTE",
+   "title": "Cortometraje de animación \"Big Buck Bunny\" - 4K, larga duración",
+   "channel": "AnimalsReview",
+   "channel_id": "UCYDivYxr2sFafehywijfzuA",
+   "uploader": "AnimalsReview",
+   "duration": 635,
+   "view_count": 36784487,
+   "live_status": null
+  },
+  {
+   "_type": "url",
+   "ie_key": "Youtube",
+   "id": "Vpg9yizPP_g",
+   "url": "https://www.youtube.com/watch?v=Vpg9yizPP_g",
+   "title": "Big Buck Bunny [HD] | FULL MOVIE Short film (2008)",
+   "channel": "moviemaniacsDE",
+   "channel_id": "UCYCEK7i8Uq-XtFtWolofxFg",
+   "uploader": "moviemaniacsDE",
+   "duration": 597,
+   "view_count": 5220413,
+   "live_status": null
+  },
+  {
+   "_type": "url",
+   "ie_key": "Youtube",
+   "id": "rtjg02jrhYA",
+   "url": "https://www.youtube.com/watch?v=rtjg02jrhYA",
+   "title": "Big Buck Bunny - Full Audio Makeover (Music and Sound Effects)",
+   "channel": null,
+   "channel_id": "UClx4OtNunXrx8mpsfB0KwlA",
+   "uploader": "Benny Wollin",
+   "duration": null,
+   "view_count": 950489,
+   "live_status": null
+  }
+ ]
+}
