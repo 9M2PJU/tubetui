@@ -2,13 +2,14 @@
 name = "tubetui"
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "YouTube in your terminal: tabs, embedded mpv video, multi-account profiles and a TOML config editable from the app"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/polblancoo/tubetui"
 readme = "README.md"
 keywords = ["youtube", "tui", "ratatui", "mpv", "terminal"]
 categories = ["command-line-utilities", "multimedia::video"]
-exclude = ["/.github"]
+exclude = ["/.github", "/ConfigSeed.toml"]
 
 [dependencies]
+ratatui = "0.30"
