@@ -7,5 +7,9 @@ network = "Solana"
 address = "G5PVFgymo47BE3SoxzB9RvTp2ZR8z6tkXLL8hPFJu1Gm"
 
 [[wallet]]
+network = "Ethereum"
+address = "0xf0666bcA8F1b1f910E47D0f8e61185EB0E343a22"
+
+[[wallet]]
 network = "BNB (BSC)"
 address = "0xf0666bcA8F1b1f910E47D0f8e61185EB0E343a22"
