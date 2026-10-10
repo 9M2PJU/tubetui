@@ -8,9 +8,9 @@ their own window elsewhere. Every video opens in its own tab.
 > Interface in English and Spanish (`Ctrl+y l` switches). Early but usable:
 > feedback welcome.
 
-![A YouTube video playing inside tubetui, in kitty](https://raw.githubusercontent.com/polblancoo/tubetui/main/docs/video.png)
+![Search results with the preview panel and the selected video's thumbnail](https://raw.githubusercontent.com/polblancoo/tubetui/main/docs/preview.png)
 
-![Search results in tubetui](https://raw.githubusercontent.com/polblancoo/tubetui/main/docs/search.png)
+![A YouTube video playing inside tubetui, in kitty](https://raw.githubusercontent.com/polblancoo/tubetui/main/docs/video.png)
 
 ## What it does
 
