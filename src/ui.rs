@@ -39,7 +39,7 @@ pub struct Icons {
     /// In `Section::ALL` order.
     pub sections: [&'static str; 9],
     /// In `Setting::ALL` order.
-    pub settings: [&'static str; 10],
+    pub settings: [&'static str; 12],
     pub logo: &'static str,
     pub tab: &'static str,
     pub live: &'static str,
@@ -52,7 +52,7 @@ pub struct Icons {
 
 const EMOJI: Icons = Icons {
     sections: ["🏠", "🧭", "📺", "🕒", "⭐", "🔎", "📡", "🔧", "🚪"],
-    settings: ["👤", "📄", "🔄", "🚪", "🌐", "📐", "🎬", "😀", "📁", "📝"],
+    settings: ["👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "😀", "📁", "📝"],
     logo: "▶️",
     tab: "🎬",
     live: "🔴",
@@ -76,8 +76,8 @@ const NERD: Icons = Icons {
         "\u{f08b}",
     ],
     settings: [
-        "\u{f007}", "\u{f15b}", "\u{f021}", "\u{f08b}", "\u{f1ab}", "\u{f1de}", "\u{f008}", "\u{f118}", "\u{f07b}",
-        "\u{f044}",
+        "\u{f007}", "\u{f15b}", "\u{f021}", "\u{f08b}", "\u{f1ab}", "\u{f075}", "\u{f1de}", "\u{f008}", "\u{f025}",
+        "\u{f118}", "\u{f07b}", "\u{f044}",
     ],
     logo: "\u{f16a}",
     tab: "\u{f144}",
@@ -91,7 +91,7 @@ const NERD: Icons = Icons {
 
 const UNICODE: Icons = Icons {
     sections: ["⌂", "◎", "▣", "◷", "★", "⌕", "⌁", "⚙", "⏻"],
-    settings: ["☺", "▤", "↻", "⏻", "⇄", "▦", "▶", "☻", "▭", "✎"],
+    settings: ["☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "☻", "▭", "✎"],
     logo: "▶",
     tab: "▶",
     live: "●",
@@ -245,7 +245,7 @@ fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, are
                 ]),
                 Prompt::Channels => Line::from(format!(" {} Buscar canales ", icons.sections[6])),
                 Prompt::CookiesFile => Line::from(format!(" {} Ruta del cookies.txt ", icons.settings[1])),
-                Prompt::DownloadDir => Line::from(format!(" {} Carpeta de descargas ", icons.settings[8])),
+                Prompt::DownloadDir => Line::from(format!(" {} Carpeta de descargas ", icons.settings[10])),
             };
             frame.render_widget(Paragraph::new(state.query.as_str()).block(panel(title, CYAN)), input);
             let x = input.x + 1 + state.query.chars().count() as u16;
@@ -469,9 +469,8 @@ fn draw_help(frame: &mut Frame) {
     let mut sections = keymap::help();
     // Two balanced columns so everything fits on a laptop screen.
     let sizes: Vec<usize> = sections.iter().map(|(_, rows)| rows.len() + 2).collect();
-    let split = (1..sections.len())
-        .min_by_key(|&k| sizes[..k].iter().sum::<usize>().max(sizes[k..].iter().sum()))
-        .unwrap_or(1);
+    let split =
+        (1..sections.len()).min_by_key(|&k| sizes[..k].iter().sum::<usize>().max(sizes[k..].iter().sum())).unwrap_or(1);
     let right = sections.split_off(split);
     let (left, right) = (lines_of(&sections), lines_of(&right));
     let height = left.len().max(right.len()) as u16 + 3;

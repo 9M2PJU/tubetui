@@ -52,11 +52,8 @@ pub const IN_LISTS: &[(&str, &str)] = &[
     ("/", "buscar (dentro de un canal: en ese canal)"),
 ];
 
-pub const IN_SEARCH: &[(&str, &str)] = &[
-    ("Enter", "buscar / aceptar"),
-    ("Tab", "dónde buscar: todo / mis canales / canal"),
-    ("Esc", "cancelar"),
-];
+pub const IN_SEARCH: &[(&str, &str)] =
+    &[("Enter", "buscar / aceptar"), ("Tab", "dónde buscar: todo / mis canales / canal"), ("Esc", "cancelar")];
 
 pub const IN_TAB: &[(&str, &str)] = &[
     ("espacio", "pausa"),
@@ -64,6 +61,8 @@ pub const IN_TAB: &[(&str, &str)] = &[
     ("↑ ↓", "subir / bajar volumen"),
     ("m", "silenciar"),
     ("j", "subtítulos sí / no"),
+    ("i", "modo: subtítulos → original → doblado"),
+    ("o", "otro idioma (es → en → pt …)"),
 ];
 
 pub fn map(key: KeyEvent, ctx: KeyContext) -> Option<Action> {
@@ -129,6 +128,8 @@ fn player(code: KeyCode) -> Option<Action> {
         KeyCode::Down => Some(Action::Volume(-VOLUME_STEP)),
         KeyCode::Char('m') => Some(Action::ToggleMute),
         KeyCode::Char('j') => Some(Action::CycleSubtitles),
+        KeyCode::Char('i') => Some(Action::CycleLanguage),
+        KeyCode::Char('o') => Some(Action::CycleSubLang),
         _ => None,
     }
 }
@@ -267,6 +268,8 @@ mod tests {
         assert_eq!(map(key(KeyCode::Down), TAB), Some(Action::Volume(-VOLUME_STEP)));
         assert_eq!(map(char('m'), TAB), Some(Action::ToggleMute));
         assert_eq!(map(char('j'), TAB), Some(Action::CycleSubtitles));
+        assert_eq!(map(char('i'), TAB), Some(Action::CycleLanguage));
+        assert_eq!(map(char('o'), TAB), Some(Action::CycleSubLang));
         assert_eq!(map(key(KeyCode::Enter), TAB), None);
     }
 

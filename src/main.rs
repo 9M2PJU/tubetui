@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use clap::Parser;
@@ -24,6 +24,11 @@ use tubetui::youtube::{self, Items};
 use tubetui::{keymap, session, ui};
 
 const SUBS_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
+/// While the window is being resized the video stays hidden; it is placed
+/// once the size has been stable this long (each placement restarts mpv's output).
+const RESIZE_SETTLE: Duration = Duration::from_millis(250);
+/// mpv may flush one more frame after being hidden; clear again after this.
+const LATE_FRAME: Duration = Duration::from_millis(300);
 
 /// YouTube in your terminal.
 #[derive(Parser)]
@@ -74,6 +79,12 @@ struct Runtime {
     rx: mpsc::Receiver<Action>,
     /// Cookie file of the current login, once it is known to work.
     cookies: Option<PathBuf>,
+    /// The video tab seen most recently; the one allowed to play in the background.
+    last_watched: Option<TabId>,
+    /// Last terminal resize, while it is still settling.
+    resized_at: Option<Instant>,
+    /// When to clear leftover video frames again.
+    clear_at: Option<Instant>,
 }
 
 impl Runtime {
@@ -81,7 +92,18 @@ impl Runtime {
         let mut state = State::new(config, later);
         state.update(Action::SubsLoaded(store::load_subs(&paths.subs)));
         let (tx, rx) = mpsc::channel();
-        let runtime = Self { config_path, paths, state, players: HashMap::new(), tx, rx, cookies: None };
+        let runtime = Self {
+            config_path,
+            paths,
+            state,
+            players: HashMap::new(),
+            tx,
+            rx,
+            cookies: None,
+            last_watched: None,
+            resized_at: None,
+            clear_at: None,
+        };
         runtime.start_session(false);
         runtime
     }
@@ -93,6 +115,16 @@ impl Runtime {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
         let mut dirty = true;
         while !self.state.quit {
+            if self.resized_at.is_some_and(|t| t.elapsed() >= RESIZE_SETTLE) {
+                self.resized_at = None;
+                dirty = true;
+            }
+            if self.clear_at.is_some_and(|t| Instant::now() >= t) {
+                self.clear_at = None;
+                if ui::video_area(&self.state, terminal.size()?.into()).is_none() || self.resized_at.is_some() {
+                    player::clear_images();
+                }
+            }
             // Redraw only on change: every redraw competes with mpv for the terminal.
             if dirty {
                 let view = ui::View { embedded: self.mode() == Mode::Embedded, now: now() };
@@ -106,6 +138,7 @@ impl Runtime {
                     Event::Key(key) => pending.extend(keymap::map(key, self.state.key_context())),
                     Event::Resize(..) => {
                         terminal.clear()?;
+                        self.resized_at = Some(Instant::now());
                         dirty = true;
                     }
                     _ => {}
@@ -151,6 +184,7 @@ impl Runtime {
                 let result = match value {
                     SettingValue::Text(text) => config::set_value(path, table, key, text),
                     SettingValue::Number(number) => config::set_value(path, table, key, number),
+                    SettingValue::Bool(flag) => config::set_value(path, table, key, flag),
                 };
                 if let Err(e) = result {
                     self.send(Action::Status(e.to_string()));
@@ -261,8 +295,9 @@ impl Runtime {
             config::set_value(&path, "ui", "icons", self.state.config.ui.icons.as_str())?;
         }
         for p in self.players.values_mut() {
-            p.hide();
+            p.hide(false);
         }
+        player::clear_images();
         let editor = std::env::var("VISUAL")
             .or_else(|_| std::env::var("EDITOR"))
             .unwrap_or_else(|_| if cfg!(windows) { "notepad".into() } else { "nano".into() });
@@ -301,15 +336,27 @@ impl Runtime {
         let _ = self.tx.send(action);
     }
 
-    /// Shows the active tab's video where the layout left room; hides the rest.
+    /// Shows the active tab's video where the layout left room and hides the
+    /// rest. Only the last video watched may keep sounding in the background.
     fn place_videos(&mut self, screen: Rect) {
         let active = self.state.active_tab().map(|t| t.id);
-        let geometry = ui::video_area(&self.state, screen).map(|a| Geometry::new(a, player::cell_size()));
+        if active.is_some() {
+            self.last_watched = active;
+        }
+        let audible = self.last_watched.filter(|_| self.state.config.player.background_audio || active.is_some());
+        let geometry = ui::video_area(&self.state, screen)
+            .filter(|_| self.resized_at.is_none())
+            .map(|a| Geometry::new(a, player::cell_size()));
+        let mut hidden_any = false;
         for (id, p) in &mut self.players {
             match geometry.filter(|_| Some(*id) == active) {
                 Some(g) => p.show(g),
-                None => p.hide(),
+                None => hidden_any |= p.hide(Some(*id) == audible),
             }
+        }
+        if hidden_any {
+            player::clear_images();
+            self.clear_at = Some(Instant::now() + LATE_FRAME);
         }
     }
 }

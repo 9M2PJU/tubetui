@@ -48,6 +48,8 @@ pub struct PlayerConfig {
     pub language: Language,
     /// Subtitle / dubbing language code.
     pub sub_lang: String,
+    /// Keep listening when leaving the video tab (only the last video plays).
+    pub background_audio: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -151,6 +153,28 @@ impl IconSet {
     }
 }
 
+/// Subtitle / dubbing languages offered by the settings screen (any code works in the file).
+pub const LANGUAGES: [(&str, &str); 9] = [
+    ("es", "español"),
+    ("en", "inglés"),
+    ("pt", "portugués"),
+    ("fr", "francés"),
+    ("it", "italiano"),
+    ("de", "alemán"),
+    ("ja", "japonés"),
+    ("ko", "coreano"),
+    ("ru", "ruso"),
+];
+
+pub fn next_language(code: &str) -> &'static str {
+    let index = LANGUAGES.iter().position(|(c, _)| *c == code).map_or(0, |i| (i + 1) % LANGUAGES.len());
+    LANGUAGES[index].0
+}
+
+pub fn language_name(code: &str) -> String {
+    LANGUAGES.iter().find(|(c, _)| *c == code).map_or_else(|| code.to_owned(), |(c, name)| format!("{name} ({c})"))
+}
+
 /// Heights offered by the settings screen.
 pub const QUALITIES: [u32; 4] = [480, 720, 1080, 1440];
 
@@ -181,6 +205,7 @@ impl Default for PlayerConfig {
             hwdec: true,
             language: Language::Subtitles,
             sub_lang: "es".into(),
+            background_audio: true,
         }
     }
 }
@@ -312,6 +337,15 @@ mod tests {
         assert_eq!(next_quality(480), 720);
         assert_eq!(next_quality(1440), 480);
         assert_eq!(next_quality(600), 720);
+    }
+
+    #[test]
+    fn languages_cycle_and_have_names() {
+        assert_eq!(next_language("es"), "en");
+        assert_eq!(next_language("ru"), "es");
+        assert_eq!(next_language("xx"), "es");
+        assert_eq!(language_name("pt"), "portugués (pt)");
+        assert_eq!(language_name("eu"), "eu");
     }
 
     #[test]

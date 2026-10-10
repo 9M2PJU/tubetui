@@ -106,10 +106,7 @@ pub struct Launch<'a> {
 pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<String> {
     let Launch { config, mode, cookies, url } = *launch;
     let lang = &config.sub_lang;
-    let mut raw = format!("sub-langs=[{lang}],write-subs=,write-auto-subs=");
-    if let Some(cookies) = cookies {
-        raw.push_str(&format!(",cookies={}", cookies.display()));
-    }
+    let raw = raw_options(config, cookies);
     let mut args = vec![
         format!("--input-ipc-server={ipc}"),
         format!("--ytdl-format={}", ytdl_format(config)),
@@ -143,13 +140,48 @@ pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<S
     args
 }
 
-pub fn command_json(command: PlayerCommand) -> Value {
+/// Deletes every image drawn with the kitty graphics protocol. mpv stops
+/// drawing when its video is hidden, but its last frame stays on screen.
+pub fn clear_images() {
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x1b_Ga=d,d=a\x1b\\");
+    let _ = out.flush();
+}
+
+/// Reopens `path` at `seconds`, so new format/subtitle options take effect.
+pub fn reload_line(path: &str, seconds: f64) -> String {
+    json!({ "command": ["loadfile", path, "replace", -1, format!("start={seconds:.1}")] }).to_string()
+}
+
+/// yt-dlp options passed through mpv: subtitles to fetch and the login.
+fn raw_options(config: &PlayerConfig, cookies: Option<&std::path::Path>) -> String {
+    let mut raw = format!("sub-langs=[{}],write-subs=,write-auto-subs=", config.sub_lang);
+    if let Some(cookies) = cookies {
+        raw.push_str(&format!(",cookies={}", cookies.display()));
+    }
+    raw
+}
+
+/// IPC lines for a command. Most are JSON; reloading uses mpv's text
+/// command form, the only one that expands `${time-pos}`.
+/// `config` must already reflect `Language` / `SubLang` changes (see [`Player::send`]).
+pub fn command_lines(config: &PlayerConfig, cookies: Option<&std::path::Path>, command: PlayerCommand) -> Vec<String> {
+    let line = |value: Value| vec![value.to_string()];
     match command {
-        PlayerCommand::TogglePause => json!({ "command": ["cycle", "pause"] }),
-        PlayerCommand::Seek(seconds) => json!({ "command": ["seek", seconds, "relative"] }),
-        PlayerCommand::Volume(delta) => json!({ "command": ["add", "volume", delta] }),
-        PlayerCommand::ToggleMute => json!({ "command": ["cycle", "mute"] }),
-        PlayerCommand::CycleSubtitles => json!({ "command": ["cycle", "sub"] }),
+        PlayerCommand::TogglePause => line(json!({ "command": ["cycle", "pause"] })),
+        PlayerCommand::Seek(seconds) => line(json!({ "command": ["seek", seconds, "relative"] })),
+        PlayerCommand::Volume(delta) => line(json!({ "command": ["add", "volume", delta] })),
+        PlayerCommand::ToggleMute => line(json!({ "command": ["cycle", "mute"] })),
+        PlayerCommand::CycleSubtitles => line(json!({ "command": ["cycle", "sub"] })),
+        PlayerCommand::Language(_) | PlayerCommand::SubLang(_) => {
+            let sid = if config.language == Language::Subtitles { "auto" } else { "no" };
+            vec![
+                set_property("ytdl-format", ytdl_format(config).into()).to_string(),
+                set_property("ytdl-raw-options", raw_options(config, cookies).into()).to_string(),
+                set_property("slang", config.sub_lang.clone().into()).to_string(),
+                set_property("sid", sid.into()).to_string(),
+            ]
+        }
     }
 }
 
@@ -163,8 +195,12 @@ pub struct Player {
     ipc_path: String,
     ipc: Option<Box<dyn Write + Send>>,
     mode: Mode,
+    config: PlayerConfig,
+    cookies: Option<std::path::PathBuf>,
     /// Where the video is drawn; `None` while hidden or in window mode.
     shown_at: Option<Geometry>,
+    /// We paused it because another video took over; a user pause is left alone.
+    paused_by_us: bool,
 }
 
 impl Player {
@@ -182,36 +218,87 @@ impl Player {
             .stderr(Stdio::null())
             .spawn()?;
         let shown_at = if mode == Mode::Embedded { geometry } else { None };
-        Ok(Self { child, ipc_path, ipc: None, mode, shown_at })
+        let (config, cookies) = (launch.config.clone(), launch.cookies.map(Into::into));
+        Ok(Self { child, ipc_path, ipc: None, mode, config, cookies, shown_at, paused_by_us: false })
     }
 
     pub fn send(&mut self, command: PlayerCommand) {
-        self.write(&command_json(command));
+        match command {
+            PlayerCommand::Language(language) => self.config.language = language,
+            PlayerCommand::SubLang(code) => self.config.sub_lang = code.into(),
+            _ => {}
+        }
+        for line in command_lines(&self.config, self.cookies.as_deref(), command) {
+            self.write(&line);
+        }
+        if matches!(command, PlayerCommand::Language(_) | PlayerCommand::SubLang(_)) {
+            // Same video, new audio/subtitles, same second.
+            let path = self.query("path").and_then(|v| v.as_str().map(str::to_owned));
+            let seconds = self.query("time-pos").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if let Some(path) = path {
+                self.write(&reload_line(&path, seconds));
+            }
+        }
     }
 
-    /// Shows the video at `geometry`, resuming it if it was hidden. No-op when
-    /// it is already there or in window mode.
+    /// Reads a property on a separate connection; `None` if mpv does not answer quickly.
+    fn query(&self, property: &str) -> Option<Value> {
+        use std::io::{BufRead, BufReader};
+        let mut stream = connect_stream(&self.ipc_path).ok()?;
+        #[cfg(unix)]
+        stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).ok()?;
+        writeln!(stream, "{}", json!({ "command": ["get_property", property], "request_id": 1 })).ok()?;
+        BufReader::new(stream)
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+            .find(|reply| reply["request_id"] == 1)
+            .map(|reply| reply["data"].clone())
+    }
+
+    /// Shows the video at `geometry`, resuming it if we had paused it.
+    /// No-op in window mode.
     pub fn show(&mut self, geometry: Geometry) {
-        if self.mode != Mode::Embedded || self.shown_at == Some(geometry) {
+        if self.mode != Mode::Embedded {
             return;
         }
-        for (name, value) in geometry.options() {
-            self.write(&set_property(&format!("options/vo-kitty-{name}"), value.into()));
+        if self.shown_at != Some(geometry) {
+            // The old placement would stay on screen at the old size/position.
+            clear_images();
+            for (name, value) in geometry.options() {
+                self.write(&set_property(&format!("options/vo-kitty-{name}"), value.into()).to_string());
+            }
+            // Recreating the video output applies the new geometry and keeps the position.
+            self.write(&set_property("vid", "no".into()).to_string());
+            self.write(&set_property("vid", "auto".into()).to_string());
+            self.shown_at = Some(geometry);
         }
-        // Recreating the video output applies the new geometry and keeps the position.
-        self.write(&set_property("vid", "no".into()));
-        self.write(&set_property("vid", "auto".into()));
-        if self.shown_at.is_none() {
-            self.write(&set_property("pause", false.into()));
-        }
-        self.shown_at = Some(geometry);
+        self.resume();
     }
 
-    /// Stops drawing and decoding video, and pauses.
-    pub fn hide(&mut self) {
-        if self.shown_at.take().is_some() {
-            self.write(&set_property("vid", "no".into()));
-            self.write(&set_property("pause", true.into()));
+    /// Stops drawing and decoding video. With `keep_audio` it keeps playing
+    /// (background listening); otherwise it is paused until shown again.
+    /// Returns whether it was on screen (its last frame must be cleared).
+    pub fn hide(&mut self, keep_audio: bool) -> bool {
+        if self.mode != Mode::Embedded {
+            return false;
+        }
+        let was_shown = self.shown_at.take().is_some();
+        if was_shown {
+            self.write(&set_property("vid", "no".into()).to_string());
+        }
+        if keep_audio {
+            self.resume();
+        } else if !self.paused_by_us {
+            self.write(&set_property("pause", true.into()).to_string());
+            self.paused_by_us = true;
+        }
+        was_shown
+    }
+
+    fn resume(&mut self) {
+        if std::mem::take(&mut self.paused_by_us) {
+            self.write(&set_property("pause", false.into()).to_string());
         }
     }
 
@@ -220,7 +307,7 @@ impl Player {
     }
 
     /// Best effort: if mpv is not listening yet the message is dropped.
-    fn write(&mut self, message: &Value) {
+    fn write(&mut self, line: &str) {
         if self.ipc.is_none() {
             self.ipc = connect(&self.ipc_path).ok();
             // We never read replies or events; keep mpv from queueing them.
@@ -229,7 +316,7 @@ impl Player {
             }
         }
         if let Some(ipc) = self.ipc.as_mut()
-            && writeln!(ipc, "{message}").is_err()
+            && writeln!(ipc, "{line}").is_err()
         {
             self.ipc = None;
         }
@@ -255,14 +342,23 @@ fn ipc_path() -> String {
     }
 }
 
-#[cfg(unix)]
+/// Write side of the IPC connection. mpv answers every command; a thread
+/// discards the answers, otherwise the socket fills up and writes block.
 fn connect(path: &str) -> std::io::Result<Box<dyn Write + Send>> {
-    Ok(Box::new(std::os::unix::net::UnixStream::connect(path)?))
+    let stream = connect_stream(path)?;
+    let mut replies = stream.try_clone()?;
+    std::thread::spawn(move || std::io::copy(&mut replies, &mut std::io::sink()));
+    Ok(Box::new(stream))
+}
+
+#[cfg(unix)]
+fn connect_stream(path: &str) -> std::io::Result<std::os::unix::net::UnixStream> {
+    std::os::unix::net::UnixStream::connect(path)
 }
 
 #[cfg(windows)]
-fn connect(path: &str) -> std::io::Result<Box<dyn Write + Send>> {
-    Ok(Box::new(std::fs::OpenOptions::new().write(true).open(path)?))
+fn connect_stream(path: &str) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).write(true).open(path)
 }
 
 #[cfg(test)]
@@ -373,8 +469,41 @@ mod tests {
 
     #[test]
     fn commands_serialize_to_mpv_ipc() {
-        assert_eq!(command_json(PlayerCommand::TogglePause).to_string(), r#"{"command":["cycle","pause"]}"#);
-        assert_eq!(command_json(PlayerCommand::Seek(-5)).to_string(), r#"{"command":["seek",-5,"relative"]}"#);
+        let config = PlayerConfig::default();
+        let one = |command| command_lines(&config, None, command).join("\n");
+        assert_eq!(one(PlayerCommand::TogglePause), r#"{"command":["cycle","pause"]}"#);
+        assert_eq!(one(PlayerCommand::Seek(-5)), r#"{"command":["seek",-5,"relative"]}"#);
+        assert_eq!(one(PlayerCommand::Volume(5)), r#"{"command":["add","volume",5]}"#);
+        assert_eq!(one(PlayerCommand::ToggleMute), r#"{"command":["cycle","mute"]}"#);
+        assert_eq!(one(PlayerCommand::CycleSubtitles), r#"{"command":["cycle","sub"]}"#);
+    }
+
+    #[test]
+    fn language_change_reloads_at_the_same_second() {
+        let config = PlayerConfig {
+            prefer_codec: String::new(),
+            language: Language::Dubbed,
+            sub_lang: "en".into(),
+            ..Default::default()
+        };
+        let cookies = std::path::Path::new("/c.txt");
+        let lines = command_lines(&config, Some(cookies), PlayerCommand::SubLang("en"));
+        assert_eq!(
+            lines,
+            [
+                r#"{"command":["set_property","ytdl-format","bv*[height<=720]+ba[language^=en]/ba/b[height<=720]/b"]}"#,
+                r#"{"command":["set_property","ytdl-raw-options","sub-langs=[en],write-subs=,write-auto-subs=,cookies=/c.txt"]}"#,
+                r#"{"command":["set_property","slang","en"]}"#,
+                r#"{"command":["set_property","sid","no"]}"#,
+            ]
+        );
+        assert_eq!(
+            reload_line("https://youtu.be/x", 83.456),
+            r#"{"command":["loadfile","https://youtu.be/x","replace",-1,"start=83.5"]}"#
+        );
+        let subs = PlayerConfig { language: Language::Subtitles, ..config };
+        let lines = command_lines(&subs, None, PlayerCommand::Language(Language::Subtitles));
+        assert_eq!(lines[3], r#"{"command":["set_property","sid","auto"]}"#);
     }
 
     #[test]

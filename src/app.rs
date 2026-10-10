@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::config::{Config, Language, PlayerMode, next_quality};
+use crate::config::{Config, Language, PlayerMode, language_name, next_language, next_quality};
 use crate::domain::{TabId, Video};
 use crate::keymap::KeyContext;
 use crate::youtube::{Items, Source};
@@ -65,22 +65,26 @@ pub enum Setting {
     Refresh,
     Logout,
     Language,
+    SubLang,
     Quality,
     VideoMode,
+    BackgroundAudio,
     Icons,
     DownloadDir,
     EditFile,
 }
 
 impl Setting {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::Browser,
         Self::ImportCookies,
         Self::Refresh,
         Self::Logout,
         Self::Language,
+        Self::SubLang,
         Self::Quality,
         Self::VideoMode,
+        Self::BackgroundAudio,
         Self::Icons,
         Self::DownloadDir,
         Self::EditFile,
@@ -93,8 +97,10 @@ impl Setting {
             Self::Refresh => "Releer la sesión",
             Self::Logout => "Cerrar sesión",
             Self::Language => "Idioma",
+            Self::SubLang => "Idioma de subtítulos y doblaje",
             Self::Quality => "Calidad máxima",
             Self::VideoMode => "Video",
+            Self::BackgroundAudio => "Al salir de la pestaña del video",
             Self::Icons => "Íconos",
             Self::DownloadDir => "Carpeta de descargas",
             Self::EditFile => "Editar config.toml",
@@ -174,6 +180,7 @@ pub struct Unsubscribe {
 pub enum SettingValue {
     Text(String),
     Number(i64),
+    Bool(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +236,10 @@ pub enum Action {
     Volume(i32),
     ToggleMute,
     CycleSubtitles,
+    /// Next language mode (subtitles → original → dubbed) for this and later videos.
+    CycleLanguage,
+    /// Next subtitle / dubbing language (es → en → pt …) for this and later videos.
+    CycleSubLang,
     Quit,
 }
 
@@ -274,6 +285,10 @@ pub enum PlayerCommand {
     Volume(i32),
     ToggleMute,
     CycleSubtitles,
+    /// Reload the video with other audio / subtitles, at the same second.
+    Language(Language),
+    /// Same, with another subtitle / dubbing language code.
+    SubLang(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,12 +408,20 @@ impl State {
             Setting::Browser | Setting::Logout => self.session_label(),
             Setting::ImportCookies | Setting::Refresh | Setting::EditFile => String::new(),
             Setting::Language => language_label(player.language).into(),
+            Setting::SubLang => language_name(&player.sub_lang),
             Setting::Quality => format!("{}p", player.max_height),
             Setting::VideoMode => match player.mode {
                 PlayerMode::Auto => "automático (integrado en kitty)".into(),
                 PlayerMode::Embedded => "integrado".into(),
                 PlayerMode::Window => "ventana aparte".into(),
             },
+            Setting::BackgroundAudio => {
+                if player.background_audio {
+                    "sigue sonando".into()
+                } else {
+                    "se pausa".into()
+                }
+            }
             Setting::Icons => self.config.ui.icons.as_str().into(),
             Setting::DownloadDir => match self.config.download.dir.as_str() {
                 "" => "~/Videos".into(),
@@ -482,6 +505,31 @@ impl State {
             Action::Volume(delta) => return self.command(PlayerCommand::Volume(delta)),
             Action::ToggleMute => return self.command(PlayerCommand::ToggleMute),
             Action::CycleSubtitles => return self.command(PlayerCommand::CycleSubtitles),
+            Action::CycleLanguage => {
+                let player = &mut self.config.player;
+                player.language = player.language.next();
+                let language = player.language;
+                self.status = format!("Idioma: {} (recargando el video…)", language_label(language));
+                let mut effects = vec![Effect::SaveSetting {
+                    table: "player",
+                    key: "language",
+                    value: SettingValue::Text(language.as_str().into()),
+                }];
+                effects.extend(self.command(PlayerCommand::Language(language)));
+                return effects;
+            }
+            Action::CycleSubLang => {
+                let code = next_language(&self.config.player.sub_lang);
+                self.config.player.sub_lang = code.into();
+                self.status = format!("Subtítulos y doblaje en {} (recargando el video…)", language_name(code));
+                let mut effects = vec![Effect::SaveSetting {
+                    table: "player",
+                    key: "sub_lang",
+                    value: SettingValue::Text(code.into()),
+                }];
+                effects.extend(self.command(PlayerCommand::SubLang(code)));
+                return effects;
+            }
             Action::Quit => self.quit = true,
         }
         Vec::new()
@@ -612,6 +660,11 @@ impl State {
                 player.language = player.language.next();
                 save("player", "language", SettingValue::Text(player.language.as_str().into()))
             }
+            Setting::SubLang => {
+                player.sub_lang = next_language(&player.sub_lang).into();
+                self.status = "Se aplica a los próximos videos".into();
+                save("player", "sub_lang", SettingValue::Text(self.config.player.sub_lang.clone()))
+            }
             Setting::Quality => {
                 player.max_height = next_quality(player.max_height);
                 save("player", "max_height", SettingValue::Number(player.max_height.into()))
@@ -620,6 +673,10 @@ impl State {
                 player.mode = player.mode.next();
                 self.status = "Se aplica a los próximos videos".into();
                 save("player", "mode", SettingValue::Text(self.config.player.mode.as_str().into()))
+            }
+            Setting::BackgroundAudio => {
+                player.background_audio = !player.background_audio;
+                save("player", "background_audio", SettingValue::Bool(player.background_audio))
             }
             Setting::Icons => {
                 self.config.ui.icons = self.config.ui.icons.next();
@@ -1412,6 +1469,52 @@ mod tests {
         assert_eq!(change(&mut s, Setting::Icons), [saved("ui", "icons", text("nerd"))]);
         assert_eq!(s.config.ui.icons, IconSet::Nerd);
         assert_eq!(change(&mut s, Setting::EditFile), [Effect::EditConfig]);
+    }
+
+    #[test]
+    fn subtitle_language_cycles_and_saves() {
+        let mut s = state();
+        assert_eq!(s.setting_value(Setting::SubLang), "español (es)");
+        assert_eq!(change(&mut s, Setting::SubLang), [saved("player", "sub_lang", text("en"))]);
+        assert_eq!(s.setting_value(Setting::SubLang), "inglés (en)");
+    }
+
+    #[test]
+    fn background_audio_toggles_and_saves() {
+        let mut s = state();
+        assert_eq!(s.setting_value(Setting::BackgroundAudio), "sigue sonando");
+        assert_eq!(
+            change(&mut s, Setting::BackgroundAudio),
+            [saved("player", "background_audio", SettingValue::Bool(false))]
+        );
+        assert_eq!(s.setting_value(Setting::BackgroundAudio), "se pausa");
+    }
+
+    #[test]
+    fn language_changes_the_current_video_and_is_saved() {
+        let mut s = with_videos(&["a"]);
+        let a = play(&mut s, 0);
+        assert_eq!(
+            s.update(Action::CycleLanguage),
+            [
+                saved("player", "language", text("original")),
+                Effect::Command(a, PlayerCommand::Language(Language::Original)),
+            ]
+        );
+        assert!(s.status.contains("recargando"));
+        s.update(Action::GoTab(0));
+        assert_eq!(s.update(Action::CycleLanguage), [saved("player", "language", text("dubbed"))]);
+    }
+
+    #[test]
+    fn sub_language_changes_the_current_video_and_is_saved() {
+        let mut s = with_videos(&["a"]);
+        let a = play(&mut s, 0);
+        assert_eq!(
+            s.update(Action::CycleSubLang),
+            [saved("player", "sub_lang", text("en")), Effect::Command(a, PlayerCommand::SubLang("en"))]
+        );
+        assert_eq!(s.config.player.sub_lang, "en");
     }
 
     #[test]
