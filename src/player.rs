@@ -149,8 +149,22 @@ pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<S
 /// drawing when its video is hidden, but its last frame stays on screen.
 pub fn clear_images() {
     let mut out = std::io::stdout();
-    let _ = out.write_all(b"\x1b_Ga=d,d=a\x1b\\");
+    // A killed mpv may leave a graphics command unterminated, which would
+    // swallow ours: close any open one first.
+    let _ = out.write_all(b"\x1b\\\x1b_Ga=d,d=a\x1b\\");
     let _ = out.flush();
+}
+
+/// Puts the terminal window itself in fullscreen, where the platform allows
+/// it (X11 with `wmctrl`; kitty and most terminals export `WINDOWID`).
+pub fn set_window_fullscreen(on: bool) {
+    let Ok(window) = std::env::var("WINDOWID") else { return };
+    let action = if on { "add,fullscreen" } else { "remove,fullscreen" };
+    let _ = Command::new("wmctrl")
+        .args(["-i", "-r", &window, "-b", action])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Reopens `path` at `seconds`, so new format/subtitle options take effect.
@@ -338,7 +352,14 @@ impl Player {
 }
 
 impl Drop for Player {
+    /// Asks mpv to quit so it finishes its current frame and removes its
+    /// image; kills it if it does not exit promptly.
     fn drop(&mut self) {
+        self.write(&json!({ "command": ["quit"] }).to_string());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while std::time::Instant::now() < deadline && !self.has_exited() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
         #[cfg(unix)]

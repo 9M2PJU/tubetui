@@ -15,7 +15,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::layout::Rect;
 
-use tubetui::app::{Action, Effect, SettingValue, State};
+use tubetui::app::{Action, Effect, PlayerCommand, SettingValue, State};
 use tubetui::config::{self, Config};
 use tubetui::domain::{TabId, Video};
 use tubetui::media::{self, MediaKind};
@@ -89,6 +89,8 @@ struct Runtime {
     resized_at: Option<Instant>,
     /// When to clear leftover video frames again.
     clear_at: Option<Instant>,
+    /// The terminal window was put in fullscreen by us.
+    window_fullscreen: bool,
 }
 
 impl Runtime {
@@ -107,6 +109,7 @@ impl Runtime {
             last_watched: None,
             resized_at: None,
             clear_at: None,
+            window_fullscreen: false,
         };
         runtime.start_session(false);
         runtime
@@ -163,6 +166,14 @@ impl Runtime {
                 }
             }
             self.players.retain(|id, _| self.state.tabs.iter().any(|t| t.id == *id));
+            // Leaving fullscreen any way (Esc, another tab, closing) restores the window.
+            if self.window_fullscreen && !self.state.fullscreen {
+                player::set_window_fullscreen(false);
+            }
+            self.window_fullscreen = self.state.fullscreen && self.mode() == Mode::Embedded;
+        }
+        if self.window_fullscreen {
+            player::set_window_fullscreen(false);
         }
         Ok(())
     }
@@ -267,6 +278,11 @@ impl Runtime {
                 self.players.remove(&id);
             }
             Effect::Command(id, command) => {
+                if let PlayerCommand::Fullscreen(on) = command
+                    && self.mode() == Mode::Embedded
+                {
+                    player::set_window_fullscreen(on);
+                }
                 if let Some(p) = self.players.get_mut(&id) {
                     p.send(command);
                 }
