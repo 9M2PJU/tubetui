@@ -118,6 +118,26 @@ pub struct View {
     pub embedded: bool,
     /// Unix time, for "hace 3 días".
     pub now: i64,
+    /// How long the current list has been loading.
+    pub loading: Option<std::time::Duration>,
+}
+
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// `"⠹ Cargando Suscripciones… 3 s"`.
+fn loading_text(title: &str, view: &View) -> String {
+    let elapsed = view.loading.unwrap_or_default();
+    let frame = SPINNER[(elapsed.as_millis() / 100) as usize % SPINNER.len()];
+    format!("{frame} Cargando {title}… {} s", elapsed.as_secs())
+}
+
+/// A block bouncing inside `width` cells: progress without a known total.
+fn bouncing_bar(width: usize, view: &View) -> String {
+    let block = 6.min(width);
+    let span = width - block;
+    let step = (view.loading.unwrap_or_default().as_millis() / 60) as usize % (2 * span.max(1));
+    let left = if step <= span { step } else { 2 * span - step };
+    format!("{}{}{}", "░".repeat(left), "█".repeat(block), "░".repeat(span - left))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,14 +210,16 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
                 ])
                 .alignment(Alignment::Center)
             } else if view.embedded {
-                Paragraph::new("")
+                // Covered by the first video frame as soon as it arrives.
+                Paragraph::new(vec![Line::from(""), Line::from("⏳ Cargando el video…").fg(MUTED)])
+                    .alignment(Alignment::Center)
             } else {
-                Paragraph::new("Reproduciendo en una ventana de mpv").fg(MUTED)
+                Paragraph::new("Se abre en una ventana de mpv (puede tardar unos segundos)").fg(MUTED)
             };
             frame.render_widget(body.block(panel(title, BLUE)), areas.content);
         }
     }
-    draw_status(frame, state, icons, areas.status);
+    draw_status(frame, state, icons, view, areas.status);
     draw_hints(frame, &hints(state), areas.hints);
     if state.help {
         draw_help(frame);
@@ -317,7 +339,7 @@ fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, are
     };
     match state.listing() {
         Some(listing) => draw_listing(frame, state, icons, view, listing, area),
-        None => draw_welcome(frame, state, icons, area),
+        None => draw_welcome(frame, state, icons, view, area),
     }
 }
 
@@ -339,7 +361,7 @@ fn draw_cookies_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(panel(" Importar sesión ", MUTED)), area);
 }
 
-fn draw_welcome(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
+fn draw_welcome(frame: &mut Frame, state: &State, icons: &Icons, view: &View, area: Rect) {
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
@@ -355,7 +377,8 @@ fn draw_welcome(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
     ];
     if let Some(title) = &state.loading {
         lines.push(Line::from(""));
-        lines.push(Line::from(format!("Cargando {title}…")).fg(YELLOW));
+        lines.push(Line::from(loading_text(title, view)).fg(YELLOW));
+        lines.push(Line::from(bouncing_bar(30, view)).fg(BLUE));
     }
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel("", MUTED)), area);
 }
@@ -363,7 +386,7 @@ fn draw_welcome(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
 fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, listing: &Listing, area: Rect) {
     let breadcrumb: Vec<&str> = state.stack.iter().map(|l| l.title.as_str()).collect();
     let title = match &state.loading {
-        Some(loading) => format!(" Cargando {loading}… "),
+        Some(loading) => format!(" {} ", loading_text(loading, view)),
         None if listing.items == Items::Settings => format!(" {} ", breadcrumb.join(" › ")),
         None => format!(" {} · {} ", breadcrumb.join(" › "), listing.items.len()),
     };
@@ -451,7 +474,7 @@ fn setting_row(state: &State, icon: &str, setting: Setting) -> ListItem<'static>
     ListItem::new(Line::from(spans))
 }
 
-fn draw_status(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
+fn draw_status(frame: &mut Frame, state: &State, icons: &Icons, view: &View, area: Rect) {
     let right = format!(
         "{} {}  {} {} ",
         icons.user,
@@ -462,7 +485,11 @@ fn draw_status(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
     let right_width = Span::raw(right.as_str()).width() as u16 + 1;
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(right_width)]).areas(area);
-    frame.render_widget(Paragraph::new(format!(" {}", state.status)).fg(FG), left_area);
+    let left = match &state.loading {
+        Some(title) => Paragraph::new(format!(" {}", loading_text(title, view))).fg(YELLOW),
+        None => Paragraph::new(format!(" {}", state.status)).fg(FG),
+    };
+    frame.render_widget(left, left_area);
     frame.render_widget(Paragraph::new(right).fg(MUTED).alignment(Alignment::Right), right_area);
 }
 
@@ -605,7 +632,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    const VIEW: View = View { embedded: true, now: 1_791_590_400 };
+    const VIEW: View = View { embedded: true, now: 1_791_590_400, loading: None };
 
     fn render_with(state: &State, view: &View) -> String {
         let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
@@ -866,6 +893,24 @@ mod tests {
         let area = Rect::new(0, 0, 100, 30);
         assert_eq!(video_area(&s, area), Some(area));
         assert!(!render(&s).contains("tubetui"), "no sidebar or bars");
+    }
+
+    #[test]
+    fn loading_shows_spinner_seconds_and_a_moving_bar() {
+        let mut s = state();
+        s.update(Action::Enter); // Inicio starts loading
+        let view = View { loading: Some(std::time::Duration::from_millis(3_250)), ..VIEW };
+        let screen = render_with(&s, &view);
+        assert!(screen.contains("Cargando Inicio… 3 s"), "{screen}");
+        assert!(screen.contains("█"));
+        let later = View { loading: Some(std::time::Duration::from_millis(3_550)), ..VIEW };
+        assert_ne!(bouncing_bar(30, &view), bouncing_bar(30, &later), "the bar moves");
+        assert_eq!(bouncing_bar(30, &view).chars().count(), 30);
+    }
+
+    #[test]
+    fn video_tab_says_it_is_loading_until_the_frame_covers_it() {
+        assert!(render(&with_tab()).contains("Cargando el video"));
     }
 
     #[test]

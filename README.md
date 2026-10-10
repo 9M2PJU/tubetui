@@ -114,6 +114,9 @@ If the app closes unexpectedly (for example when launched from a window
 manager shortcut, whose terminal closes with it), the error is kept in
 `~/.cache/tubetui/crash.log`.
 
+To diagnose lag, run with `TUBETUI_DEBUG=/tmp/tubetui.log tubetui`: every key,
+redraw and action is logged with its timing.
+
 ## Disclaimer
 
 tubetui talks to YouTube's unofficial internal API and uses your browser

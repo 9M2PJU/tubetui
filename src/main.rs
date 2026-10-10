@@ -116,6 +116,8 @@ struct Runtime {
     clear_at: Option<Instant>,
     /// The terminal window was put in fullscreen by us.
     window_fullscreen: bool,
+    /// When the list being loaded was requested, for the loading indicator.
+    loading_since: Option<Instant>,
 }
 
 impl Runtime {
@@ -135,6 +137,7 @@ impl Runtime {
             resized_at: None,
             clear_at: None,
             window_fullscreen: false,
+            loading_since: None,
         };
         runtime.start_session(false);
         runtime
@@ -147,6 +150,16 @@ impl Runtime {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
         let mut dirty = true;
         while !self.state.quit {
+            // Animate the loading indicator.
+            match (&self.state.loading, self.loading_since) {
+                (Some(_), None) => self.loading_since = Some(Instant::now()),
+                (None, Some(_)) => self.loading_since = None,
+                _ => {}
+            }
+            // Each loop waits up to 100 ms for input: one spinner frame.
+            if self.loading_since.is_some() {
+                dirty = true;
+            }
             if self.resized_at.is_some_and(|t| t.elapsed() >= RESIZE_SETTLE) {
                 self.resized_at = None;
                 dirty = true;
@@ -159,7 +172,8 @@ impl Runtime {
             }
             // Redraw only on change: every redraw competes with mpv for the terminal.
             if dirty {
-                let view = ui::View { embedded: self.mode() == Mode::Embedded, now: now() };
+                let loading = self.loading_since.map(|t| t.elapsed());
+                let view = ui::View { embedded: self.mode() == Mode::Embedded, now: now(), loading };
                 let t = Instant::now();
                 terminal.draw(|f| ui::draw(f, &self.state, &view))?;
                 dbg(format!("draw {:?}", t.elapsed()));
@@ -175,8 +189,10 @@ impl Runtime {
                         dbg(format!("key {:?} {:?}", key.code, key.kind));
                         pending.extend(keymap::map(key, self.state.key_context()))
                     }
+                    // No `terminal.clear()`: it asks the terminal for the cursor
+                    // position and, with kitty busy drawing video, can wait 2 s
+                    // and fail. `draw` already resizes and repaints by itself.
                     Event::Resize(..) => {
-                        terminal.clear()?;
                         self.resized_at = Some(Instant::now());
                         dirty = true;
                     }
@@ -375,7 +391,6 @@ impl Runtime {
         ratatui::restore();
         let status = std::process::Command::new(program).args(words).arg(&path).status();
         *terminal = ratatui::init();
-        terminal.clear()?;
         let result = match status {
             Ok(_) => Config::load(&path).map_err(|e| e.to_string()),
             Err(e) => Err(format!("no se pudo abrir {program}: {e}")),
@@ -465,6 +480,7 @@ fn import_cookies(source: &Path, dest: &Path) -> Result<String, String> {
     Ok(dest.display().to_string())
 }
 
+/// Timing trace for diagnosing lag: set `TUBETUI_DEBUG=/path/to/file`.
 fn dbg(msg: impl AsRef<str>) {
     use std::io::Write;
     use std::sync::OnceLock;
