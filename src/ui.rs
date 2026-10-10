@@ -15,6 +15,7 @@ use crate::domain::{Channel, Live, Video, date_labels};
 use crate::i18n::Lang;
 use crate::keymap;
 use crate::media::{LocalFile, MediaKind};
+use crate::player::Info;
 use crate::youtube::Items;
 
 pub const SIDEBAR_WIDTH: u16 = 26;
@@ -57,6 +58,8 @@ pub struct Icons {
     pub subscribed: &'static str,
     pub user: &'static str,
     pub language: &'static str,
+    pub volume: &'static str,
+    pub muted: &'static str,
 }
 
 const EMOJI: Icons = Icons {
@@ -72,6 +75,8 @@ const EMOJI: Icons = Icons {
     subscribed: "✓",
     user: "👤",
     language: "🌐",
+    volume: "🔊",
+    muted: "🔇",
 };
 
 const NERD: Icons = Icons {
@@ -102,6 +107,8 @@ const NERD: Icons = Icons {
     subscribed: "\u{f00c}",
     user: "\u{f007}",
     language: "\u{f1ab}",
+    volume: "\u{f028}",
+    muted: "\u{f026}",
 };
 
 const UNICODE: Icons = Icons {
@@ -115,6 +122,8 @@ const UNICODE: Icons = Icons {
     subscribed: "✓",
     user: "☺",
     language: "⇄",
+    volume: "♪",
+    muted: "✕",
 };
 
 pub fn icons(set: IconSet) -> &'static Icons {
@@ -136,6 +145,8 @@ pub struct View {
     pub opening: Option<Duration>,
     /// The preview panel leaves room for a thumbnail (the runtime draws it).
     pub thumbnails: bool,
+    /// What mpv reports about the video of the active tab.
+    pub playing: Option<Info>,
 }
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -248,7 +259,11 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
             } else {
                 Paragraph::new(lang.pick("Se reproduce en una ventana de mpv", "Playing in an mpv window")).fg(MUTED)
             };
-            frame.render_widget(body.block(panel(title, BLUE)), areas.content);
+            let mut block = panel(title, BLUE);
+            if let Some(info) = &view.playing {
+                block = block.title_top(Line::from(playing_label(info, icons)).fg(CYAN).right_aligned());
+            }
+            frame.render_widget(body.block(block), areas.content);
         }
     }
     draw_status(frame, state, icons, view, areas.status);
@@ -263,6 +278,26 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
 
 fn tab_icon<'a>(icons: &'a Icons, tab: &Tab) -> &'a str {
     if tab.playback.audio_only { icons.sections[8] } else { icons.tab }
+}
+
+/// `" 🔊 85 %  720p  H.264 "`: what the video keys change, as it is now.
+fn playing_label(info: &Info, icons: &Icons) -> String {
+    let mut parts = Vec::new();
+    if let Some(volume) = info.volume {
+        let icon = if info.muted { icons.muted } else { icons.volume };
+        parts.push(format!("{icon} {volume:.0} %"));
+    }
+    if let Some(height) = info.height {
+        parts.push(format!("{height}p"));
+    }
+    if let Some(codec) = &info.codec {
+        parts.push(match codec.as_str() {
+            "h264" => "H.264".into(),
+            "hevc" => "H.265".into(),
+            other => other.to_uppercase(),
+        });
+    }
+    if parts.is_empty() { String::new() } else { format!(" {} ", parts.join("  ")) }
 }
 
 fn panel<'a>(title: impl Into<Line<'a>>, color: Color) -> Block<'a> {
@@ -545,6 +580,10 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
             draw_preview(frame, state, icons, view, videos.get(listing.selected), preview);
             left
         }
+        (Items::Channels(channels), (left, Some(preview))) => {
+            draw_channel_preview(frame, state, icons, channels.get(listing.selected), preview);
+            left
+        }
         _ => area,
     };
     frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(selected));
@@ -595,6 +634,28 @@ fn draw_preview(frame: &mut Frame, state: &State, icons: &Icons, view: &View, vi
     frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }), text_area);
 }
 
+/// The selected channel: name, subscribers and its whole description.
+fn draw_channel_preview(frame: &mut Frame, state: &State, icons: &Icons, channel: Option<&Channel>, area: Rect) {
+    let lang = state.lang();
+    let block = panel(lang.pick(" Canal ", " Channel "), MUTED);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(c) = channel else { return };
+    let mut lines = vec![Line::from(c.name.as_str()).fg(MAGENTA).bold()];
+    if let Some(followers) = &c.followers {
+        lines.push(Line::from(followers.as_str()).fg(MUTED));
+    }
+    if state.subs.contains(&c.id) {
+        lines.push(Line::from(format!("{} {}", icons.subscribed, lang.pick("Suscripto", "Subscribed"))).fg(GREEN));
+    }
+    lines.push(Line::from(""));
+    match &c.description {
+        Some(description) => lines.extend(description.lines().map(|l| Line::from(l).fg(FG))),
+        None => lines.push(Line::from(lang.pick("Sin descripción", "No description")).fg(MUTED)),
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }), inner);
+}
+
 fn video_row<'a>(state: &State, icons: &Icons, view: &View, v: &'a Video) -> ListItem<'a> {
     let lang = state.lang();
     let mut spans = match (v.live, v.published) {
@@ -626,6 +687,9 @@ fn channel_row<'a>(state: &State, icons: &Icons, c: &'a Channel) -> ListItem<'a>
     let mut spans = vec![Span::styled(format!(" {mark} "), GREEN), Span::styled(c.name.as_str(), MAGENTA)];
     if let Some(followers) = &c.followers {
         spans.push(Span::styled(format!("  {followers}"), MUTED));
+    }
+    if let Some(description) = &c.description {
+        spans.push(Span::styled(format!("  {}", description.replace('\n', " ")), Style::new().fg(FG).add_modifier(Modifier::DIM)));
     }
     ListItem::new(Line::from(spans))
 }
@@ -910,7 +974,8 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    const VIEW: View = View { embedded: true, now: 1_791_590_400, loading: None, opening: None, thumbnails: true };
+    const VIEW: View =
+        View { embedded: true, now: 1_791_590_400, loading: None, opening: None, thumbnails: true, playing: None };
 
     fn render_with(state: &State, view: &View) -> String {
         let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
@@ -1024,11 +1089,15 @@ mod tests {
 
     #[test]
     fn channel_rows_mark_my_channels() {
-        let followed = Channel { followers: Some("358 mil suscriptores".into()), ..channel("UCx") };
+        let followed = Channel {
+            followers: Some("358 mil suscriptores".into()),
+            description: Some("Música\ny charlas".into()),
+            ..channel("UCx")
+        };
         let mut s = with_items(Items::Channels(vec![followed, channel("UCy")]));
         s.subs.insert("UCx".into());
         let screen = render(&s);
-        assert!(screen.contains("✓ name UCx  358 mil suscriptores"), "{screen}");
+        assert!(screen.contains("✓ name UCx  358 mil suscriptores  Música y charlas"), "{screen}");
         assert!(screen.contains("   name UCy"));
     }
 
@@ -1249,6 +1318,29 @@ mod tests {
         s.update(Action::ToggleHelp);
         assert_eq!(thumbnail_area(&s, Rect::new(0, 0, 100, 40)), None, "too narrow");
         assert!(!render_with(&s, &View { thumbnails: false, ..VIEW }).contains("⏳"));
+    }
+
+    #[test]
+    fn wide_channel_lists_show_the_whole_description() {
+        let described = Channel { description: Some("Primera línea\nSegunda línea".into()), ..channel("UCx") };
+        let s = with_items(Items::Channels(vec![described, channel("UCy")]));
+        let screen = render(&s);
+        assert!(screen.contains(" Canal "), "{screen}");
+        assert!(screen.contains("│Primera línea"), "{screen}");
+        assert!(screen.contains("│Segunda línea"), "kept on its own line: {screen}");
+        assert_eq!(thumbnail_area(&s, Rect::new(0, 0, 130, 40)), None, "channels have no thumbnail");
+    }
+
+    #[test]
+    fn video_tab_shows_volume_quality_and_codec() {
+        let mut s = with_items(Items::Videos(vec![video("a")]));
+        s.update(Action::Enter);
+        let info = Info { volume: Some(85.0), muted: false, height: Some(480), codec: Some("h264".into()) };
+        let screen = render_with(&s, &View { playing: Some(info.clone()), ..VIEW });
+        assert!(screen.contains("♪ 85 %  480p  H.264"), "{screen}");
+        let muted = Info { muted: true, codec: Some("vp9".into()), ..info };
+        assert_eq!(playing_label(&muted, icons(IconSet::Unicode)), " ✕ 85 %  480p  VP9 ");
+        assert_eq!(playing_label(&Info::default(), icons(IconSet::Unicode)), "");
     }
 
     #[test]

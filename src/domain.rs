@@ -106,6 +106,8 @@ pub struct Channel {
     pub url: String,
     /// Already formatted, e.g. "358 mil suscriptores".
     pub followers: Option<String>,
+    /// What the channel says about itself, as YouTube shortens it.
+    pub description: Option<String>,
 }
 
 /// Stable identity of an open tab; survives reordering and closing others.
@@ -133,6 +135,7 @@ pub(crate) fn channel(id: &str) -> Channel {
         name: format!("name {id}"),
         url: format!("https://www.youtube.com/channel/{id}"),
         followers: None,
+        description: None,
     }
 }
 

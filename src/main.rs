@@ -213,12 +213,17 @@ impl Runtime {
             if self.thumbs.receive() {
                 dirty = true;
             }
+            // Every player, so the flags of hidden tabs do not pile up.
+            if self.players.values().filter(|p| p.info_changed()).count() > 0 {
+                dirty = true;
+            }
             // Redraw only on change: every redraw competes with mpv for the terminal.
             if dirty || self.animations.running() {
                 let loading = self.loading_since.map(|t| t.elapsed());
                 let embedded = self.mode() == Mode::Embedded;
                 let thumbnails = embedded && self.state.config.ui.thumbnails;
-                let view = ui::View { embedded, now: now(), loading, opening, thumbnails };
+                let playing = self.state.active_tab().and_then(|t| self.players.get(&t.id)).map(Player::info);
+                let view = ui::View { embedded, now: now(), loading, opening, thumbnails, playing };
                 let t = Instant::now();
                 self.animations.observe(&self.state, terminal.size()?.into());
                 terminal.draw(|f| {

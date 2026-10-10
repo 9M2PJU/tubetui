@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::config::{Config, EffectsConfig, Language, PlayerMode, language_name, next_language, next_quality};
+use crate::config::{Config, EffectsConfig, Language, PlayerMode, codec_name, language_name, next_codec, next_language, next_quality};
 use crate::domain::{TabId, Video};
 use crate::i18n::Lang;
 use crate::keymap::KeyContext;
@@ -321,6 +321,10 @@ pub enum Action {
     CycleLanguage,
     /// Next subtitle / dubbing language (es → en → pt …) for this and later videos.
     CycleSubLang,
+    /// Next maximum height (360p → 480p → …) for this and later videos.
+    CycleQuality,
+    /// Next preferred video codec (H.264 → VP9 → AV1 → any) for this and later videos.
+    CycleCodec,
     /// Jump to the section menu from anywhere.
     FocusMenu,
     /// Switch the interface between Spanish and English.
@@ -391,6 +395,10 @@ pub enum PlayerCommand {
     Language(Language),
     /// Same, with another subtitle / dubbing language code.
     SubLang(&'static str),
+    /// Same, with another maximum height.
+    Quality(u32),
+    /// Same, with another preferred codec.
+    Codec(&'static str),
     /// Only meaningful for the mpv window.
     Fullscreen(bool),
 }
@@ -760,6 +768,35 @@ impl State {
                     value: SettingValue::Text(code.into()),
                 }];
                 effects.extend(self.command(PlayerCommand::SubLang(code)));
+                return effects;
+            }
+            Action::CycleQuality => {
+                let height = next_quality(self.config.player.max_height);
+                self.config.player.max_height = height;
+                let lang = self.lang();
+                self.status = format!(
+                    "{}: {height}p ({})",
+                    lang.pick("Calidad máxima", "Maximum quality"),
+                    lang.pick("recargando el video…", "reloading the video…")
+                );
+                let mut effects =
+                    vec![Effect::SaveSetting { table: "player", key: "max_height", value: SettingValue::Number(height.into()) }];
+                effects.extend(self.command(PlayerCommand::Quality(height)));
+                return effects;
+            }
+            Action::CycleCodec => {
+                let codec = next_codec(&self.config.player.prefer_codec);
+                self.config.player.prefer_codec = codec.into();
+                let lang = self.lang();
+                self.status = format!(
+                    "{}: {} ({})",
+                    lang.pick("Códec preferido", "Preferred codec"),
+                    codec_name(codec, lang),
+                    lang.pick("recargando el video…", "reloading the video…")
+                );
+                let mut effects =
+                    vec![Effect::SaveSetting { table: "player", key: "prefer_codec", value: SettingValue::Text(codec.into()) }];
+                effects.extend(self.command(PlayerCommand::Codec(codec)));
                 return effects;
             }
             Action::ToggleUiLang => return self.toggle_ui_lang(),
@@ -1950,6 +1987,23 @@ mod tests {
             [saved("player", "sub_lang", text("en")), Effect::Command(a, PlayerCommand::SubLang("en"))]
         );
         assert_eq!(s.config.player.sub_lang, "en");
+    }
+
+    #[test]
+    fn quality_and_codec_change_the_current_video_and_are_saved() {
+        let mut s = with_videos(&["a"]);
+        let a = play(&mut s, 0);
+        assert_eq!(
+            s.update(Action::CycleQuality),
+            [saved("player", "max_height", SettingValue::Number(1080)), Effect::Command(a, PlayerCommand::Quality(1080))]
+        );
+        assert!(s.status.contains("1080p"), "{}", s.status);
+        assert_eq!(
+            s.update(Action::CycleCodec),
+            [saved("player", "prefer_codec", text("vp")), Effect::Command(a, PlayerCommand::Codec("vp"))]
+        );
+        assert!(s.status.contains("VP9"), "{}", s.status);
+        assert_eq!(s.config.player.prefer_codec, "vp");
     }
 
     fn files(names: &[&str]) -> Vec<LocalFile> {

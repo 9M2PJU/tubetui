@@ -354,6 +354,7 @@ pub fn collect_channels(page: &Value) -> Vec<Channel> {
             name: text(&r["title"]).unwrap_or_else(|| id.to_owned()),
             url: format!("{ORIGIN}/channel/{id}"),
             followers,
+            description: text(&r["descriptionSnippet"]).and_then(description),
         });
     });
     channels
@@ -382,6 +383,7 @@ pub fn collect_guide_channels(guide: &Value) -> Vec<Channel> {
                 name: text(&entry["formattedTitle"]).unwrap_or_else(|| id.to_owned()),
                 url: format!("{ORIGIN}/channel/{id}"),
                 followers: None,
+                description: None,
             });
         }
     });
@@ -431,6 +433,7 @@ struct ChannelEntry {
     title: Option<String>,
     url: Option<String>,
     channel_follower_count: Option<u64>,
+    description: Option<String>,
 }
 
 /// Parses `yt-dlp --flat-playlist -J` video lists. Entries without a title
@@ -460,6 +463,12 @@ pub fn parse_videos(json: &str) -> Result<Vec<Video>, serde_json::Error> {
         .collect())
 }
 
+/// A channel description without its blank lines and padding; none if empty.
+fn description(text: String) -> Option<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 /// Parses yt-dlp channel lists (channel search).
 pub fn parse_channels(json: &str) -> Result<Vec<Channel>, serde_json::Error> {
     let playlist: Playlist<ChannelEntry> = serde_json::from_str(json)?;
@@ -472,6 +481,7 @@ pub fn parse_channels(json: &str) -> Result<Vec<Channel>, serde_json::Error> {
             url: e.url.unwrap_or_else(|| format!("{ORIGIN}/channel/{}", e.id)),
             name: e.title.unwrap_or_else(|| e.id.clone()),
             followers: e.channel_follower_count.map(|n| format!("{} suscriptores", compact(n))),
+            description: e.description.and_then(description),
             id: e.id,
         })
         .collect())
@@ -563,7 +573,7 @@ mod tests {
     #[test]
     fn parses_channel_search_and_skips_non_channels() {
         let json = r#"{"entries":[
-            {"id":"UCabc","title":"Canal","url":"https://www.youtube.com/channel/UCabc","channel_follower_count":1234567},
+            {"id":"UCabc","title":"Canal","url":"https://www.youtube.com/channel/UCabc","channel_follower_count":1234567,"description":"Un canal"},
             {"id":"UCdef"},
             {"id":"PLxyz","title":"Una playlist"}]}"#;
         let channels = parse_channels(json).unwrap();
@@ -593,7 +603,8 @@ mod tests {
                             "channelId": "UCa",
                             "title": { "simpleText": "María" },
                             "videoCountText": { "simpleText": "358 mil suscriptores" },
-                            "subscriberCountText": { "simpleText": "@maria" } } },
+                            "subscriberCountText": { "simpleText": "@maria" },
+                            "descriptionSnippet": { "runs": [{ "text": "  Música y charlas.\n\n Todos los viernes " }] } } },
                         { "channelRenderer": { "channelId": "UCb", "title": { "runs": [{ "text": "Ca" }, { "text": "nal" }] } } }
                     ] } } } }] } }]
             } } } }] } }
@@ -610,6 +621,8 @@ mod tests {
         assert_eq!(channels[0].url, "https://www.youtube.com/channel/UCa");
         assert_eq!(channels[1].name, "Canal");
         assert_eq!(channels[1].followers, None);
+        assert_eq!(channels[0].description.as_deref(), Some("Música y charlas.\nTodos los viernes"));
+        assert_eq!(channels[1].description, None);
         assert_eq!(collect_continuations(&page), ["AZ", "NEW"]);
     }
 

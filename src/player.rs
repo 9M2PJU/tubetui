@@ -5,7 +5,7 @@
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -215,7 +215,7 @@ fn raw_options(config: &PlayerConfig, cookies: Option<&std::path::Path>) -> Stri
 
 /// IPC lines for a command. Most are JSON; reloading uses mpv's text
 /// command form, the only one that expands `${time-pos}`.
-/// `config` must already reflect `Language` / `SubLang` changes (see [`Player::send`]).
+/// `config` must already reflect `Language` / `SubLang` / `Quality` / `Codec` changes (see [`Player::send`]).
 pub fn command_lines(
     config: &PlayerConfig,
     mode: Mode,
@@ -232,7 +232,10 @@ pub fn command_lines(
         PlayerCommand::NextTrack => line(json!({ "command": ["playlist-next"] })),
         PlayerCommand::Fullscreen(on) => line(set_property("fullscreen", on.into())),
         PlayerCommand::PrevTrack => line(json!({ "command": ["playlist-prev"] })),
-        PlayerCommand::Language(_) | PlayerCommand::SubLang(_) => {
+        PlayerCommand::Language(_)
+        | PlayerCommand::SubLang(_)
+        | PlayerCommand::Quality(_)
+        | PlayerCommand::Codec(_) => {
             let sid = if config.language == Language::Subtitles { "auto" } else { "no" };
             vec![
                 set_property("ytdl-format", ytdl_format(config, mode).into()).to_string(),
@@ -246,6 +249,39 @@ pub fn command_lines(
 
 fn set_property(name: &str, value: Value) -> Value {
     json!({ "command": ["set_property", name, value] })
+}
+
+/// What the video tab shows about the playback, as mpv reports it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Info {
+    pub volume: Option<f64>,
+    pub muted: bool,
+    /// Height of the video being played.
+    pub height: Option<i64>,
+    /// mpv's codec name: `h264`, `vp9`, `av1` …
+    pub codec: Option<String>,
+}
+
+/// Properties mpv reports to [`Info`] whenever they change.
+const OBSERVED: [&str; 4] = ["volume", "mute", "height", "video-format"];
+
+impl Info {
+    fn apply(&mut self, name: &str, data: &Value) {
+        match name {
+            "volume" => self.volume = data.as_f64(),
+            "mute" => self.muted = data.as_bool().unwrap_or(false),
+            "height" => self.height = data.as_i64(),
+            "video-format" => self.codec = data.as_str().map(str::to_owned),
+            _ => {}
+        }
+    }
+}
+
+/// Shared between the player and the thread that listens to mpv.
+#[derive(Default)]
+struct Observed {
+    info: Mutex<Info>,
+    changed: AtomicBool,
 }
 
 /// One running mpv instance, killed on drop.
@@ -263,6 +299,7 @@ pub struct Player {
     opened_at: Instant,
     /// mpv reports a playback position: the video is loaded.
     started: Arc<AtomicBool>,
+    observed: Arc<Observed>,
 }
 
 impl Player {
@@ -283,7 +320,8 @@ impl Player {
         let shown_at = if mode == Mode::Embedded { geometry } else { None };
         let (config, cookies) = (launch.config.clone(), launch.cookies.map(Into::into));
         let started = Arc::new(AtomicBool::new(false));
-        watch_start(ipc_path.clone(), Arc::clone(&started));
+        let observed = Arc::new(Observed::default());
+        watch_start(ipc_path.clone(), Arc::clone(&started), Arc::clone(&observed));
         let opened_at = Instant::now();
         Ok(Self {
             child,
@@ -296,6 +334,7 @@ impl Player {
             paused_by_us: false,
             opened_at,
             started,
+            observed,
         })
     }
 
@@ -304,17 +343,32 @@ impl Player {
         (!self.started.load(Ordering::Relaxed)).then(|| self.opened_at.elapsed())
     }
 
+    /// Volume, quality and codec as mpv reports them.
+    pub fn info(&self) -> Info {
+        self.observed.info.lock().map(|i| i.clone()).unwrap_or_default()
+    }
+
+    /// Whether [`Player::info`] changed since the last call.
+    pub fn info_changed(&self) -> bool {
+        self.observed.changed.swap(false, Ordering::Relaxed)
+    }
+
     pub fn send(&mut self, command: PlayerCommand) {
         match command {
             PlayerCommand::Language(language) => self.config.language = language,
             PlayerCommand::SubLang(code) => self.config.sub_lang = code.into(),
+            PlayerCommand::Quality(height) => self.config.max_height = height,
+            PlayerCommand::Codec(codec) => self.config.prefer_codec = codec.into(),
             _ => {}
         }
         for line in command_lines(&self.config, self.mode, self.cookies.as_deref(), command) {
             self.write(&line);
         }
-        if matches!(command, PlayerCommand::Language(_) | PlayerCommand::SubLang(_)) {
-            // Same video, new audio/subtitles, same second.
+        if matches!(
+            command,
+            PlayerCommand::Language(_) | PlayerCommand::SubLang(_) | PlayerCommand::Quality(_) | PlayerCommand::Codec(_)
+        ) {
+            // Same video, new format/audio/subtitles, same second.
             let path = self.query("path").and_then(|v| v.as_str().map(str::to_owned));
             let seconds = self.query("time-pos").and_then(|v| v.as_f64()).unwrap_or(0.0);
             if let Some(path) = path {
@@ -435,19 +489,41 @@ fn query(ipc_path: &str, property: &str) -> Option<Value> {
         .map(|reply| reply["data"].clone())
 }
 
-/// Sets `started` once mpv has a playback position. Gives up when the
-/// player is dropped or after two minutes.
-fn watch_start(ipc_path: String, started: Arc<AtomicBool>) {
+/// Sets `started` once mpv has a playback position, then listens to the
+/// [`OBSERVED`] properties until mpv quits. Gives up when the player is
+/// dropped or after two minutes without starting.
+fn watch_start(ipc_path: String, started: Arc<AtomicBool>, observed: Arc<Observed>) {
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(120);
         while Instant::now() < deadline && Arc::strong_count(&started) > 1 {
             if query(&ipc_path, "time-pos").is_some_and(|v| v.is_f64()) {
                 started.store(true, Ordering::Relaxed);
+                observe(&ipc_path, &observed);
                 return;
             }
             std::thread::sleep(Duration::from_millis(200));
         }
     });
+}
+
+/// Keeps `observed` up to date; returns when mpv closes the connection.
+fn observe(ipc_path: &str, observed: &Observed) {
+    use std::io::{BufRead, BufReader};
+    let Ok(mut stream) = connect_stream(ipc_path) else { return };
+    for (id, name) in OBSERVED.iter().enumerate() {
+        if writeln!(stream, "{}", json!({ "command": ["observe_property", id + 1, name] })).is_err() {
+            return;
+        }
+    }
+    for line in BufReader::new(stream).lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
+        if event["event"] == "property-change"
+            && let Ok(mut info) = observed.info.lock()
+        {
+            info.apply(event["name"].as_str().unwrap_or_default(), &event["data"]);
+            observed.changed.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 fn ipc_path() -> String {
@@ -507,12 +583,25 @@ mod tests {
     #[test]
     fn start_is_detected_when_mpv_reports_a_position() {
         let loading = Arc::new(AtomicBool::new(false));
-        watch_start(fake_mpv(Value::Null), Arc::clone(&loading));
+        watch_start(fake_mpv(Value::Null), Arc::clone(&loading), Arc::default());
         let playing = Arc::new(AtomicBool::new(false));
-        watch_start(fake_mpv(json!(0.5)), Arc::clone(&playing));
+        watch_start(fake_mpv(json!(0.5)), Arc::clone(&playing), Arc::default());
         std::thread::sleep(Duration::from_millis(300));
         assert!(playing.load(Ordering::Relaxed));
         assert!(!loading.load(Ordering::Relaxed), "no position yet: still loading");
+    }
+
+    #[test]
+    fn info_follows_property_changes() {
+        let mut info = Info::default();
+        info.apply("volume", &json!(85.0));
+        info.apply("mute", &json!(true));
+        info.apply("height", &json!(480));
+        info.apply("video-format", &json!("h264"));
+        info.apply("time-pos", &json!(3.0));
+        assert_eq!(info, Info { volume: Some(85.0), muted: true, height: Some(480), codec: Some("h264".into()) });
+        info.apply("height", &Value::Null);
+        assert_eq!(info.height, None, "unloaded while reloading");
     }
 
     #[test]

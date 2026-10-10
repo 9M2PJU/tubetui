@@ -237,11 +237,28 @@ fn parse_donations(text: &str) -> Vec<Wallet> {
     wallets.into_iter().filter(|w| !w.address.trim().is_empty()).collect()
 }
 
-/// Heights offered by the settings screen.
-pub const QUALITIES: [u32; 4] = [480, 720, 1080, 1440];
+/// Heights offered by the settings screen and the `v` key.
+pub const QUALITIES: [u32; 5] = [360, 480, 720, 1080, 1440];
 
 pub fn next_quality(current: u32) -> u32 {
     QUALITIES.iter().copied().find(|q| *q > current).unwrap_or(QUALITIES[0])
+}
+
+/// Video codecs offered by the `b` key: the `vcodec` prefix yt-dlp reports
+/// (VP9 shows as `vp9` or `vp09`) and its name; empty means any.
+pub const CODECS: [(&str, &str); 4] = [("avc1", "H.264"), ("vp", "VP9"), ("av01", "AV1"), ("", "")];
+
+pub fn next_codec(current: &str) -> &'static str {
+    let at = CODECS.iter().position(|(c, _)| *c == current);
+    CODECS[at.map_or(0, |i| (i + 1) % CODECS.len())].0
+}
+
+pub fn codec_name(codec: &str, lang: Lang) -> &str {
+    match CODECS.iter().find(|(c, _)| *c == codec) {
+        Some((_, "")) => lang.pick("cualquiera", "any"),
+        Some((_, name)) => name,
+        None => codec,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -409,7 +426,12 @@ mod tests {
         assert_eq!(IconSet::Unicode.next(), IconSet::Emoji);
         assert_eq!(IconSet::Nerd.as_str(), "nerd");
         assert_eq!(next_quality(480), 720);
-        assert_eq!(next_quality(1440), 480);
+        assert_eq!(next_quality(1440), 360);
+        assert_eq!(next_codec("avc1"), "vp");
+        assert_eq!(next_codec(""), "avc1");
+        assert_eq!(next_codec("hev1"), "avc1");
+        assert_eq!(codec_name("", Lang::En), "any");
+        assert_eq!(codec_name("av01", Lang::Es), "AV1");
         assert_eq!(next_quality(600), 720);
     }
 

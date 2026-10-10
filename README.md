@@ -20,7 +20,7 @@ their own window elsewhere. Every video opens in its own tab.
   upcoming first), **Mis canales**
 - **Search** videos in all of YouTube (about a second, more results load as
   you scroll), only in your channels, or inside a channel (`Tab` switches the
-  scope); search channels
+  scope); search channels (with their description, whole in the side panel)
 - A **preview** of the selected video with its **thumbnail** (in kitty)
 - **Subscribe / unsubscribe** (`s`, unsubscribing asks first), **watch later**
   (`l`), **download** with subtitles (`d`), open the **channel** (`c`)
@@ -81,8 +81,11 @@ Global commands use a **`Ctrl+y` prefix** (tmux style): press `Ctrl+y`, then:
 In lists: `↑↓` / `jk`, `Enter`, `Esc` to go back, `Tab` menu ↔ list,
 `l` watch later, `s` subscribe, `d` download, `c` channel.
 While watching: `space` pause, `←→` seek, `↑↓` volume, `m` mute, `j`
-subtitles, `i` original / subtitles / dubbed, `o` language, `f` fullscreen,
-`.` `,` next / previous song.
+subtitles, `i` original / subtitles / dubbed, `o` language, `v` quality
+(360p–1440p), `b` codec (H.264 / VP9 / AV1 / any), `f` fullscreen, `.` `,`
+next / previous song. Quality, codec and language reload the video at the
+same second and are remembered. If embedded video looks behind the sound,
+the CPU is dropping frames: `v` down to 480p.
 
 ## Terminal multiplexers (tmux, zellij, herdr)
 

@@ -77,6 +77,8 @@ pub const IN_TAB: &[(&str, Text)] = &[
     ("j", Text::new("subtítulos sí / no", "subtitles on / off")),
     ("i", Text::new("modo: subtítulos → original → doblado", "mode: subtitles → original → dubbed")),
     ("o", Text::new("otro idioma (es → en → pt …)", "another language (es → en → pt …)")),
+    ("v", Text::new("calidad: 360p → 480p → 720p → 1080p …", "quality: 360p → 480p → 720p → 1080p …")),
+    ("b", Text::new("compresión: H.264 → VP9 → AV1 → cualquiera", "codec: H.264 → VP9 → AV1 → any")),
     (". ,", Text::new("música: siguiente / anterior", "music: next / previous")),
 ];
 
@@ -162,6 +164,8 @@ fn player(code: KeyCode) -> Option<Action> {
         KeyCode::Char('j') => Some(Action::CycleSubtitles),
         KeyCode::Char('i') => Some(Action::CycleLanguage),
         KeyCode::Char('o') => Some(Action::CycleSubLang),
+        KeyCode::Char('v') => Some(Action::CycleQuality),
+        KeyCode::Char('b') => Some(Action::CycleCodec),
         KeyCode::Char('.') => Some(Action::NextTrack),
         KeyCode::Char('f') => Some(Action::ToggleFullscreen),
         KeyCode::Esc => Some(Action::Back),
@@ -305,6 +309,8 @@ mod tests {
         assert_eq!(map(char('j'), TAB), Some(Action::CycleSubtitles));
         assert_eq!(map(char('i'), TAB), Some(Action::CycleLanguage));
         assert_eq!(map(char('o'), TAB), Some(Action::CycleSubLang));
+        assert_eq!(map(char('v'), TAB), Some(Action::CycleQuality));
+        assert_eq!(map(char('b'), TAB), Some(Action::CycleCodec));
         assert_eq!(map(char('.'), TAB), Some(Action::NextTrack));
         assert_eq!(map(char('f'), TAB), Some(Action::ToggleFullscreen));
         assert_eq!(map(key(KeyCode::Esc), TAB), Some(Action::Back));
