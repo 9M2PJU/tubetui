@@ -1,9 +1,9 @@
 [package]
 name = "tubetui"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "YouTube in your terminal: tabs, embedded mpv video, multi-account profiles and a TOML config editable from the app"
+description = "YouTube and your local videos and music in the terminal: tabs, video embedded in kitty via mpv, subscriptions, watch later, browser login and a settings screen"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/polblancoo/tubetui"
 readme = "README.md"
