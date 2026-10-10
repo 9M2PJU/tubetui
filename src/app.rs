@@ -8,14 +8,17 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::config::{Config, Language, PlayerMode, language_name, next_language, next_quality};
+use crate::config::{Config, EffectsConfig, Language, PlayerMode, language_name, next_language, next_quality};
 use crate::domain::{TabId, Video};
+use crate::i18n::Lang;
 use crate::keymap::KeyContext;
 use crate::media::{LocalFile, MediaKind, parse_dirs};
-use crate::youtube::{Items, Source};
+use crate::youtube::{Items, SearchPage, Source};
 
 /// Lists that are filtered afterwards ask YouTube for more videos.
 pub const FILTERED_LIMIT: u32 = 200;
+/// The next page is asked for when the selection gets this close to the end.
+const PREFETCH_ROWS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -29,6 +32,7 @@ pub enum Section {
     MisVideos,
     MiMusica,
     Configuracion,
+    AcercaDe,
     Salir,
 }
 
@@ -41,17 +45,17 @@ pub enum Group {
 }
 
 impl Group {
-    pub fn label(self) -> &'static str {
+    pub fn label(self, lang: Lang) -> &'static str {
         match self {
             Self::YouTube => "YOUTUBE",
-            Self::Local => "EN TU EQUIPO",
+            Self::Local => lang.pick("EN TU EQUIPO", "ON THIS COMPUTER"),
             Self::App => "",
         }
     }
 }
 
 impl Section {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Inicio,
         Self::Descubrir,
         Self::Suscripciones,
@@ -62,31 +66,34 @@ impl Section {
         Self::MisVideos,
         Self::MiMusica,
         Self::Configuracion,
+        Self::AcercaDe,
         Self::Salir,
     ];
 
     pub fn group(self) -> Group {
         match self {
             Self::MisVideos | Self::MiMusica => Group::Local,
-            Self::Configuracion | Self::Salir => Group::App,
+            Self::Configuracion | Self::AcercaDe | Self::Salir => Group::App,
             _ => Group::YouTube,
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Inicio => "Inicio",
-            Self::Descubrir => "Descubrir",
-            Self::Suscripciones => "Suscripciones",
-            Self::VerDespues => "Ver después",
-            Self::Canales => "Mis canales",
-            Self::BuscarVideos => "Buscar videos",
-            Self::BuscarCanales => "Buscar canales",
-            Self::MisVideos => "Mis videos",
-            Self::MiMusica => "Mi música",
-            Self::Configuracion => "Configuración",
-            Self::Salir => "Salir",
-        }
+    pub fn label(self, lang: Lang) -> &'static str {
+        let (es, en) = match self {
+            Self::Inicio => ("Inicio", "Home"),
+            Self::Descubrir => ("Descubrir", "Discover"),
+            Self::Suscripciones => ("Suscripciones", "Subscriptions"),
+            Self::VerDespues => ("Ver después", "Watch later"),
+            Self::Canales => ("Mis canales", "My channels"),
+            Self::BuscarVideos => ("Buscar videos", "Search videos"),
+            Self::BuscarCanales => ("Buscar canales", "Search channels"),
+            Self::MisVideos => ("Mis videos", "My videos"),
+            Self::MiMusica => ("Mi música", "My music"),
+            Self::Configuracion => ("Configuración", "Settings"),
+            Self::AcercaDe => ("Acerca de", "About"),
+            Self::Salir => ("Salir", "Quit"),
+        };
+        lang.pick(es, en)
     }
 }
 
@@ -102,7 +109,12 @@ pub enum Setting {
     Quality,
     VideoMode,
     BackgroundAudio,
+    AppLang,
     Icons,
+    Thumbnails,
+    FxStartup,
+    FxPages,
+    FxDialogs,
     VideoDirs,
     MusicDirs,
     DownloadDir,
@@ -110,7 +122,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 19] = [
         Self::Browser,
         Self::ImportCookies,
         Self::Refresh,
@@ -120,30 +132,43 @@ impl Setting {
         Self::Quality,
         Self::VideoMode,
         Self::BackgroundAudio,
+        Self::AppLang,
         Self::Icons,
+        Self::Thumbnails,
+        Self::FxStartup,
+        Self::FxPages,
+        Self::FxDialogs,
         Self::VideoDirs,
         Self::MusicDirs,
         Self::DownloadDir,
         Self::EditFile,
     ];
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Browser => "Sesión desde un navegador",
-            Self::ImportCookies => "Importar cookies.txt (sin navegador / SSH)",
-            Self::Refresh => "Releer la sesión",
-            Self::Logout => "Cerrar sesión",
-            Self::Language => "Idioma",
-            Self::SubLang => "Idioma de subtítulos y doblaje",
-            Self::Quality => "Calidad máxima",
-            Self::VideoMode => "Video",
-            Self::BackgroundAudio => "Al salir de la pestaña del video",
-            Self::Icons => "Íconos",
-            Self::VideoDirs => "Carpetas de videos",
-            Self::MusicDirs => "Carpetas de música",
-            Self::DownloadDir => "Carpeta de descargas",
-            Self::EditFile => "Editar config.toml",
-        }
+    pub fn label(self, lang: Lang) -> &'static str {
+        let (es, en) = match self {
+            Self::Browser => ("Sesión desde un navegador", "Log in with a browser"),
+            Self::ImportCookies => {
+                ("Importar cookies.txt (sin navegador / SSH)", "Import cookies.txt (no browser / SSH)")
+            }
+            Self::Refresh => ("Releer la sesión", "Read the login again"),
+            Self::Logout => ("Cerrar sesión", "Log out"),
+            Self::Language => ("Idioma del video", "Video language"),
+            Self::SubLang => ("Idioma de subtítulos y doblaje", "Subtitles and dubbing language"),
+            Self::Quality => ("Calidad máxima", "Maximum quality"),
+            Self::VideoMode => ("Video", "Video"),
+            Self::BackgroundAudio => ("Al salir de la pestaña del video", "When leaving the video tab"),
+            Self::AppLang => ("Idioma de la app (C-y l)", "App language (C-y l)"),
+            Self::Icons => ("Íconos", "Icons"),
+            Self::Thumbnails => ("Portadas de los videos (kitty)", "Video thumbnails (kitty)"),
+            Self::FxStartup => ("Animación al abrir la app", "Animation when the app starts"),
+            Self::FxPages => ("Animación al cambiar de página", "Animation when the page changes"),
+            Self::FxDialogs => ("Animación de ayuda y preguntas", "Animation of help and questions"),
+            Self::VideoDirs => ("Carpetas de videos", "Video folders"),
+            Self::MusicDirs => ("Carpetas de música", "Music folders"),
+            Self::DownloadDir => ("Carpeta de descargas", "Downloads folder"),
+            Self::EditFile => ("Editar config.toml", "Edit config.toml"),
+        };
+        lang.pick(es, en)
     }
 }
 
@@ -168,11 +193,11 @@ pub enum Scope {
 }
 
 impl Scope {
-    pub fn label(&self) -> String {
+    pub fn label(&self, lang: Lang) -> String {
         match self {
-            Self::All => "todo YouTube".into(),
-            Self::Mine => "mis canales".into(),
-            Self::Channel(c) => format!("canal {}", c.name),
+            Self::All => lang.pick("todo YouTube", "all of YouTube").into(),
+            Self::Mine => lang.pick("mis canales", "my channels").into(),
+            Self::Channel(c) => format!("{} {}", lang.pick("canal", "channel"), c.name),
         }
     }
 }
@@ -208,6 +233,16 @@ pub struct Listing {
     pub items: Items,
     pub selected: usize,
     pub kind: ListKind,
+    /// Token for the next page of a search.
+    pub next: Option<String>,
+    /// The request loading that page.
+    pub more: Option<u64>,
+}
+
+impl Listing {
+    pub fn new(title: String, items: Items, kind: ListKind) -> Self {
+        Self { title, items, selected: 0, kind, next: None, more: None }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +278,8 @@ pub enum Action {
     Backspace,
     /// A list requested with `Effect::Load` / `Effect::ScanBrowsers` arrived.
     Loaded(u64, Result<Items, String>),
+    /// A page requested with `Effect::Search`: a new list, or more of one.
+    Page(u64, Result<SearchPage, String>),
     /// Cached channel ids, read at startup.
     SubsLoaded(HashSet<String>),
     /// The login was (re)read. `cookies` is for the runtime; `subs` are my channels.
@@ -286,6 +323,8 @@ pub enum Action {
     CycleSubLang,
     /// Jump to the section menu from anywhere.
     FocusMenu,
+    /// Switch the interface between Spanish and English.
+    ToggleUiLang,
     /// Switch focus between the menu and the list.
     ToggleFocus,
     /// The video fills the whole terminal (or screen, in window mode).
@@ -303,6 +342,12 @@ pub enum Effect {
     },
     ScanBrowsers {
         id: u64,
+    },
+    /// One page of a video search; `next` continues an earlier one.
+    Search {
+        id: u64,
+        query: String,
+        next: Option<String>,
     },
     /// List local media from the configured folders.
     ScanMedia {
@@ -475,6 +520,27 @@ impl State {
         }
     }
 
+    /// Interface language.
+    pub fn lang(&self) -> Lang {
+        self.config.ui.lang.unwrap_or_default()
+    }
+
+    /// `es` or `en`, in the interface language.
+    fn tr(&self, es: &'static str, en: &'static str) -> &'static str {
+        self.lang().pick(es, en)
+    }
+
+    /// The selected video of the shown list and the `n` after it.
+    pub fn videos_from_selection(&self, n: usize) -> &[Video] {
+        match self.stack.last() {
+            Some(Listing { items: Items::Videos(videos), selected, .. }) if self.active == 0 => {
+                let start = (*selected).min(videos.len());
+                &videos[start..(start + 1 + n).min(videos.len())]
+            }
+            _ => &[],
+        }
+    }
+
     pub fn active_tab(&self) -> Option<&Tab> {
         self.active.checked_sub(1).and_then(|i| self.tabs.get(i))
     }
@@ -497,38 +563,55 @@ impl State {
     pub fn session_label(&self) -> String {
         let session = &self.config.session;
         if !session.cookies_file.is_empty() {
-            "cookies.txt importado".into()
+            self.tr("cookies.txt importado", "imported cookies.txt").into()
         } else if !session.browser.is_empty() {
             session.browser.clone()
         } else {
-            "sin sesión".into()
+            self.tr("sin sesión", "not logged in").into()
         }
+    }
+
+    fn logged_in(&self) -> bool {
+        let session = &self.config.session;
+        !session.cookies_file.is_empty() || !session.browser.is_empty()
     }
 
     /// Current value of a setting, for the settings screen.
     pub fn setting_value(&self, setting: Setting) -> String {
         let player = &self.config.player;
+        let lang = self.lang();
         match setting {
             Setting::Browser | Setting::Logout => self.session_label(),
             Setting::ImportCookies | Setting::Refresh | Setting::EditFile => String::new(),
-            Setting::Language => language_label(player.language).into(),
-            Setting::SubLang => language_name(&player.sub_lang),
+            Setting::Language => language_label(player.language, lang).into(),
+            Setting::SubLang => language_name(&player.sub_lang, lang),
             Setting::Quality => format!("{}p", player.max_height),
             Setting::VideoMode => match player.mode {
-                PlayerMode::Auto => "automático (integrado en kitty)".into(),
-                PlayerMode::Embedded => "integrado".into(),
-                PlayerMode::Window => "ventana aparte".into(),
+                PlayerMode::Auto => self.tr("automático (integrado en kitty)", "automatic (embedded in kitty)").into(),
+                PlayerMode::Embedded => self.tr("integrado", "embedded").into(),
+                PlayerMode::Window => self.tr("ventana aparte", "separate window").into(),
             },
             Setting::BackgroundAudio => {
                 if player.background_audio {
-                    "sigue sonando".into()
+                    self.tr("sigue sonando", "keeps playing").into()
                 } else {
-                    "se pausa".into()
+                    self.tr("se pausa", "pauses").into()
                 }
             }
+            Setting::AppLang => lang.name().into(),
             Setting::Icons => self.config.ui.icons.as_str().into(),
-            Setting::VideoDirs => dirs_label(&self.config.media.video_dirs, "~/Videos"),
-            Setting::MusicDirs => dirs_label(&self.config.media.music_dirs, "~/Música"),
+            Setting::Thumbnails => {
+                let (es, en) = on_off(self.config.ui.thumbnails);
+                self.tr(es, en).into()
+            }
+            Setting::FxStartup | Setting::FxPages | Setting::FxDialogs => {
+                let mut effects = self.config.effects.clone();
+                let on = effect_flag(&mut effects, setting).is_some_and(|(_, on)| *on);
+                let (es, en) = on_off(on);
+                self.tr(es, en).into()
+            }
+            Setting::VideoDirs => dirs_label(&self.config.media.video_dirs, "~/Videos", lang),
+            Setting::MusicDirs => dirs_label(&self.config.media.music_dirs, "~/Música", lang),
             Setting::DownloadDir => match self.config.download.dir.as_str() {
                 "" => "~/Videos".into(),
                 dir => dir.into(),
@@ -571,8 +654,8 @@ impl State {
                 self.fullscreen = !self.fullscreen && self.active_tab().is_some();
                 return self.command(PlayerCommand::Fullscreen(self.fullscreen));
             }
-            Action::Up => self.move_selection(-1),
-            Action::Down => self.move_selection(1),
+            Action::Up => return self.move_selection(-1),
+            Action::Down => return self.move_selection(1),
             Action::Enter => return self.enter(),
             Action::Back => self.back(),
             Action::FocusSearch => self.search_videos(),
@@ -581,18 +664,21 @@ impl State {
             Action::Backspace => {
                 self.query.pop();
             }
-            Action::Loaded(id, result) => self.loaded(id, result),
+            Action::Loaded(id, result) => self.loaded(id, result, None),
+            Action::Page(id, result) => self.page(id, result),
             Action::SubsLoaded(subs) => self.subs = subs,
             Action::SessionReady { subs, .. } => return self.session_ready(subs),
             Action::CookiesImported(Ok(path)) => {
-                self.status = "cookies.txt importado, leyendo tus canales…".into();
+                self.status = self
+                    .tr("cookies.txt importado, leyendo tus canales…", "cookies.txt imported, reading your channels…")
+                    .into();
                 return self.set_session(String::new(), path);
             }
             Action::CookiesImported(Err(error)) | Action::ConfigReloaded(Err(error)) => self.status = error,
             Action::ConfigReloaded(Ok(config)) => {
                 let session_changed = config.session != self.config.session;
                 self.config = config;
-                self.status = "Configuración recargada".into();
+                self.status = self.tr("Configuración recargada", "Settings reloaded").into();
                 if session_changed {
                     return vec![Effect::StartSession { force: true }];
                 }
@@ -601,7 +687,7 @@ impl State {
             Action::ToggleSubscription => return self.toggle_subscription(),
             Action::Confirm(yes) => {
                 if let Some(u) = self.confirm.take().filter(|_| yes) {
-                    self.status = format!("Desuscribiendo de {}…", u.name);
+                    self.status = format!("{} {}…", self.tr("Desuscribiendo de", "Unsubscribing from"), u.name);
                     return vec![Effect::Subscribe { channel_id: u.channel_id, name: u.name, subscribe: false }];
                 }
             }
@@ -610,7 +696,7 @@ impl State {
             }
             Action::Download => {
                 if let Some(video) = self.selected_video().cloned() {
-                    self.status = format!("⬇ Descargando: {}", video.title);
+                    self.status = format!("⬇ {}: {}", self.tr("Descargando", "Downloading"), video.title);
                     return vec![Effect::Download(video)];
                 }
             }
@@ -643,7 +729,13 @@ impl State {
                 let player = &mut self.config.player;
                 player.language = player.language.next();
                 let language = player.language;
-                self.status = format!("Idioma: {} (recargando el video…)", language_label(language));
+                let lang = self.lang();
+                self.status = format!(
+                    "{}: {} ({})",
+                    lang.pick("Idioma", "Language"),
+                    language_label(language, lang),
+                    lang.pick("recargando el video…", "reloading the video…")
+                );
                 let mut effects = vec![Effect::SaveSetting {
                     table: "player",
                     key: "language",
@@ -655,7 +747,13 @@ impl State {
             Action::CycleSubLang => {
                 let code = next_language(&self.config.player.sub_lang);
                 self.config.player.sub_lang = code.into();
-                self.status = format!("Subtítulos y doblaje en {} (recargando el video…)", language_name(code));
+                let lang = self.lang();
+                self.status = format!(
+                    "{} {} ({})",
+                    lang.pick("Subtítulos y doblaje en", "Subtitles and dubbing in"),
+                    language_name(code, lang),
+                    lang.pick("recargando el video…", "reloading the video…")
+                );
                 let mut effects = vec![Effect::SaveSetting {
                     table: "player",
                     key: "sub_lang",
@@ -664,12 +762,13 @@ impl State {
                 effects.extend(self.command(PlayerCommand::SubLang(code)));
                 return effects;
             }
+            Action::ToggleUiLang => return self.toggle_ui_lang(),
             Action::Quit => self.quit = true,
         }
         Vec::new()
     }
 
-    fn move_selection(&mut self, delta: isize) {
+    fn move_selection(&mut self, delta: isize) -> Vec<Effect> {
         let step = |value: usize, len: usize| value.saturating_add_signed(delta).min(len.saturating_sub(1));
         match self.focus {
             Focus::Menu => self.menu = step(self.menu, Section::ALL.len()),
@@ -677,8 +776,23 @@ impl State {
                 if let Some(l) = self.stack.last_mut() {
                     l.selected = step(l.selected, l.items.len());
                 }
+                return self.more_if_near_the_end();
             }
         }
+        Vec::new()
+    }
+
+    /// Asks for the next page of a search before the selection reaches its end.
+    fn more_if_near_the_end(&mut self) -> Vec<Effect> {
+        let id = self.next_request;
+        let Some(listing) = self.stack.last_mut() else { return Vec::new() };
+        if listing.more.is_some() || listing.selected + PREFETCH_ROWS < listing.items.len() {
+            return Vec::new();
+        }
+        let Some(next) = listing.next.clone() else { return Vec::new() };
+        listing.more = Some(id);
+        self.next_request += 1;
+        vec![Effect::Search { id, query: String::new(), next: Some(next) }]
     }
 
     fn enter(&mut self) -> Vec<Effect> {
@@ -709,9 +823,9 @@ impl State {
             Items::Profiles(profiles) => match profiles.get(selected).cloned() {
                 Some(spec) => {
                     self.status = if spec.is_empty() {
-                        "Cerrando sesión…".into()
+                        self.tr("Cerrando sesión…", "Logging out…").into()
                     } else {
-                        format!("Leyendo la sesión de {spec}…")
+                        format!("{} {spec}…", self.tr("Leyendo la sesión de", "Reading the login of"))
                     };
                     self.set_session(spec, String::new())
                 }
@@ -721,28 +835,20 @@ impl State {
                 Some(setting) => self.change_setting(*setting),
                 None => Vec::new(),
             },
+            Items::About => Vec::new(),
         }
     }
 
     fn open_section(&mut self, section: Section) -> Vec<Effect> {
+        let title = section.label(self.lang()).to_owned();
         match section {
-            Section::Inicio => self.load(Source::Recommended, "Inicio".into(), Filter::None, false, ListKind::Plain),
-            Section::Descubrir => {
-                self.load(Source::Recommended, "Descubrir".into(), Filter::NotMine, false, ListKind::Plain)
-            }
-            Section::Suscripciones => {
-                self.load(Source::Subscriptions, "Suscripciones".into(), Filter::None, false, ListKind::Plain)
-            }
-            Section::Canales => {
-                self.load(Source::MyChannels, "Mis canales".into(), Filter::None, false, ListKind::Plain)
-            }
+            Section::Inicio => self.load(Source::Recommended, title, Filter::None, false, ListKind::Plain),
+            Section::Descubrir => self.load(Source::Recommended, title, Filter::NotMine, false, ListKind::Plain),
+            Section::Suscripciones => self.load(Source::Subscriptions, title, Filter::None, false, ListKind::Plain),
+            Section::Canales => self.load(Source::MyChannels, title, Filter::None, false, ListKind::Plain),
             Section::VerDespues => {
-                self.show(Listing {
-                    title: "Ver después".into(),
-                    items: Items::Videos(self.later.clone()),
-                    selected: 0,
-                    kind: ListKind::Later,
-                });
+                let items = Items::Videos(self.later.clone());
+                self.show(Listing::new(title, items, ListKind::Later));
                 Vec::new()
             }
             Section::BuscarVideos => {
@@ -753,15 +859,14 @@ impl State {
                 self.start_prompt(Prompt::Channels, String::new());
                 Vec::new()
             }
-            Section::MisVideos => self.scan_media("Mis videos", MediaKind::Video),
-            Section::MiMusica => self.scan_media("Mi música", MediaKind::Music),
+            Section::MisVideos => self.scan_media(title, MediaKind::Video),
+            Section::MiMusica => self.scan_media(title, MediaKind::Music),
             Section::Configuracion => {
-                self.show(Listing {
-                    title: "Configuración".into(),
-                    items: Items::Settings,
-                    selected: 0,
-                    kind: ListKind::Settings,
-                });
+                self.show(Listing::new(title, Items::Settings, ListKind::Settings));
+                Vec::new()
+            }
+            Section::AcercaDe => {
+                self.show(Listing::new(title, Items::About, ListKind::Plain));
                 Vec::new()
             }
             Section::Salir => {
@@ -771,8 +876,8 @@ impl State {
         }
     }
 
-    fn scan_media(&mut self, title: &str, kind: MediaKind) -> Vec<Effect> {
-        let id = self.request(title.into(), Filter::None, false, ListKind::Plain);
+    fn scan_media(&mut self, title: String, kind: MediaKind) -> Vec<Effect> {
+        let id = self.request(title, Filter::None, false, ListKind::Plain);
         vec![Effect::ScanMedia { id, kind }]
     }
 
@@ -786,7 +891,7 @@ impl State {
         let player = &mut self.config.player;
         match setting {
             Setting::Browser => {
-                let id = self.request("Navegadores".into(), Filter::None, true, ListKind::Plain);
+                let id = self.request(self.tr("Navegadores", "Browsers").into(), Filter::None, true, ListKind::Plain);
                 vec![Effect::ScanBrowsers { id }]
             }
             Setting::ImportCookies => {
@@ -794,11 +899,15 @@ impl State {
                 Vec::new()
             }
             Setting::Refresh => {
-                self.status = format!("Releyendo la sesión ({})…", self.session_label());
+                self.status = format!(
+                    "{} ({})…",
+                    self.tr("Releyendo la sesión", "Reading the login again"),
+                    self.session_label()
+                );
                 vec![Effect::StartSession { force: true }]
             }
             Setting::Logout => {
-                self.status = "Sesión cerrada".into();
+                self.status = self.tr("Sesión cerrada", "Logged out").into();
                 self.set_session(String::new(), String::new())
             }
             Setting::Language => {
@@ -807,7 +916,7 @@ impl State {
             }
             Setting::SubLang => {
                 player.sub_lang = next_language(&player.sub_lang).into();
-                self.status = "Se aplica a los próximos videos".into();
+                self.status = self.tr("Se aplica a los próximos videos", "Applies to the next videos").into();
                 save("player", "sub_lang", SettingValue::Text(self.config.player.sub_lang.clone()))
             }
             Setting::Quality => {
@@ -816,16 +925,30 @@ impl State {
             }
             Setting::VideoMode => {
                 player.mode = player.mode.next();
-                self.status = "Se aplica a los próximos videos".into();
+                self.status = self.tr("Se aplica a los próximos videos", "Applies to the next videos").into();
                 save("player", "mode", SettingValue::Text(self.config.player.mode.as_str().into()))
             }
             Setting::BackgroundAudio => {
                 player.background_audio = !player.background_audio;
                 save("player", "background_audio", SettingValue::Bool(player.background_audio))
             }
+            Setting::AppLang => self.toggle_ui_lang(),
             Setting::Icons => {
                 self.config.ui.icons = self.config.ui.icons.next();
                 save("ui", "icons", SettingValue::Text(self.config.ui.icons.as_str().into()))
+            }
+            Setting::Thumbnails => {
+                self.config.ui.thumbnails = !self.config.ui.thumbnails;
+                save("ui", "thumbnails", SettingValue::Bool(self.config.ui.thumbnails))
+            }
+            Setting::FxStartup | Setting::FxPages | Setting::FxDialogs => {
+                match effect_flag(&mut self.config.effects, setting) {
+                    Some((key, on)) => {
+                        *on = !*on;
+                        save("effects", key, SettingValue::Bool(*on))
+                    }
+                    None => Vec::new(),
+                }
             }
             Setting::VideoDirs => {
                 let current = self.config.media.video_dirs.join(", ");
@@ -891,10 +1014,11 @@ impl State {
         self.prompt = None;
         match prompt {
             Prompt::Videos { scope: Scope::All, .. } => {
-                self.load(Source::Search(query.clone()), query, Filter::None, false, ListKind::Plain)
+                let id = self.request(query.clone(), Filter::None, false, ListKind::Plain);
+                vec![Effect::Search { id, query, next: None }]
             }
             Prompt::Videos { scope: Scope::Mine, .. } => {
-                let title = format!("{query} · mis canales");
+                let title = format!("{query} · {}", self.tr("mis canales", "my channels"));
                 self.load(Source::Search(query), title, Filter::Mine, false, ListKind::Plain)
             }
             Prompt::Videos { scope: Scope::Channel(c), .. } => {
@@ -906,7 +1030,7 @@ impl State {
                 self.load(Source::ChannelSearch(query.clone()), query, Filter::None, false, ListKind::Plain)
             }
             Prompt::CookiesFile => {
-                self.status = "Importando cookies.txt…".into();
+                self.status = self.tr("Importando cookies.txt…", "Importing cookies.txt…").into();
                 vec![Effect::ImportCookies(query)]
             }
             Prompt::DownloadDir => {
@@ -940,13 +1064,34 @@ impl State {
     fn request(&mut self, title: String, filter: Filter, push: bool, kind: ListKind) -> u64 {
         let id = self.next_request;
         self.next_request += 1;
-        self.status = format!("Cargando {title}…");
+        self.status = format!("{} {title}…", self.tr("Cargando", "Loading"));
         self.loading = Some(title.clone());
         self.pending = Some(Pending { id, title, filter, push, kind });
         id
     }
 
-    fn loaded(&mut self, id: u64, result: Result<Items, String>) {
+    /// A search page: the first one of a new list, or the next one of a shown list.
+    fn page(&mut self, id: u64, result: Result<SearchPage, String>) {
+        if self.pending.as_ref().is_some_and(|p| p.id == id) {
+            let next = result.as_ref().ok().and_then(|p| p.next.clone());
+            return self.loaded(id, result.map(|p| Items::Videos(p.videos)), next);
+        }
+        let Some(listing) = self.stack.iter_mut().find(|l| l.more == Some(id)) else { return };
+        listing.more = None;
+        match result {
+            Ok(page) => {
+                if let Items::Videos(videos) = &mut listing.items {
+                    let seen: HashSet<String> = videos.iter().map(|v| v.id.clone()).collect();
+                    videos.extend(page.videos.into_iter().filter(|v| !seen.contains(&v.id)));
+                }
+                listing.next = page.next;
+                self.status = format!("{} · {}", listing.title, listing.items.len());
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn loaded(&mut self, id: u64, result: Result<Items, String>, next: Option<String>) {
         let Some(pending) = self.pending.take_if(|p| p.id == id) else {
             return; // superseded by a newer request
         };
@@ -966,9 +1111,12 @@ impl State {
                 Filter::NotMine => videos.retain(|v| v.channel_id.is_some() && !mine(v)),
             }
         }
-        self.status =
-            if items.is_empty() { "Sin resultados".into() } else { format!("{} · {}", pending.title, items.len()) };
-        let listing = Listing { title: pending.title, items, selected: 0, kind: pending.kind };
+        self.status = if items.is_empty() {
+            self.tr("Sin resultados", "No results").into()
+        } else {
+            format!("{} · {}", pending.title, items.len())
+        };
+        let listing = Listing { next, ..Listing::new(pending.title, items, pending.kind) };
         if pending.push {
             self.stack.push(listing);
             self.focus = Focus::List;
@@ -997,9 +1145,11 @@ impl State {
     fn session_ready(&mut self, subs: Result<HashSet<String>, String>) -> Vec<Effect> {
         match subs {
             Ok(subs) => {
-                self.status = match self.session_label().as_str() {
-                    "sin sesión" => "Sin sesión".into(),
-                    label => format!("Sesión: {label} · {} canales", subs.len()),
+                self.status = if self.logged_in() {
+                    let (session, channels) = (self.tr("Sesión", "Login"), self.tr("canales", "channels"));
+                    format!("{session}: {} · {} {channels}", self.session_label(), subs.len())
+                } else {
+                    self.tr("Sin sesión", "Not logged in").into()
                 };
                 self.subs = subs;
                 vec![Effect::SaveSubs(self.subs.clone())]
@@ -1041,9 +1191,10 @@ impl State {
         let Some(video) = self.selected_video().cloned() else { return Vec::new() };
         if let Some(i) = self.later.iter().position(|v| v.id == video.id) {
             self.later.remove(i);
-            self.status = format!("🗑 Quitado de Ver después: {}", video.title);
+            self.status =
+                format!("🗑 {}: {}", self.tr("Quitado de Ver después", "Removed from Watch later"), video.title);
         } else {
-            self.status = format!("🕒 Guardado para después: {}", video.title);
+            self.status = format!("🕒 {}: {}", self.tr("Guardado para después", "Saved for later"), video.title);
             self.later.insert(0, video);
         }
         for listing in self.stack.iter_mut().filter(|l| l.kind == ListKind::Later) {
@@ -1056,7 +1207,7 @@ impl State {
     fn toggle_subscription(&mut self) -> Vec<Effect> {
         let Some((channel_id, name, _)) = self.selected_channel() else {
             if self.selected_video().is_some() {
-                self.status = "Este video no tiene canal".into();
+                self.status = self.tr("Este video no tiene canal", "This video has no channel").into();
             }
             return Vec::new();
         };
@@ -1064,7 +1215,7 @@ impl State {
             self.confirm = Some(Unsubscribe { channel_id, name });
             Vec::new()
         } else {
-            self.status = format!("Suscribiendo a {name}…");
+            self.status = format!("{} {name}…", self.tr("Suscribiendo a", "Subscribing to"));
             vec![Effect::Subscribe { channel_id, name, subscribe: true }]
         }
     }
@@ -1073,14 +1224,15 @@ impl State {
         match result {
             Ok(true) => {
                 self.subs.insert(channel_id);
-                self.status = format!("🔔 Suscripto: {name}");
+                self.status = format!("🔔 {}: {name}", self.tr("Suscripto", "Subscribed"));
             }
             Ok(false) => {
                 self.subs.remove(&channel_id);
-                self.status = format!("🔕 Desuscripto: {name}");
+                self.status = format!("🔕 {}: {name}", self.tr("Desuscripto", "Unsubscribed"));
             }
             Err(error) => {
-                self.status = format!("❌ No se pudo cambiar la suscripción a {name}: {error}");
+                let failed = self.tr("No se pudo cambiar la suscripción a", "Could not change the subscription to");
+                self.status = format!("❌ {failed} {name}: {error}");
                 return Vec::new();
             }
         }
@@ -1108,7 +1260,11 @@ impl State {
             return Vec::new();
         }
         if self.tabs.len() >= self.config.ui.max_tabs {
-            self.status = format!("Máximo de {} pestañas: cerrá una con C-y x", self.config.ui.max_tabs);
+            let (max, close) = (
+                self.tr("Máximo de", "At most"),
+                self.tr("pestañas: cerrá una con C-y x", "tabs: close one with C-y x"),
+            );
+            self.status = format!("{max} {} {close}", self.config.ui.max_tabs);
             return Vec::new();
         }
         let id = TabId(self.next_tab);
@@ -1132,21 +1288,44 @@ impl State {
         }
     }
 
+    fn toggle_ui_lang(&mut self) -> Vec<Effect> {
+        let lang = self.lang().next();
+        self.config.ui.lang = Some(lang);
+        self.status = lang.pick("Idioma: español", "Language: English").into();
+        vec![Effect::SaveSetting { table: "ui", key: "lang", value: SettingValue::Text(lang.as_str().into()) }]
+    }
+
     fn command(&self, command: PlayerCommand) -> Vec<Effect> {
         self.active_tab().map(|t| Effect::Command(t.id, command)).into_iter().collect()
     }
 }
 
-fn dirs_label(dirs: &[String], default: &str) -> String {
-    if dirs.is_empty() { format!("{default} (del sistema)") } else { dirs.join(", ") }
+fn dirs_label(dirs: &[String], default: &str, lang: Lang) -> String {
+    if dirs.is_empty() { format!("{default} ({})", lang.pick("del sistema", "system")) } else { dirs.join(", ") }
 }
 
-pub fn language_label(language: Language) -> &'static str {
-    match language {
-        Language::Subtitles => "original + subtítulos",
-        Language::Original => "original, sin subtítulos",
-        Language::Dubbed => "audio doblado",
+/// The `[effects]` key and flag behind an animation setting.
+fn effect_flag(effects: &mut EffectsConfig, setting: Setting) -> Option<(&'static str, &mut bool)> {
+    match setting {
+        Setting::FxStartup => Some(("startup", &mut effects.startup)),
+        Setting::FxPages => Some(("pages", &mut effects.pages)),
+        Setting::FxDialogs => Some(("dialogs", &mut effects.dialogs)),
+        _ => None,
     }
+}
+
+/// "sí"/"no" in both languages.
+fn on_off(on: bool) -> (&'static str, &'static str) {
+    if on { ("sí", "on") } else { ("no", "off") }
+}
+
+pub fn language_label(language: Language, lang: Lang) -> &'static str {
+    let (es, en) = match language {
+        Language::Subtitles => ("original + subtítulos", "original + subtitles"),
+        Language::Original => ("original, sin subtítulos", "original, no subtitles"),
+        Language::Dubbed => ("audio doblado", "dubbed audio"),
+    };
+    lang.pick(es, en)
 }
 
 #[cfg(test)]
@@ -1255,6 +1434,38 @@ mod tests {
     }
 
     #[test]
+    fn ui_language_toggles_and_is_saved() {
+        let mut s = state();
+        assert_eq!(s.lang(), Lang::Es, "Spanish until the runtime picks the system's");
+        assert_eq!(s.update(Action::ToggleUiLang), vec![saved("ui", "lang", text("en"))]);
+        assert_eq!((s.lang(), s.status.as_str()), (Lang::En, "Language: English"));
+        assert_eq!(Section::Inicio.label(s.lang()), "Home");
+        assert_eq!(s.update(Action::ToggleUiLang), vec![saved("ui", "lang", text("es"))]);
+        assert_eq!(change(&mut s, Setting::AppLang), vec![saved("ui", "lang", text("en"))]);
+        assert_eq!(change(&mut s, Setting::FxPages), vec![saved("effects", "pages", SettingValue::Bool(false))]);
+        assert!(!s.config.effects.pages && s.config.effects.startup && s.config.effects.dialogs);
+        assert_eq!(s.setting_value(Setting::FxPages), "off");
+        assert_eq!(s.setting_value(Setting::FxDialogs), "on");
+    }
+
+    #[test]
+    fn lists_are_titled_in_the_interface_language() {
+        let mut s = state();
+        s.update(Action::ToggleUiLang);
+        open(&mut s, Section::Suscripciones);
+        assert_eq!(s.loading.as_deref(), Some("Subscriptions"));
+        assert_eq!(s.status, "Loading Subscriptions…");
+    }
+
+    #[test]
+    fn about_is_a_page_on_inicio() {
+        let mut s = state();
+        assert!(open(&mut s, Section::AcercaDe).is_empty());
+        assert_eq!(s.listing().map(|l| &l.items), Some(&Items::About));
+        assert!(s.update(Action::Enter).is_empty());
+    }
+
+    #[test]
     fn help_toggles() {
         let mut s = state();
         s.update(Action::ToggleHelp);
@@ -1342,10 +1553,57 @@ mod tests {
         s.update(Action::Backspace);
         s.update(Action::Backspace);
         match s.update(Action::Enter).as_slice() {
-            [Effect::Load { source: Source::Search(q), limit: 60, .. }] => assert_eq!(q, "rust"),
+            [Effect::Search { query, next: None, .. }] => assert_eq!(query, "rust"),
             other => panic!("{other:?}"),
         }
         assert_eq!(s.prompt, None);
+    }
+
+    #[test]
+    fn videos_from_the_selection_feed_the_thumbnails() {
+        let mut s = with_videos(&["a", "b", "c", "d"]);
+        s.update(Action::Down);
+        let ids = |s: &State, n| s.videos_from_selection(n).iter().map(|v| v.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&s, 2), ["b", "c", "d"]);
+        assert_eq!(ids(&s, 10), ["b", "c", "d"]);
+        play(&mut s, 0);
+        assert!(s.videos_from_selection(3).is_empty(), "not while watching");
+    }
+
+    #[test]
+    fn search_results_come_in_pages_loaded_while_scrolling() {
+        let mut s = state();
+        s.update(Action::FocusSearch);
+        type_text(&mut s, "rust");
+        let id = match s.update(Action::Enter).as_slice() {
+            [Effect::Search { id, .. }] => *id,
+            other => panic!("{other:?}"),
+        };
+        let page = |ids: &[&str], next: Option<&str>| SearchPage {
+            videos: ids.iter().map(|i| video(i)).collect(),
+            next: next.map(str::to_owned),
+        };
+        let first: Vec<String> = (0..8).map(|i| format!("v{i}")).collect();
+        let first: Vec<&str> = first.iter().map(String::as_str).collect();
+        s.update(Action::Page(id, Ok(page(&first, Some("T1")))));
+        assert_eq!(s.listing().unwrap().items.len(), 8);
+        assert!(s.update(Action::Down).is_empty(), "far from the end");
+        assert!(s.update(Action::Down).is_empty(), "far from the end");
+        let more = match s.update(Action::Down).as_slice() {
+            [Effect::Search { id, next: Some(token), .. }] => {
+                assert_eq!(token, "T1");
+                *id
+            }
+            other => panic!("{other:?}"),
+        };
+        assert!(s.update(Action::Down).is_empty(), "one request at a time");
+        s.update(Action::Page(more, Ok(page(&["v7", "v8", "v9"], None))));
+        let listing = s.listing().unwrap();
+        assert_eq!(listing.items.len(), 10, "appended without duplicates");
+        assert_eq!((listing.selected, listing.next.as_deref(), listing.more), (4, None, None));
+        for _ in 0..10 {
+            assert!(s.update(Action::Down).is_empty(), "no more pages");
+        }
     }
 
     #[test]
@@ -1383,7 +1641,7 @@ mod tests {
             .map(|_| {
                 s.update(Action::CycleScope);
                 match &s.prompt {
-                    Some(Prompt::Videos { scope, .. }) => scope.label(),
+                    Some(Prompt::Videos { scope, .. }) => scope.label(Lang::Es),
                     other => panic!("{other:?}"),
                 }
             })

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{Lang, Text};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -18,6 +20,7 @@ pub struct Config {
     pub search: SearchConfig,
     pub download: DownloadConfig,
     pub media: MediaConfig,
+    pub effects: EffectsConfig,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -131,6 +134,28 @@ pub struct UiConfig {
     pub sidebar: bool,
     pub max_tabs: usize,
     pub icons: IconSet,
+    /// Interface language; unset follows the system locale.
+    pub lang: Option<Lang>,
+    /// Video thumbnails in the preview panel (kitty only).
+    pub thumbnails: bool,
+}
+
+/// Short animations, each one can be turned off.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EffectsConfig {
+    /// The menu and the welcome screen appear when the app starts.
+    pub startup: bool,
+    /// A new list, section or tab sweeps in.
+    pub pages: bool,
+    /// Help and questions open with a flash.
+    pub dialogs: bool,
+}
+
+impl Default for EffectsConfig {
+    fn default() -> Self {
+        Self { startup: true, pages: true, dialogs: true }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -165,16 +190,16 @@ impl IconSet {
 }
 
 /// Subtitle / dubbing languages offered by the settings screen (any code works in the file).
-pub const LANGUAGES: [(&str, &str); 9] = [
-    ("es", "español"),
-    ("en", "inglés"),
-    ("pt", "portugués"),
-    ("fr", "francés"),
-    ("it", "italiano"),
-    ("de", "alemán"),
-    ("ja", "japonés"),
-    ("ko", "coreano"),
-    ("ru", "ruso"),
+pub const LANGUAGES: [(&str, Text); 9] = [
+    ("es", Text::new("español", "Spanish")),
+    ("en", Text::new("inglés", "English")),
+    ("pt", Text::new("portugués", "Portuguese")),
+    ("fr", Text::new("francés", "French")),
+    ("it", Text::new("italiano", "Italian")),
+    ("de", Text::new("alemán", "German")),
+    ("ja", Text::new("japonés", "Japanese")),
+    ("ko", Text::new("coreano", "Korean")),
+    ("ru", Text::new("ruso", "Russian")),
 ];
 
 pub fn next_language(code: &str) -> &'static str {
@@ -182,8 +207,34 @@ pub fn next_language(code: &str) -> &'static str {
     LANGUAGES[index].0
 }
 
-pub fn language_name(code: &str) -> String {
-    LANGUAGES.iter().find(|(c, _)| *c == code).map_or_else(|| code.to_owned(), |(c, name)| format!("{name} ({c})"))
+pub fn language_name(code: &str, lang: Lang) -> String {
+    LANGUAGES
+        .iter()
+        .find(|(c, _)| *c == code)
+        .map_or_else(|| code.to_owned(), |(c, name)| format!("{} ({c})", name.get(lang)))
+}
+
+/// A donation address, shown on the About page.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Wallet {
+    pub network: String,
+    pub address: String,
+}
+
+/// The wallets in `donate.toml`, compiled into the app; empty ones are skipped.
+pub fn donations() -> Vec<Wallet> {
+    parse_donations(include_str!("../donate.toml"))
+}
+
+fn parse_donations(text: &str) -> Vec<Wallet> {
+    #[derive(Deserialize)]
+    struct File {
+        #[serde(default)]
+        wallet: Vec<Wallet>,
+    }
+    let wallets = toml::from_str::<File>(text).map(|f| f.wallet).unwrap_or_default();
+    wallets.into_iter().filter(|w| !w.address.trim().is_empty()).collect()
 }
 
 /// Heights offered by the settings screen.
@@ -223,7 +274,7 @@ impl Default for PlayerConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { sidebar: true, max_tabs: 9, icons: IconSet::Emoji }
+        Self { sidebar: true, max_tabs: 9, icons: IconSet::Emoji, lang: None, thumbnails: true }
     }
 }
 
@@ -312,8 +363,19 @@ mod tests {
         assert!(c.ui.sidebar);
         assert_eq!(c.ui.max_tabs, 9);
         assert_eq!(c.ui.icons, IconSet::Emoji);
+        assert_eq!(c.ui.lang, None, "follows the system until chosen");
+        assert_eq!(c.effects, EffectsConfig { startup: true, pages: true, dialogs: true });
         assert_eq!(c.search.results, 60);
         assert_eq!(c.download.dir, "");
+    }
+
+    #[test]
+    fn donations_skip_empty_wallets() {
+        let text = "[[wallet]]\nnetwork = \"USDT (TRC20)\"\naddress = \"TXyz\"\n[[wallet]]\nnetwork = \"BTC\"\naddress = \"\"\n";
+        assert_eq!(parse_donations(text), vec![Wallet { network: "USDT (TRC20)".into(), address: "TXyz".into() }]);
+        assert_eq!(parse_donations(""), vec![]);
+        donations(); // the shipped file parses
+        assert!(toml::from_str::<toml::Table>(include_str!("../donate.toml")).is_ok());
     }
 
     #[test]
@@ -332,8 +394,9 @@ mod tests {
 
     #[test]
     fn enums_use_lowercase_names() {
-        let c = Config::from_toml("[ui]\nicons = \"nerd\"\n[player]\nlanguage = \"dubbed\"\n").unwrap();
+        let c = Config::from_toml("[ui]\nicons = \"nerd\"\nlang = \"en\"\n[player]\nlanguage = \"dubbed\"\n").unwrap();
         assert_eq!(c.ui.icons, IconSet::Nerd);
+        assert_eq!(c.ui.lang, Some(Lang::En));
         assert_eq!(c.player.language, Language::Dubbed);
         assert_eq!(Language::Dubbed.as_str(), "dubbed");
     }
@@ -355,8 +418,9 @@ mod tests {
         assert_eq!(next_language("es"), "en");
         assert_eq!(next_language("ru"), "es");
         assert_eq!(next_language("xx"), "es");
-        assert_eq!(language_name("pt"), "portugués (pt)");
-        assert_eq!(language_name("eu"), "eu");
+        assert_eq!(language_name("pt", Lang::Es), "portugués (pt)");
+        assert_eq!(language_name("pt", Lang::En), "Portuguese (pt)");
+        assert_eq!(language_name("eu", Lang::En), "eu");
     }
 
     #[test]

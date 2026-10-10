@@ -5,7 +5,12 @@ with [ratatui](https://ratatui.rs). Videos play through [mpv](https://mpv.io):
 drawn **inside the app** in [kitty](https://sw.kovidgoyal.net/kitty/), or in
 their own window elsewhere. Every video opens in its own tab.
 
-> Interface in Spanish for now. Early but usable: feedback welcome.
+> Interface in English and Spanish (`Ctrl+y l` switches). Early but usable:
+> feedback welcome.
+
+![A YouTube video playing inside tubetui, in kitty](https://raw.githubusercontent.com/polblancoo/tubetui/main/docs/video.png)
+
+![Search results in tubetui](https://raw.githubusercontent.com/polblancoo/tubetui/main/docs/search.png)
 
 ## What it does
 
@@ -13,8 +18,10 @@ their own window elsewhere. Every video opens in its own tab.
 - **Inicio** (your home feed), **Descubrir** (the home feed without channels
   you already follow), **Suscripciones** (newest from your channels, live and
   upcoming first), **Mis canales**
-- **Search** videos in all of YouTube, only in your channels, or inside a
-  channel (`Tab` switches the scope); search channels
+- **Search** videos in all of YouTube (about a second, more results load as
+  you scroll), only in your channels, or inside a channel (`Tab` switches the
+  scope); search channels
+- A **preview** of the selected video with its **thumbnail** (in kitty)
 - **Subscribe / unsubscribe** (`s`, unsubscribing asks first), **watch later**
   (`l`), **download** with subtitles (`d`), open the **channel** (`c`)
 
@@ -39,6 +46,9 @@ their own window elsewhere. Every video opens in its own tab.
   comments. `$EDITOR` can open the file from the app
 - The bottom bar always shows the keys that work right now; `Ctrl+y ?` lists
   them all
+- English or Spanish, following the system language until you pick one
+- Short animations when pages and dialogs open, each one can be turned off
+- An **About** page with links and how to support the project
 
 ## Requirements
 
@@ -64,6 +74,7 @@ Global commands use a **`Ctrl+y` prefix** (tmux style): press `Ctrl+y`, then:
 | `n` `p` `0-9` | next / previous / numbered tab (`0` = Inicio) |
 | `x` | close the tab |
 | `/` | search videos |
+| `l` | English / español |
 | `?` | every shortcut, explained |
 | `q` | quit |
 
@@ -106,7 +117,21 @@ music_dirs = ["~/Música", "/mnt/discos"]
 
 [ui]
 icons = "emoji"          # emoji | nerd | unicode
+lang = "en"              # en | es (unset: the system language)
+thumbnails = true        # thumbnail in the preview panel (kitty)
+
+[effects]                # animations
+startup = true
+pages = true
+dialogs = true
 ```
+
+## Performance
+
+Idle it uses about 25 MB and no CPU. Videos in their own window play with
+hardware decoding (8 % CPU on a 2012 laptop); embedded video is scaled on the
+CPU, so 480p is the sweet spot there. See the [benchmark](docs/benchmark.md)
+against ytfzf and youtube-tui.
 
 ## Troubleshooting
 
@@ -116,6 +141,11 @@ manager shortcut, whose terminal closes with it), the error is kept in
 
 To diagnose lag, run with `TUBETUI_DEBUG=/tmp/tubetui.log tubetui`: every key,
 redraw and action is logged with its timing.
+
+## Support
+
+If tubetui is useful to you, the **About** page (Acerca de) lists donation
+addresses. They live in [`donate.toml`](donate.toml).
 
 ## Disclaimer
 

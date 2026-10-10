@@ -1,0 +1,11 @@
+# Donation addresses shown in tubetui's "Acerca de / About" page.
+# One [[wallet]] block per network; blocks with an empty address are hidden.
+# This file is compiled into the app, so every user sees the same addresses.
+
+[[wallet]]
+network = "Solana"
+address = "G5PVFgymo47BE3SoxzB9RvTp2ZR8z6tkXLL8hPFJu1Gm"
+
+[[wallet]]
+network = "BNB (BSC)"
+address = "0xf0666bcA8F1b1f910E47D0f8e61185EB0E343a22"

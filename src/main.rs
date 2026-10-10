@@ -15,12 +15,15 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::layout::Rect;
 
-use tubetui::app::{Action, Effect, PlayerCommand, SettingValue, State};
+use tubetui::anim::Animations;
+use tubetui::app::{Action, Effect, Playback, PlayerCommand, SettingValue, State};
 use tubetui::config::{self, Config};
 use tubetui::domain::{TabId, Video};
+use tubetui::i18n::Lang;
 use tubetui::media::{self, MediaKind};
 use tubetui::player::{self, Geometry, Launch, Mode, Player};
 use tubetui::store::{self, Paths};
+use tubetui::thumbs::Thumbnails;
 use tubetui::youtube::{self, Items};
 use tubetui::{keymap, session, ui};
 
@@ -30,6 +33,10 @@ const SUBS_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 const RESIZE_SETTLE: Duration = Duration::from_millis(250);
 /// mpv may flush one more frame after being hidden; clear again after this.
 const LATE_FRAME: Duration = Duration::from_millis(300);
+/// Thumbnails downloaded ahead of the selection.
+const THUMBS_AHEAD: usize = 10;
+/// Time between animation frames.
+const FRAME: Duration = Duration::from_millis(33);
 
 /// YouTube in your terminal.
 #[derive(Parser)]
@@ -43,10 +50,16 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config_path = cli.config.or_else(Config::default_path);
-    let config = match &config_path {
+    let mut config = match &config_path {
         Some(path) => Config::load(path)?,
         None => Config::default(),
     };
+    // Until a language is chosen, follow the system's.
+    config.ui.lang.get_or_insert_with(|| {
+        let locale =
+            ["LC_ALL", "LC_MESSAGES", "LANG"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()));
+        Lang::from_locale(&locale.unwrap_or_default())
+    });
     let paths = Paths::system().context("no se encontró la carpeta personal")?;
     let later = load_later(&paths)?;
     let crash_log = paths.cache.join("crash.log");
@@ -120,6 +133,8 @@ struct Runtime {
     loading_since: Option<Instant>,
     /// Players of closed tabs, quitting in the background.
     closing: Vec<std::thread::JoinHandle<()>>,
+    animations: Animations,
+    thumbs: Thumbnails,
 }
 
 impl Drop for Runtime {
@@ -150,9 +165,15 @@ impl Runtime {
             window_fullscreen: false,
             loading_since: None,
             closing: Vec::new(),
+            animations: Animations::default(),
+            thumbs: Thumbnails::default(),
         };
         runtime.start_session(false);
         runtime
+    }
+
+    fn tr(&self, es: &'static str, en: &'static str) -> &'static str {
+        self.state.lang().pick(es, en)
     }
 
     fn mode(&self) -> Mode {
@@ -179,28 +200,47 @@ impl Runtime {
             was_opening = opening.is_some();
             if self.resized_at.is_some_and(|t| t.elapsed() >= RESIZE_SETTLE) {
                 self.resized_at = None;
+                self.thumbs.forget();
                 dirty = true;
             }
             if self.clear_at.is_some_and(|t| Instant::now() >= t) {
                 self.clear_at = None;
                 if ui::video_area(&self.state, terminal.size()?.into()).is_none() || self.resized_at.is_some() {
-                    player::clear_images();
+                    self.clear_images();
+                    dirty = true;
                 }
             }
+            if self.thumbs.receive() {
+                dirty = true;
+            }
             // Redraw only on change: every redraw competes with mpv for the terminal.
-            if dirty {
+            if dirty || self.animations.running() {
                 let loading = self.loading_since.map(|t| t.elapsed());
-                let view = ui::View { embedded: self.mode() == Mode::Embedded, now: now(), loading, opening };
+                let embedded = self.mode() == Mode::Embedded;
+                let thumbnails = embedded && self.state.config.ui.thumbnails;
+                let view = ui::View { embedded, now: now(), loading, opening, thumbnails };
                 let t = Instant::now();
-                terminal.draw(|f| ui::draw(f, &self.state, &view))?;
+                self.animations.observe(&self.state, terminal.size()?.into());
+                terminal.draw(|f| {
+                    ui::draw(f, &self.state, &view);
+                    self.animations.render(f);
+                })?;
                 dbg(format!("draw {:?}", t.elapsed()));
                 let t = Instant::now();
                 self.place_videos(terminal.size()?.into());
                 dbg(format!("place {:?}", t.elapsed()));
+                if thumbnails {
+                    self.thumbs.want(self.state.videos_from_selection(THUMBS_AHEAD).iter().map(|v| v.id.as_str()));
+                    self.thumbs.show(ui::thumbnail_area(&self.state, terminal.size()?.into()));
+                } else {
+                    self.thumbs.show(None);
+                }
                 dirty = false;
             }
             let mut pending = Vec::new();
-            if event::poll(Duration::from_millis(100)).context("reading terminal events")? {
+            // Animations want about 30 frames a second; otherwise wait longer.
+            let wait = if self.animations.running() { FRAME } else { Duration::from_millis(100) };
+            if event::poll(wait).context("reading terminal events")? {
                 match event::read()? {
                     Event::Key(key) => {
                         dbg(format!("key {:?} {:?}", key.code, key.kind));
@@ -217,6 +257,7 @@ impl Runtime {
                 }
             }
             pending.extend(self.rx.try_iter());
+            self.retry_with_cookies(terminal.size()?.into());
             pending.extend(
                 (self.players.iter_mut())
                     .filter_map(|(id, p)| p.has_exited().then_some(Action::PlayerClosed(*id, None))),
@@ -261,6 +302,11 @@ impl Runtime {
                     Action::Loaded(id, result)
                 });
             }
+            Effect::Search { id, query, next } => {
+                self.background(move || {
+                    Action::Page(id, youtube::search(&query, next.as_deref()).map_err(|e| e.to_string()))
+                });
+            }
             Effect::ScanBrowsers { id } => {
                 let home = directories::BaseDirs::new().map(|d| d.home_dir().to_owned()).unwrap_or_default();
                 let mut profiles = session::scan_browsers(&home, &self.state.config.session.keyring);
@@ -296,7 +342,8 @@ impl Runtime {
             Effect::EditConfig => self.edit_config(terminal)?,
             Effect::SaveLater(videos) => {
                 if let Err(e) = store::save_later(&self.paths.later, &videos) {
-                    self.send(Action::Status(format!("No se pudo guardar Ver después: {e}")));
+                    let failed = self.tr("No se pudo guardar Ver después", "Could not save Watch later");
+                    self.send(Action::Status(format!("{failed}: {e}")));
                 }
             }
             Effect::SaveSubs(subs) => {
@@ -320,34 +367,27 @@ impl Runtime {
                 let player = &self.state.config.player;
                 let args = youtube::download_args(
                     &video.url(),
-                    &player::ytdl_format(player),
+                    &player::ytdl_format(player, Mode::Window),
                     &player.sub_lang,
                     &dir,
                     self.cookies.as_deref(),
                 );
+                let lang = self.state.lang();
                 self.background(move || match youtube::download(&args) {
-                    Ok(()) => Action::Status(format!("✅ Descarga lista en {}: {}", dir.display(), video.title)),
-                    Err(e) => Action::Status(format!("❌ Falló la descarga de {}: {e}", video.title)),
+                    Ok(()) => Action::Status(format!(
+                        "✅ {} {}: {}",
+                        lang.pick("Descarga lista en", "Downloaded to"),
+                        dir.display(),
+                        video.title
+                    )),
+                    Err(e) => Action::Status(format!(
+                        "❌ {} {}: {e}",
+                        lang.pick("Falló la descarga de", "Download failed:"),
+                        video.title
+                    )),
                 });
             }
-            Effect::Open(id, playback) => {
-                let mode = self.mode();
-                let screen: Rect = terminal.size()?.into();
-                let geometry = ui::video_area(&self.state, screen).map(|a| Geometry::new(a, player::cell_size()));
-                let launch = Launch {
-                    config: &self.state.config.player,
-                    mode,
-                    cookies: self.cookies.as_deref(),
-                    queue: &playback.queue,
-                    audio_only: playback.audio_only,
-                };
-                match Player::spawn(&launch, geometry) {
-                    Ok(p) => {
-                        self.players.insert(id, p);
-                    }
-                    Err(e) => self.send(Action::PlayerClosed(id, Some(format!("No se pudo iniciar mpv: {e}")))),
-                }
-            }
+            Effect::Open(id, playback) => self.open(id, &playback, false, terminal.size()?.into()),
             Effect::Close(id) => self.stop(id),
             Effect::Command(id, command) => {
                 if let PlayerCommand::Fullscreen(on) = command
@@ -363,13 +403,60 @@ impl Runtime {
         Ok(())
     }
 
+    /// Starts mpv for a tab. Videos open without the login: yt-dlp takes
+    /// several times longer with cookies (measured 7 s against 23 s), and
+    /// only a few videos (age-restricted, members-only, private) need them.
+    fn open(&mut self, id: TabId, playback: &Playback, with_cookies: bool, screen: Rect) {
+        let geometry = ui::video_area(&self.state, screen).map(|a| Geometry::new(a, player::cell_size()));
+        let launch = Launch {
+            config: &self.state.config.player,
+            mode: self.mode(),
+            cookies: self.cookies.as_deref().filter(|_| with_cookies),
+            queue: &playback.queue,
+            audio_only: playback.audio_only,
+        };
+        match Player::spawn(&launch, geometry) {
+            Ok(p) => {
+                self.players.insert(id, p);
+            }
+            Err(e) => {
+                let failed = self.tr("No se pudo iniciar mpv", "Could not start mpv");
+                self.send(Action::PlayerClosed(id, Some(format!("{failed}: {e}"))))
+            }
+        }
+    }
+
+    /// A video that ended before playing may need the login: try once more with it.
+    fn retry_with_cookies(&mut self, screen: Rect) {
+        if self.cookies.is_none() {
+            return;
+        }
+        let failed: Vec<TabId> = (self.players.iter_mut())
+            .filter_map(|(id, p)| (!p.used_cookies() && p.opening().is_some() && p.has_exited()).then_some(*id))
+            .collect();
+        for id in failed {
+            self.players.remove(&id);
+            let Some(playback) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.playback.clone()) else {
+                continue;
+            };
+            dbg(format!("retry {id:?} with cookies"));
+            self.open(id, &playback, true, screen);
+        }
+    }
+
+    /// Removes every image from the screen (videos and the thumbnail).
+    fn clear_images(&mut self) {
+        player::clear_images();
+        self.thumbs.forget();
+    }
+
     /// Stops the player of `id` without waiting for mpv to exit: a frozen UI
     /// makes people press the close key again and lose another tab.
     fn stop(&mut self, id: TabId) {
         let Some(mut player) = self.players.remove(&id) else { return };
         // No more frames; the last one would stay on top of everything.
         if player.hide(false) {
-            player::clear_images();
+            self.clear_images();
             self.clear_at = Some(Instant::now() + LATE_FRAME);
         }
         self.closing.push(std::thread::spawn(move || drop(player)));
@@ -405,7 +492,7 @@ impl Runtime {
     /// Opens `config.toml` in `$VISUAL`/`$EDITOR`, then reloads it.
     fn edit_config(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
         let Some(path) = self.config_path.clone() else {
-            self.send(Action::Status("No hay archivo de configuración".into()));
+            self.send(Action::Status(self.tr("No hay archivo de configuración", "There is no config file").into()));
             return Ok(());
         };
         if !path.exists() {
@@ -415,7 +502,7 @@ impl Runtime {
         for p in self.players.values_mut() {
             p.hide(false);
         }
-        player::clear_images();
+        self.clear_images();
         let editor = std::env::var("VISUAL")
             .or_else(|_| std::env::var("EDITOR"))
             .unwrap_or_else(|_| if cfg!(windows) { "notepad".into() } else { "nano".into() });
@@ -426,7 +513,7 @@ impl Runtime {
         *terminal = ratatui::init();
         let result = match status {
             Ok(_) => Config::load(&path).map_err(|e| e.to_string()),
-            Err(e) => Err(format!("no se pudo abrir {program}: {e}")),
+            Err(e) => Err(format!("{} {program}: {e}", self.tr("no se pudo abrir", "could not open"))),
         };
         self.send(Action::ConfigReloaded(result));
         Ok(())
@@ -489,7 +576,7 @@ impl Runtime {
             }
         }
         if hidden_any {
-            player::clear_images();
+            self.clear_images();
             self.clear_at = Some(Instant::now() + LATE_FRAME);
         }
     }

@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Lang;
+
 const DAY: i64 = 86_400;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,18 +66,24 @@ impl Video {
     }
 }
 
-/// `"09/10/26"` and `"hoy" | "ayer" | "5d" | "3m" | "2a"`.
-pub fn date_labels(timestamp: i64, now: i64) -> (String, String) {
+/// Spanish `"09/10/26"` and `"hoy" | "ayer" | "5d" | "3m" | "2a"`;
+/// English `"10/09/26"` and `"today" | "1d" | "5d" | "3mo" | "2y"`.
+pub fn date_labels(timestamp: i64, now: i64, lang: Lang) -> (String, String) {
     let (y, m, d) = civil_from_days(timestamp.div_euclid(DAY));
+    let y = y.rem_euclid(100);
     let days = (now - timestamp).max(0) / DAY;
     let age = match days {
-        0 => "hoy".into(),
-        1 => "ayer".into(),
+        0 => lang.pick("hoy", "today").into(),
+        1 => lang.pick("ayer", "1d").into(),
         2..30 => format!("{days}d"),
-        30..365 => format!("{}m", days / 30),
-        _ => format!("{}a", days / 365),
+        30..365 => format!("{}{}", days / 30, lang.pick("m", "mo")),
+        _ => format!("{}{}", days / 365, lang.pick("a", "y")),
     };
-    (format!("{d:02}/{m:02}/{:02}", y.rem_euclid(100)), age)
+    let date = match lang {
+        Lang::Es => format!("{d:02}/{m:02}/{y:02}"),
+        Lang::En => format!("{m:02}/{d:02}/{y:02}"),
+    };
+    (date, age)
 }
 
 /// Days since 1970-01-01 → (year, month, day). Howard Hinnant's algorithm.
@@ -164,13 +172,18 @@ mod tests {
     #[test]
     fn date_labels_show_date_and_age() {
         let ts = 1_791_590_400; // 2026-10-10 00:00 UTC
-        assert_eq!(date_labels(ts, ts + 3600), ("10/10/26".into(), "hoy".into()));
-        assert_eq!(date_labels(ts, ts + DAY), ("10/10/26".into(), "ayer".into()));
-        assert_eq!(date_labels(ts, ts + 5 * DAY).1, "5d");
-        assert_eq!(date_labels(ts, ts + 95 * DAY).1, "3m");
-        assert_eq!(date_labels(ts, ts + 800 * DAY).1, "2a");
-        assert_eq!(date_labels(0, 0).0, "01/01/70");
-        assert_eq!(date_labels(951_782_400, 0).0, "29/02/00"); // leap day
+        let es = |ts, now| date_labels(ts, now, Lang::Es);
+        assert_eq!(es(ts, ts + 3600), ("10/10/26".into(), "hoy".into()));
+        assert_eq!(es(ts, ts + DAY), ("10/10/26".into(), "ayer".into()));
+        assert_eq!(es(ts, ts + 5 * DAY).1, "5d");
+        assert_eq!(es(ts, ts + 95 * DAY).1, "3m");
+        assert_eq!(es(ts, ts + 800 * DAY).1, "2a");
+        assert_eq!(es(0, 0).0, "01/01/70");
+        assert_eq!(es(951_782_400, 0).0, "29/02/00"); // leap day
+        let en = |ts, now| date_labels(ts, now, Lang::En);
+        assert_eq!(en(951_782_400, 951_782_400), ("02/29/00".into(), "today".into()));
+        assert_eq!(en(ts, ts + 95 * DAY).1, "3mo");
+        assert_eq!(en(ts, ts + 800 * DAY).1, "2y");
     }
 
     #[test]

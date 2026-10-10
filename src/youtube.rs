@@ -1,6 +1,7 @@
-//! YouTube access. Video lists come from `yt-dlp`, which already tracks
-//! YouTube's changes; my channels and (un)subscribing use YouTube's internal
-//! API ("InnerTube") signed with the session cookies, like the website does.
+//! YouTube access. Feeds come from `yt-dlp`, which already tracks YouTube's
+//! changes. Searches, my channels and (un)subscribing use YouTube's internal
+//! API ("InnerTube") like the website does: a search page answers in under a
+//! second, where starting yt-dlp takes several.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -88,6 +89,8 @@ pub enum Items {
     Profiles(Vec<String>),
     /// The settings screen; rows come from `app::Setting::ALL`.
     Settings,
+    /// The "About" page.
+    About,
     /// Local media files.
     Files(Vec<crate::media::LocalFile>, crate::media::MediaKind),
 }
@@ -99,6 +102,7 @@ impl Items {
             Self::Channels(c) => c.len(),
             Self::Profiles(p) => p.len(),
             Self::Settings => crate::app::Setting::ALL.len(),
+            Self::About => 0,
             Self::Files(files, _) => files.len(),
         }
     }
@@ -176,11 +180,101 @@ pub fn set_subscription(cookies: &Path, channel_id: &str, subscribe: bool) -> Re
     parse_subscription_reply(&reply).ok_or_else(|| YoutubeError::Http("la respuesta no confirma el cambio".into()))
 }
 
-/// Authenticated client for `youtubei/v1`.
+/// One page of search results and the token that asks for the next one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchPage {
+    pub videos: Vec<Video>,
+    pub next: Option<String>,
+}
+
+/// Searches videos, one page (about 20) at a time; `next` continues a search.
+pub fn search(query: &str, next: Option<&str>) -> Result<SearchPage, YoutubeError> {
+    let body = match next {
+        Some(token) => json!({ "continuation": token }),
+        // `EgIQAQ==` is the "Videos" filter: no channels, playlists or shorts shelves.
+        None => json!({ "query": query, "params": "EgIQAQ==" }),
+    };
+    let reply = InnerTube::anonymous().call("search", body)?;
+    Ok(parse_search(&reply, unix_now()))
+}
+
+/// Videos and the next-page token of a search reply (first page or continuation).
+pub fn parse_search(reply: &Value, now: i64) -> SearchPage {
+    let mut page = SearchPage::default();
+    let mut seen = HashSet::new();
+    walk(reply, &mut |object| {
+        if let Some(video) = object.get("videoRenderer").and_then(|r| video_renderer(r, now))
+            && seen.insert(video.id.clone())
+        {
+            page.videos.push(video);
+        }
+        if let Some(token) = object
+            .get("continuationItemRenderer")
+            .and_then(|c| c["continuationEndpoint"]["continuationCommand"]["token"].as_str())
+        {
+            page.next = Some(token.to_owned());
+        }
+    });
+    page
+}
+
+fn video_renderer(r: &Value, now: i64) -> Option<Video> {
+    let owner = &r["ownerText"]["runs"][0];
+    let channel_id = owner["navigationEndpoint"]["browseEndpoint"]["browseId"].as_str().map(str::to_owned);
+    let badges = r["badges"].to_string() + &r["thumbnailOverlays"].to_string();
+    let live = if r.get("upcomingEventData").is_some() {
+        Live::Upcoming
+    } else if badges.contains("LIVE") {
+        Live::Now
+    } else {
+        Live::No
+    };
+    Some(Video {
+        id: r["videoId"].as_str()?.to_owned(),
+        title: text(&r["title"])?,
+        channel: owner["text"].as_str().unwrap_or_default().to_owned(),
+        channel_url: channel_id.as_ref().map(|id| format!("{ORIGIN}/channel/{id}")),
+        channel_id,
+        duration: text(&r["lengthText"]).and_then(|t| parse_clock(&t)),
+        published: text(&r["publishedTimeText"]).and_then(|t| parse_age(&t, now)),
+        live,
+    })
+}
+
+/// `"1:52:00"` → 6720 seconds.
+fn parse_clock(text: &str) -> Option<u32> {
+    text.split(':').try_fold(0u32, |total, part| Some(total * 60 + part.trim().parse::<u32>().ok()?))
+}
+
+/// `"3 weeks ago"`, `"Streamed 1 year ago"` → an approximate Unix time.
+fn parse_age(text: &str, now: i64) -> Option<i64> {
+    let mut words = text.trim_start_matches("Streamed ").split_whitespace();
+    let n: i64 = words.next()?.parse().ok()?;
+    let unit = match words.next()?.trim_end_matches('s') {
+        "second" => 1,
+        "minute" => 60,
+        "hour" => 3_600,
+        "day" => 86_400,
+        "week" => 7 * 86_400,
+        "month" => 30 * 86_400,
+        "year" => 365 * 86_400,
+        _ => return None,
+    };
+    Some(now - n * unit)
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Client for `youtubei/v1`: signed with the session cookies, or anonymous.
 struct InnerTube {
     agent: ureq::Agent,
     cookie_header: String,
     jar: std::collections::HashMap<String, String>,
+    /// Interface language of the answers; anonymous calls use English so
+    /// relative dates ("3 weeks ago") can be read.
+    hl: &'static str,
 }
 
 impl InnerTube {
@@ -189,29 +283,40 @@ impl InnerTube {
         let jar = session::parse_cookies(&text);
         session::authorization(&jar, 0).ok_or(YoutubeError::NoSession)?;
         let cookie_header = jar.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ");
-        let agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(20))).build().into();
-        Ok(Self { agent, cookie_header, jar })
+        Ok(Self { agent: agent(), cookie_header, jar, hl: "es" })
+    }
+
+    /// Without login, for public data like searches.
+    fn anonymous() -> Self {
+        Self { agent: agent(), cookie_header: String::new(), jar: Default::default(), hl: "en" }
     }
 
     fn call(&self, endpoint: &str, mut body: Value) -> Result<Value, YoutubeError> {
-        body["context"] = json!({ "client": { "clientName": "WEB", "clientVersion": CLIENT_VERSION, "hl": "es" } });
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        let auth = session::authorization(&self.jar, now).ok_or(YoutubeError::NoSession)?;
-        let text = self
+        body["context"] = json!({ "client": { "clientName": "WEB", "clientVersion": CLIENT_VERSION, "hl": self.hl } });
+        let mut request = self
             .agent
             .post(&format!("{ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false"))
             .header("Content-Type", "application/json")
-            .header("Authorization", &auth)
             .header("Origin", ORIGIN)
             .header("X-Origin", ORIGIN)
-            .header("X-Goog-AuthUser", "0")
-            .header("Cookie", &self.cookie_header)
-            .header("User-Agent", USER_AGENT)
+            .header("User-Agent", USER_AGENT);
+        if !self.jar.is_empty() {
+            let auth = session::authorization(&self.jar, unix_now() as u64).ok_or(YoutubeError::NoSession)?;
+            request = request
+                .header("Authorization", &auth)
+                .header("X-Goog-AuthUser", "0")
+                .header("Cookie", &self.cookie_header);
+        }
+        let text = request
             .send(body.to_string())
             .and_then(|mut reply| reply.body_mut().read_to_string())
             .map_err(|e| YoutubeError::Http(e.to_string()))?;
         Ok(serde_json::from_str(&text)?)
     }
+}
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(20))).build().into()
 }
 
 /// Calls `visit` on every object in a JSON tree.
@@ -519,6 +624,60 @@ mod tests {
         let channels = collect_guide_channels(&guide);
         assert_eq!(channels.len(), 1);
         assert_eq!((channels[0].id.as_str(), channels[0].name.as_str()), ("UCx", "Canal X"));
+    }
+
+    fn search_reply() -> Value {
+        let video = |id: &str, age: &str, extra: Value| {
+            let mut renderer = json!({ "videoRenderer": {
+                "videoId": id,
+                "title": { "runs": [{ "text": format!("title {id}") }] },
+                "ownerText": { "runs": [{ "text": "Codynn",
+                    "navigationEndpoint": { "browseEndpoint": { "browseId": "UCcod", "canonicalBaseUrl": "/@codynn" } } }] },
+                "lengthText": { "simpleText": "1:52:00" },
+                "publishedTimeText": { "simpleText": age } } });
+            if let Value::Object(extra) = extra {
+                renderer["videoRenderer"].as_object_mut().unwrap().extend(extra);
+            }
+            renderer
+        };
+        json!({ "contents": { "sectionListRenderer": { "contents": [
+            { "itemSectionRenderer": { "contents": [
+                video("a", "1 day ago", json!({})),
+                video("b", "Streamed 2 years ago", json!({})),
+                video("live", "", json!({ "badges": [{ "metadataBadgeRenderer": { "style": "BADGE_STYLE_TYPE_LIVE_NOW", "label": "LIVE" } }] })),
+                video("soon", "", json!({ "upcomingEventData": { "startTime": "1791900000" } })),
+                video("a", "1 day ago", json!({})),
+                { "shelfRenderer": { "title": { "simpleText": "People also watched" } } }
+            ] } },
+            { "continuationItemRenderer": { "continuationEndpoint": { "continuationCommand": { "token": "NEXT" } } } }
+        ] } } })
+    }
+
+    #[test]
+    fn parses_search_pages() {
+        let now = 1_791_590_400;
+        let page = parse_search(&search_reply(), now);
+        let ids: Vec<&str> = page.videos.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "live", "soon"], "deduplicated, in order");
+        let a = &page.videos[0];
+        assert_eq!((a.title.as_str(), a.channel.as_str()), ("title a", "Codynn"));
+        assert_eq!(a.channel_id.as_deref(), Some("UCcod"));
+        assert_eq!(a.channel_url.as_deref(), Some("https://www.youtube.com/channel/UCcod"));
+        assert_eq!(a.duration, Some(6720));
+        assert_eq!(a.published, Some(now - 86_400));
+        assert_eq!(page.videos[1].published, Some(now - 2 * 365 * 86_400));
+        assert_eq!((page.videos[2].live, page.videos[3].live), (Live::Now, Live::Upcoming));
+        assert_eq!(page.next.as_deref(), Some("NEXT"));
+        assert_eq!(parse_search(&json!({}), now), SearchPage::default());
+    }
+
+    #[test]
+    fn clock_and_age_texts() {
+        assert_eq!(parse_clock("0:25"), Some(25));
+        assert_eq!(parse_clock("LIVE"), None);
+        assert_eq!(parse_age("3 weeks ago", 1_000_000_000), Some(1_000_000_000 - 21 * 86_400));
+        assert_eq!(parse_age("1 hour ago", 100_000), Some(96_400));
+        assert_eq!(parse_age("Premieres soon", 0), None);
     }
 
     #[test]

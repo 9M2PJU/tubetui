@@ -90,17 +90,30 @@ pub fn cell_size() -> (u16, u16) {
 
 /// yt-dlp format selector: preferred codec first, then anything that fits.
 /// Dubbed audio prefers the `sub_lang` track and falls back to the original.
-pub fn ytdl_format(config: &PlayerConfig) -> String {
+pub fn ytdl_format(config: &PlayerConfig, mode: Mode) -> String {
     let fits = format!("[height<={}]", config.max_height);
-    let audio = match config.language {
-        Language::Dubbed => format!("ba[language^={}]/ba", config.sub_lang),
-        Language::Subtitles | Language::Original => "ba".into(),
+    // Each choice must be a whole `video+audio`: a bare `ba` between slashes
+    // would be a choice of its own, sound without picture.
+    let audios = match config.language {
+        Language::Dubbed => vec![format!("ba[language^={}]", config.sub_lang), "ba".into()],
+        Language::Subtitles | Language::Original => vec!["ba".into()],
     };
-    let any = format!("bv*{fits}+{audio}/b{fits}/b");
-    match config.prefer_codec.as_str() {
-        "" => any,
-        codec => format!("bv*{fits}[vcodec^={codec}]+{audio}/{any}"),
+    let codecs: Vec<String> = match config.prefer_codec.as_str() {
+        "" => vec![String::new()],
+        codec => vec![format!("[vcodec^={codec}]"), String::new()],
+    };
+    // Embedded frames are decoded and scaled on the CPU: 60 fps falls behind the sound.
+    let rates: &[&str] = if mode == Mode::Embedded { &["[fps<=30]", ""] } else { &[""] };
+    let mut choices = Vec::new();
+    for rate in rates {
+        for codec in &codecs {
+            for audio in &audios {
+                choices.push(format!("bv*{fits}{rate}{codec}+{audio}"));
+            }
+        }
     }
+    choices.extend([format!("b{fits}"), "b".into()]);
+    choices.join("/")
 }
 
 /// Everything about one playback except where it is drawn.
@@ -120,7 +133,7 @@ pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<S
     let raw = raw_options(config, cookies);
     let mut args = vec![
         format!("--input-ipc-server={ipc}"),
-        format!("--ytdl-format={}", ytdl_format(config)),
+        format!("--ytdl-format={}", ytdl_format(config, mode)),
         format!("--ytdl-raw-options={raw}"),
         // Subtitles are always fetched so `j` can turn them on later.
         format!("--slang={lang}"),
@@ -144,6 +157,9 @@ pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<S
                 ["--vo=kitty", "--vo-kitty-alt-screen=no", "--vo-kitty-config-clear=no", "--sws-scaler=fast-bilinear"]
                     .map(String::from),
             );
+            // When the CPU falls behind, skip decoding frames too: dropping them
+            // only at the output still lets the picture drift from the sound.
+            args.extend(["--framedrop=decoder+vo", "--vd-lavc-skiploopfilter=all", "--vd-lavc-fast"].map(String::from));
             if cfg!(unix) {
                 args.push("--vo-kitty-use-shm=yes".into());
             }
@@ -200,7 +216,12 @@ fn raw_options(config: &PlayerConfig, cookies: Option<&std::path::Path>) -> Stri
 /// IPC lines for a command. Most are JSON; reloading uses mpv's text
 /// command form, the only one that expands `${time-pos}`.
 /// `config` must already reflect `Language` / `SubLang` changes (see [`Player::send`]).
-pub fn command_lines(config: &PlayerConfig, cookies: Option<&std::path::Path>, command: PlayerCommand) -> Vec<String> {
+pub fn command_lines(
+    config: &PlayerConfig,
+    mode: Mode,
+    cookies: Option<&std::path::Path>,
+    command: PlayerCommand,
+) -> Vec<String> {
     let line = |value: Value| vec![value.to_string()];
     match command {
         PlayerCommand::TogglePause => line(json!({ "command": ["cycle", "pause"] })),
@@ -214,7 +235,7 @@ pub fn command_lines(config: &PlayerConfig, cookies: Option<&std::path::Path>, c
         PlayerCommand::Language(_) | PlayerCommand::SubLang(_) => {
             let sid = if config.language == Language::Subtitles { "auto" } else { "no" };
             vec![
-                set_property("ytdl-format", ytdl_format(config).into()).to_string(),
+                set_property("ytdl-format", ytdl_format(config, mode).into()).to_string(),
                 set_property("ytdl-raw-options", raw_options(config, cookies).into()).to_string(),
                 set_property("slang", config.sub_lang.clone().into()).to_string(),
                 set_property("sid", sid.into()).to_string(),
@@ -289,7 +310,7 @@ impl Player {
             PlayerCommand::SubLang(code) => self.config.sub_lang = code.into(),
             _ => {}
         }
-        for line in command_lines(&self.config, self.cookies.as_deref(), command) {
+        for line in command_lines(&self.config, self.mode, self.cookies.as_deref(), command) {
             self.write(&line);
         }
         if matches!(command, PlayerCommand::Language(_) | PlayerCommand::SubLang(_)) {
@@ -355,6 +376,11 @@ impl Player {
         if std::mem::take(&mut self.paused_by_us) {
             self.write(&set_property("pause", false.into()).to_string());
         }
+    }
+
+    /// It was started with the login cookies.
+    pub fn used_cookies(&self) -> bool {
+        self.cookies.is_some()
     }
 
     pub fn has_exited(&mut self) -> bool {
@@ -532,17 +558,35 @@ mod tests {
     #[test]
     fn format_prefers_codec_then_falls_back() {
         assert_eq!(
-            ytdl_format(&PlayerConfig::default()),
+            ytdl_format(&PlayerConfig::default(), Mode::Window),
             "bv*[height<=720][vcodec^=avc1]+ba/bv*[height<=720]+ba/b[height<=720]/b"
         );
         let any = PlayerConfig { max_height: 480, prefer_codec: String::new(), ..Default::default() };
-        assert_eq!(ytdl_format(&any), "bv*[height<=480]+ba/b[height<=480]/b");
+        assert_eq!(ytdl_format(&any, Mode::Window), "bv*[height<=480]+ba/b[height<=480]/b");
+    }
+
+    #[test]
+    fn embedded_prefers_30_fps() {
+        let any = PlayerConfig { max_height: 480, prefer_codec: String::new(), ..Default::default() };
+        assert_eq!(
+            ytdl_format(&any, Mode::Embedded),
+            "bv*[height<=480][fps<=30]+ba/bv*[height<=480]+ba/b[height<=480]/b"
+        );
+        let format = ytdl_format(&PlayerConfig::default(), Mode::Embedded);
+        assert!(
+            format.starts_with("bv*[height<=720][fps<=30][vcodec^=avc1]+ba/bv*[height<=720][fps<=30]+ba/"),
+            "{format}"
+        );
     }
 
     #[test]
     fn dubbed_prefers_audio_in_sub_lang() {
         let config = PlayerConfig { language: Language::Dubbed, prefer_codec: String::new(), ..Default::default() };
-        assert_eq!(ytdl_format(&config), "bv*[height<=720]+ba[language^=es]/ba/b[height<=720]/b");
+        assert_eq!(
+            ytdl_format(&config, Mode::Window),
+            "bv*[height<=720]+ba[language^=es]/bv*[height<=720]+ba/b[height<=720]/b",
+            "never a bare `ba`: that would be sound without picture"
+        );
     }
 
     #[test]
@@ -588,6 +632,7 @@ mod tests {
             "--vo-kitty-config-clear=no",
             "--hwdec=no",
             "--sws-scaler=fast-bilinear",
+            "--framedrop=decoder+vo",
             "--vo-kitty-left=1",
             "--vo-kitty-top=2",
             "--vo-kitty-width=400",
@@ -607,7 +652,7 @@ mod tests {
     #[test]
     fn commands_serialize_to_mpv_ipc() {
         let config = PlayerConfig::default();
-        let one = |command| command_lines(&config, None, command).join("\n");
+        let one = |command| command_lines(&config, Mode::Embedded, None, command).join("\n");
         assert_eq!(one(PlayerCommand::TogglePause), r#"{"command":["cycle","pause"]}"#);
         assert_eq!(one(PlayerCommand::Seek(-5)), r#"{"command":["seek",-5,"relative"]}"#);
         assert_eq!(one(PlayerCommand::Volume(5)), r#"{"command":["add","volume",5]}"#);
@@ -625,11 +670,11 @@ mod tests {
             ..Default::default()
         };
         let cookies = std::path::Path::new("/c.txt");
-        let lines = command_lines(&config, Some(cookies), PlayerCommand::SubLang("en"));
+        let lines = command_lines(&config, Mode::Window, Some(cookies), PlayerCommand::SubLang("en"));
         assert_eq!(
             lines,
             [
-                r#"{"command":["set_property","ytdl-format","bv*[height<=720]+ba[language^=en]/ba/b[height<=720]/b"]}"#,
+                r#"{"command":["set_property","ytdl-format","bv*[height<=720]+ba[language^=en]/bv*[height<=720]+ba/b[height<=720]/b"]}"#,
                 r#"{"command":["set_property","ytdl-raw-options","sub-langs=[en],write-subs=,write-auto-subs=,cookies=/c.txt"]}"#,
                 r#"{"command":["set_property","slang","en"]}"#,
                 r#"{"command":["set_property","sid","no"]}"#,
@@ -640,7 +685,7 @@ mod tests {
             r#"{"command":["loadfile","https://youtu.be/x","replace",-1,"start=83.5"]}"#
         );
         let subs = PlayerConfig { language: Language::Subtitles, ..config };
-        let lines = command_lines(&subs, None, PlayerCommand::Language(Language::Subtitles));
+        let lines = command_lines(&subs, Mode::Embedded, None, PlayerCommand::Language(Language::Subtitles));
         assert_eq!(lines[3], r#"{"command":["set_property","sid","auto"]}"#);
     }
 

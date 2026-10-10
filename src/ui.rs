@@ -10,13 +10,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Tabs};
 
 use crate::app::{Focus, Group, Listing, Prompt, Section, Setting, State, Tab, language_label};
-use crate::config::IconSet;
+use crate::config::{IconSet, donations};
 use crate::domain::{Channel, Live, Video, date_labels};
+use crate::i18n::Lang;
 use crate::keymap;
 use crate::media::{LocalFile, MediaKind};
 use crate::youtube::Items;
 
 pub const SIDEBAR_WIDTH: u16 = 26;
+/// Width of the preview panel next to video lists.
+const PREVIEW_WIDTH: u16 = 46;
+/// Video lists narrower than this show no preview panel.
+const PREVIEW_MIN_WIDTH: u16 = 96;
 const CHANNEL_WIDTH: usize = 20;
 /// Width of the date column: `"10/10/26 hoy   "`.
 const DATE_WIDTH: usize = 14;
@@ -36,13 +41,14 @@ const TEAL: Color = Color::Rgb(115, 218, 202);
 const PURPLE: Color = Color::Rgb(157, 124, 216);
 
 /// One colour per menu entry, in `Section::ALL` order.
-const SECTION_COLORS: [Color; 11] = [BLUE, CYAN, RED, YELLOW, ORANGE, GREEN, TEAL, PURPLE, MAGENTA, BLUE, MUTED];
+const SECTION_COLORS: [Color; 12] =
+    [BLUE, CYAN, RED, YELLOW, ORANGE, GREEN, TEAL, PURPLE, MAGENTA, BLUE, PURPLE, MUTED];
 
 pub struct Icons {
     /// In `Section::ALL` order.
-    pub sections: [&'static str; 11],
+    pub sections: [&'static str; 12],
     /// In `Setting::ALL` order.
-    pub settings: [&'static str; 14],
+    pub settings: [&'static str; 19],
     pub logo: &'static str,
     pub tab: &'static str,
     pub live: &'static str,
@@ -54,8 +60,10 @@ pub struct Icons {
 }
 
 const EMOJI: Icons = Icons {
-    sections: ["🏠", "🧭", "📺", "🕒", "⭐", "🔎", "📡", "📼", "🎵", "🔧", "🚪"],
-    settings: ["👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "😀", "📼", "🎵", "📁", "📝"],
+    sections: ["🏠", "🧭", "📺", "🕒", "⭐", "🔎", "📡", "📼", "🎵", "🔧", "💜", "🚪"],
+    settings: [
+        "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "🗣", "😀", "🖼", "✨", "🌊", "💥", "📼", "🎵", "📁", "📝",
+    ],
     logo: "▶️",
     tab: "🎬",
     live: "🔴",
@@ -78,11 +86,13 @@ const NERD: Icons = Icons {
         "\u{f03d}",
         "\u{f001}",
         "\u{f013}",
+        "\u{f004}",
         "\u{f08b}",
     ],
     settings: [
         "\u{f007}", "\u{f15b}", "\u{f021}", "\u{f08b}", "\u{f1ab}", "\u{f075}", "\u{f1de}", "\u{f008}", "\u{f025}",
-        "\u{f118}", "\u{f03d}", "\u{f001}", "\u{f07b}", "\u{f044}",
+        "\u{f0ac}", "\u{f118}", "\u{f03e}", "\u{f0d0}", "\u{f0e7}", "\u{f0a1}", "\u{f03d}", "\u{f001}", "\u{f07b}",
+        "\u{f044}",
     ],
     logo: "\u{f16a}",
     tab: "\u{f144}",
@@ -95,8 +105,8 @@ const NERD: Icons = Icons {
 };
 
 const UNICODE: Icons = Icons {
-    sections: ["⌂", "◎", "▣", "◷", "★", "⌕", "⌁", "▷", "♫", "⚙", "⏻"],
-    settings: ["☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "☻", "▷", "♫", "▭", "✎"],
+    sections: ["⌂", "◎", "▣", "◷", "★", "⌕", "⌁", "▷", "♫", "⚙", "♥", "⏻"],
+    settings: ["☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "⚑", "☻", "▨", "✦", "≈", "✸", "▷", "♫", "▭", "✎"],
     logo: "▶",
     tab: "▶",
     live: "●",
@@ -124,14 +134,16 @@ pub struct View {
     pub loading: Option<Duration>,
     /// How long the video of the active tab has been loading, until it plays.
     pub opening: Option<Duration>,
+    /// The preview panel leaves room for a thumbnail (the runtime draws it).
+    pub thumbnails: bool,
 }
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// `"⠹ Cargando Suscripciones… 3 s"`.
-fn loading_text(title: &str, elapsed: Duration) -> String {
+fn loading_text(title: &str, elapsed: Duration, lang: Lang) -> String {
     let frame = SPINNER[(elapsed.as_millis() / 100) as usize % SPINNER.len()];
-    format!("{frame} Cargando {title}… {} s", elapsed.as_secs())
+    format!("{frame} {} {title}… {} s", lang.pick("Cargando", "Loading"), elapsed.as_secs())
 }
 
 /// A block bouncing inside `width` cells: progress without a known total.
@@ -177,14 +189,18 @@ pub fn video_area(state: &State, area: Rect) -> Option<Rect> {
 
 pub fn draw(frame: &mut Frame, state: &State, view: &View) {
     let icons = icons(state.config.ui.icons);
+    let lang = state.lang();
     if state.fullscreen {
         // Nothing but the video (embedded) or a hint (window mode).
         if !view.embedded {
-            let note = Paragraph::new("Pantalla completa en la ventana de mpv · f o Esc para salir").fg(MUTED);
-            frame.render_widget(note.alignment(Alignment::Center), frame.area());
+            let note = lang.pick(
+                "Pantalla completa en la ventana de mpv · f o Esc para salir",
+                "Fullscreen in the mpv window · f or Esc to leave",
+            );
+            frame.render_widget(Paragraph::new(note).fg(MUTED).alignment(Alignment::Center), frame.area());
         }
         if state.help {
-            draw_help(frame);
+            draw_help(frame, lang);
         }
         return;
     }
@@ -209,21 +225,28 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
                     Line::from(format!("{}  {}", icons.sections[8], playback.title)).fg(FG).bold(),
                     Line::from(playback.subtitle.clone()).fg(MAGENTA),
                     Line::from(""),
-                    Line::from(format!("{songs} canciones en la cola · . siguiente · , anterior")).fg(MUTED),
+                    Line::from(format!(
+                        "{songs} {}",
+                        lang.pick(
+                            "canciones en la cola · . siguiente · , anterior",
+                            "songs queued · . next · , previous"
+                        )
+                    ))
+                    .fg(MUTED),
                 ])
                 .alignment(Alignment::Center)
             } else if let Some(elapsed) = view.opening {
                 // In embedded mode the first video frame covers it.
                 Paragraph::new(vec![
                     Line::from(""),
-                    Line::from(loading_text("el video", elapsed)).fg(YELLOW),
+                    Line::from(loading_text(lang.pick("el video", "the video"), elapsed, lang)).fg(YELLOW),
                     Line::from(bouncing_bar(30, elapsed)).fg(BLUE),
                 ])
                 .alignment(Alignment::Center)
             } else if view.embedded {
                 Paragraph::default()
             } else {
-                Paragraph::new("Se reproduce en una ventana de mpv").fg(MUTED)
+                Paragraph::new(lang.pick("Se reproduce en una ventana de mpv", "Playing in an mpv window")).fg(MUTED)
             };
             frame.render_widget(body.block(panel(title, BLUE)), areas.content);
         }
@@ -231,10 +254,10 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
     draw_status(frame, state, icons, view, areas.status);
     draw_hints(frame, &hints(state), areas.hints);
     if state.help {
-        draw_help(frame);
+        draw_help(frame, lang);
     }
     if let Some(u) = &state.confirm {
-        draw_confirm(frame, &u.name);
+        draw_confirm(frame, &u.name, lang);
     }
 }
 
@@ -247,6 +270,7 @@ fn panel<'a>(title: impl Into<Line<'a>>, color: Color) -> Block<'a> {
 }
 
 fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
+    let lang = state.lang();
     let on_inicio = state.active == 0;
     let mut items: Vec<ListItem> = Vec::new();
     let mut group = None;
@@ -257,10 +281,10 @@ fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
                 items.push(ListItem::new(""));
             }
             if section.group() != Group::App {
-                items.push(ListItem::new(Line::from(format!(" {}", section.group().label())).fg(MUTED).bold()));
+                items.push(ListItem::new(Line::from(format!(" {}", section.group().label(lang))).fg(MUTED).bold()));
             }
         }
-        let mut label = section.label().to_owned();
+        let mut label = section.label(lang).to_owned();
         if *section == Section::VerDespues && !state.later.is_empty() {
             label.push_str(&format!(" ({})", state.later.len()));
         }
@@ -282,7 +306,7 @@ fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
     }
     if !state.tabs.is_empty() {
         items.push(ListItem::new(""));
-        items.push(ListItem::new(Line::from(" PESTAÑAS").fg(MUTED).bold()));
+        items.push(ListItem::new(Line::from(lang.pick(" PESTAÑAS", " TABS")).fg(MUTED).bold()));
         for (i, tab) in state.tabs.iter().enumerate() {
             let active = state.active == i + 1;
             let style = if active { Style::new().fg(MAGENTA).bg(HIGHLIGHT).bold() } else { Style::new().fg(FG) };
@@ -300,7 +324,8 @@ fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
 }
 
 fn draw_tabs(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
-    let titles = std::iter::once(format!("{} Inicio", icons.sections[0])).chain(
+    let home = Section::Inicio.label(state.lang());
+    let titles = std::iter::once(format!("{} {home}", icons.sections[0])).chain(
         state
             .tabs
             .iter()
@@ -314,37 +339,91 @@ fn draw_tabs(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
     frame.render_widget(tabs, area);
 }
 
-fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, area: Rect) {
-    let area = match &state.prompt {
-        Some(prompt) => {
+/// The search box and the rest of Inicio below it.
+fn split_prompt(state: &State, area: Rect) -> (Option<Rect>, Rect) {
+    match state.prompt {
+        Some(_) => {
             let [input, rest] = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
+            (Some(input), rest)
+        }
+        None => (None, area),
+    }
+}
+
+/// A video list and, when there is room, the preview panel beside it.
+fn split_preview(area: Rect) -> (Rect, Option<Rect>) {
+    if area.width < PREVIEW_MIN_WIDTH {
+        return (area, None);
+    }
+    let [list, preview] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(PREVIEW_WIDTH)]).areas(area);
+    (list, Some(preview))
+}
+
+/// The cells of the thumbnail inside a preview panel: 16:9, taking terminal
+/// cells as about twice as tall as wide.
+fn thumbnail_cells(preview: Rect) -> Rect {
+    let inner = Block::bordered().inner(preview);
+    let rows = (inner.width as u32 * 9 / 32) as u16;
+    Rect { height: rows.min(inner.height), ..inner }
+}
+
+/// Where the thumbnail of the selected video goes, with that video's id.
+pub fn thumbnail_area(state: &State, screen: Rect) -> Option<(String, Rect)> {
+    if state.help || state.confirm.is_some() || state.prompt == Some(Prompt::CookiesFile) {
+        return None;
+    }
+    let video = state.videos_from_selection(0).first()?;
+    let (_, list) = split_prompt(state, areas(screen, state.sidebar).content);
+    let (_, preview) = split_preview(list);
+    Some((video.id.clone(), thumbnail_cells(preview?)))
+}
+
+fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, area: Rect) {
+    let lang = state.lang();
+    let (input, rest) = split_prompt(state, area);
+    let area = match (&state.prompt, input) {
+        (Some(prompt), Some(input)) => {
             let title = match prompt {
                 Prompt::Videos { scope, .. } => Line::from(vec![
-                    Span::raw(format!(" {} Buscar videos en ", icons.sections[5])),
-                    Span::styled(scope.label(), Style::new().fg(YELLOW).bold()),
-                    Span::raw(" · Tab cambia ").fg(MUTED),
+                    Span::raw(format!(" {} {} ", icons.sections[5], lang.pick("Buscar videos en", "Search videos in"))),
+                    Span::styled(scope.label(lang), Style::new().fg(YELLOW).bold()),
+                    Span::raw(lang.pick(" · Tab cambia ", " · Tab changes ")).fg(MUTED),
                 ]),
-                Prompt::Channels => Line::from(format!(" {} Buscar canales ", icons.sections[6])),
-                Prompt::CookiesFile => Line::from(format!(" {} Ruta del cookies.txt ", icons.settings[1])),
-                Prompt::DownloadDir => Line::from(format!(" {} Carpeta de descargas ", icons.settings[12])),
+                Prompt::Channels => {
+                    Line::from(format!(" {} {} ", icons.sections[6], lang.pick("Buscar canales", "Search channels")))
+                }
+                Prompt::CookiesFile => Line::from(format!(
+                    " {} {} ",
+                    icons.settings[1],
+                    lang.pick("Ruta del cookies.txt", "cookies.txt path")
+                )),
+                Prompt::DownloadDir => Line::from(format!(
+                    " {} {} ",
+                    icons.settings[17],
+                    lang.pick("Carpeta de descargas", "Downloads folder")
+                )),
                 Prompt::MediaDirs(kind) => {
                     let (icon, what) = match kind {
-                        MediaKind::Video => (icons.settings[10], "videos"),
-                        MediaKind::Music => (icons.settings[11], "música"),
+                        MediaKind::Video => (icons.settings[15], lang.pick("Carpetas de videos", "Video folders")),
+                        MediaKind::Music => (icons.settings[16], lang.pick("Carpetas de música", "Music folders")),
                     };
-                    Line::from(format!(" {icon} Carpetas de {what}, separadas por coma (vacío = la del sistema) "))
+                    let how = lang.pick(
+                        "separadas por coma (vacío = la del sistema)",
+                        "comma separated (empty = the system one)",
+                    );
+                    Line::from(format!(" {icon} {what}, {how} "))
                 }
             };
             frame.render_widget(Paragraph::new(state.query.as_str()).block(panel(title, CYAN)), input);
             let x = input.x + 1 + state.query.chars().count() as u16;
             frame.set_cursor_position(Position::new(x.min(input.right().saturating_sub(2)), input.y + 1));
             if *prompt == Prompt::CookiesFile {
-                draw_cookies_help(frame, rest);
+                draw_cookies_help(frame, rest, lang);
                 return;
             }
             rest
         }
-        None => area,
+        _ => area,
     };
     match state.listing() {
         Some(listing) => draw_listing(frame, state, icons, view, listing, area),
@@ -352,25 +431,55 @@ fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, are
     }
 }
 
-fn draw_cookies_help(frame: &mut Frame, area: Rect) {
+fn draw_cookies_help(frame: &mut Frame, area: Rect, lang: Lang) {
+    let line = |es, en, color| Line::from(lang.pick(es, en)).fg(color);
     let lines = vec![
         Line::from(""),
-        Line::from("Para usar tu cuenta en una máquina sin navegador (servidor, SSH):").fg(FG),
+        line(
+            "Para usar tu cuenta en una máquina sin navegador (servidor, SSH):",
+            "To use your account on a machine without a browser (server, SSH):",
+            FG,
+        ),
         Line::from(""),
-        Line::from("  1. En cualquier PC con navegador, entrá a youtube.com con tu cuenta.").fg(FG),
-        Line::from("  2. Exportá las cookies en formato Netscape (cookies.txt), por ejemplo con").fg(FG),
-        Line::from("     la extensión «Get cookies.txt LOCALLY», o con:").fg(FG),
+        line(
+            "  1. En cualquier PC con navegador, entrá a youtube.com con tu cuenta.",
+            "  1. On any computer with a browser, log in to youtube.com.",
+            FG,
+        ),
+        line(
+            "  2. Exportá las cookies en formato Netscape (cookies.txt), por ejemplo con",
+            "  2. Export the cookies in Netscape format (cookies.txt), for example with",
+            FG,
+        ),
+        line(
+            "     la extensión «Get cookies.txt LOCALLY», o con:",
+            "     the “Get cookies.txt LOCALLY” extension, or with:",
+            FG,
+        ),
         Line::from("     yt-dlp --cookies-from-browser firefox --cookies cookies.txt --skip-download :ytsubs").fg(CYAN),
-        Line::from("  3. Copialo a esta máquina (scp cookies.txt servidor:~/) y escribí la ruta arriba.").fg(FG),
+        line(
+            "  3. Copialo a esta máquina (scp cookies.txt servidor:~/) y escribí la ruta arriba.",
+            "  3. Copy it to this machine (scp cookies.txt server:~/) and type its path above.",
+            FG,
+        ),
         Line::from(""),
-        Line::from("tubetui comprueba que tenga una sesión de YouTube y guarda una copia privada (permisos 600).")
-            .fg(MUTED),
-        Line::from("Las cookies dan acceso a tu cuenta: no las compartas.").fg(YELLOW),
+        line(
+            "tubetui comprueba que tenga una sesión de YouTube y guarda una copia privada (permisos 600).",
+            "tubetui checks it holds a YouTube login and keeps a private copy (mode 600).",
+            MUTED,
+        ),
+        line(
+            "Las cookies dan acceso a tu cuenta: no las compartas.",
+            "Cookies give access to your account: never share them.",
+            YELLOW,
+        ),
     ];
-    frame.render_widget(Paragraph::new(lines).block(panel(" Importar sesión ", MUTED)), area);
+    let title = lang.pick(" Importar sesión ", " Import login ");
+    frame.render_widget(Paragraph::new(lines).block(panel(title, MUTED)), area);
 }
 
 fn draw_welcome(frame: &mut Frame, state: &State, icons: &Icons, view: &View, area: Rect) {
+    let lang = state.lang();
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
@@ -378,24 +487,39 @@ fn draw_welcome(frame: &mut Frame, state: &State, icons: &Icons, view: &View, ar
             Span::styled("tube", Style::new().fg(RED).bold()),
             Span::styled("tui", Style::new().fg(FG).bold()),
         ]),
-        Line::from("YouTube en tu terminal").fg(MUTED),
+        Line::from(lang.pick("YouTube en tu terminal", "YouTube in your terminal")).fg(MUTED),
         Line::from(""),
-        Line::from("Elegí una sección del menú con ↑ ↓ y Enter").fg(FG),
-        Line::from("Abajo siempre ves las teclas que sirven en cada momento").fg(MUTED),
-        Line::from("Ctrl+y ?  muestra todos los atajos explicados").fg(MUTED),
+        Line::from(
+            lang.pick("Elegí una sección del menú con ↑ ↓ y Enter", "Pick a section from the menu with ↑ ↓ and Enter"),
+        )
+        .fg(FG),
+        Line::from(lang.pick(
+            "Abajo siempre ves las teclas que sirven en cada momento",
+            "The bottom line always shows the keys that work right now",
+        ))
+        .fg(MUTED),
+        Line::from(lang.pick(
+            "Ctrl+y ?  muestra todos los atajos explicados · Ctrl+y l  English",
+            "Ctrl+y ?  shows every shortcut, explained · Ctrl+y l  español",
+        ))
+        .fg(MUTED),
     ];
     if let Some(title) = &state.loading {
         lines.push(Line::from(""));
-        lines.push(Line::from(loading_text(title, view.loading.unwrap_or_default())).fg(YELLOW));
+        lines.push(Line::from(loading_text(title, view.loading.unwrap_or_default(), lang)).fg(YELLOW));
         lines.push(Line::from(bouncing_bar(30, view.loading.unwrap_or_default())).fg(BLUE));
     }
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel("", MUTED)), area);
 }
 
 fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, listing: &Listing, area: Rect) {
+    if listing.items == Items::About {
+        draw_about(frame, state, icons, area);
+        return;
+    }
     let breadcrumb: Vec<&str> = state.stack.iter().map(|l| l.title.as_str()).collect();
     let title = match &state.loading {
-        Some(loading) => format!(" {} ", loading_text(loading, view.loading.unwrap_or_default())),
+        Some(loading) => format!(" {} ", loading_text(loading, view.loading.unwrap_or_default(), state.lang())),
         None if listing.items == Items::Settings => format!(" {} ", breadcrumb.join(" › ")),
         None => format!(" {} · {} ", breadcrumb.join(" › "), listing.items.len()),
     };
@@ -407,6 +531,7 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
             Setting::ALL.iter().enumerate().map(|(i, s)| setting_row(state, icons.settings[i], *s)).collect()
         }
         Items::Files(files, kind) => files.iter().map(|f| file_row(icons, f, *kind)).collect(),
+        Items::About => Vec::new(),
     };
     let focused = state.focus == Focus::List;
     let highlight = if focused { Style::new().bg(HIGHLIGHT).add_modifier(Modifier::BOLD) } else { Style::new() };
@@ -415,17 +540,74 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
         .highlight_symbol(if focused { "▌" } else { " " })
         .highlight_style(highlight);
     let selected = (!listing.items.is_empty()).then_some(listing.selected);
+    let area = match (&listing.items, split_preview(area)) {
+        (Items::Videos(videos), (left, Some(preview))) => {
+            draw_preview(frame, state, icons, view, videos.get(listing.selected), preview);
+            left
+        }
+        _ => area,
+    };
     frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(selected));
 }
 
+/// The selected video: thumbnail (drawn by the runtime over the empty cells
+/// left here) and its details.
+fn draw_preview(frame: &mut Frame, state: &State, icons: &Icons, view: &View, video: Option<&Video>, area: Rect) {
+    let lang = state.lang();
+    let block = panel(lang.pick(" Vista previa ", " Preview "), MUTED);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(v) = video else { return };
+    let text_area = if view.thumbnails {
+        let image = thumbnail_cells(area);
+        frame.render_widget(
+            Paragraph::new("⏳").fg(MUTED).alignment(Alignment::Center),
+            Rect { y: image.y + image.height / 2, height: 1, ..image },
+        );
+        Rect { y: image.bottom() + 1, height: inner.bottom().saturating_sub(image.bottom() + 1), ..inner }
+    } else {
+        inner
+    };
+    let mut details = vec![v.duration_label()];
+    if let Some(ts) = v.published {
+        let (date, age) = date_labels(ts, view.now, lang);
+        details.push(format!("{age} ({date})"));
+    }
+    let mut lines = vec![
+        Line::from(v.title.as_str()).fg(FG).bold(),
+        Line::from(""),
+        Line::from(v.channel.as_str()).fg(MAGENTA),
+        Line::from(details.into_iter().filter(|d| !d.is_empty()).collect::<Vec<_>>().join(" · ")).fg(MUTED),
+    ];
+    match v.live {
+        Live::Now => lines.push(Line::from(format!("{} {}", icons.live, lang.pick("en vivo", "live"))).fg(RED)),
+        Live::Upcoming => {
+            lines.push(Line::from(format!("{} {}", icons.upcoming, lang.pick("próximo", "upcoming"))).fg(YELLOW))
+        }
+        Live::No => {}
+    }
+    if state.later.iter().any(|l| l.id == v.id) {
+        lines.push(Line::from(format!("{} {}", icons.later, lang.pick("En Ver después", "In Watch later"))).fg(CYAN));
+    }
+    if v.channel_id.as_ref().is_some_and(|c| state.subs.contains(c)) {
+        lines.push(Line::from(format!("{} {}", icons.subscribed, lang.pick("Suscripto", "Subscribed"))).fg(GREEN));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }), text_area);
+}
+
 fn video_row<'a>(state: &State, icons: &Icons, view: &View, v: &'a Video) -> ListItem<'a> {
+    let lang = state.lang();
     let mut spans = match (v.live, v.published) {
-        (Live::Now, _) => vec![Span::styled(pad_cells(&format!("{} en vivo", icons.live), DATE_WIDTH), RED)],
+        (Live::Now, _) => {
+            let live = format!("{} {}", icons.live, lang.pick("en vivo", "live"));
+            vec![Span::styled(pad_cells(&live, DATE_WIDTH), RED)]
+        }
         (Live::Upcoming, _) => {
-            vec![Span::styled(pad_cells(&format!("{} próximo", icons.upcoming), DATE_WIDTH), YELLOW)]
+            let upcoming = format!("{} {}", icons.upcoming, lang.pick("próximo", "upcoming"));
+            vec![Span::styled(pad_cells(&upcoming, DATE_WIDTH), YELLOW)]
         }
         (Live::No, Some(ts)) => {
-            let (date, age) = date_labels(ts, view.now);
+            let (date, age) = date_labels(ts, view.now, lang);
             vec![Span::styled(date, GREEN), Span::styled(format!(" {age:<5}"), MUTED)]
         }
         (Live::No, None) => vec![Span::raw(" ".repeat(DATE_WIDTH))],
@@ -454,7 +636,7 @@ fn profile_row<'a>(state: &State, icons: &Icons, spec: &'a str) -> ListItem<'a> 
     } else {
         "  "
     };
-    let label = if spec.is_empty() { "Sin sesión" } else { spec };
+    let label = if spec.is_empty() { state.lang().pick("Sin sesión", "Not logged in") } else { spec };
     ListItem::new(Line::from(vec![
         Span::styled(format!(" {current}"), GREEN),
         Span::raw(format!("{} ", icons.user)),
@@ -476,7 +658,7 @@ fn file_row<'a>(icons: &Icons, file: &'a LocalFile, kind: MediaKind) -> ListItem
 
 fn setting_row(state: &State, icon: &str, setting: Setting) -> ListItem<'static> {
     let value = state.setting_value(setting);
-    let mut spans = vec![Span::raw(format!(" {icon} ")), Span::styled(pad_cells(setting.label(), 44), FG)];
+    let mut spans = vec![Span::raw(format!(" {icon} ")), Span::styled(pad_cells(setting.label(state.lang()), 44), FG)];
     if !value.is_empty() {
         spans.push(Span::styled(value, Style::new().fg(YELLOW).bold()));
     }
@@ -489,35 +671,40 @@ fn draw_status(frame: &mut Frame, state: &State, icons: &Icons, view: &View, are
         icons.user,
         state.session_label(),
         icons.language,
-        language_label(state.config.player.language)
+        language_label(state.config.player.language, state.lang())
     );
     let right_width = Span::raw(right.as_str()).width() as u16 + 1;
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(right_width)]).areas(area);
     let left = match &state.loading {
-        Some(title) => Paragraph::new(format!(" {}", loading_text(title, view.loading.unwrap_or_default()))).fg(YELLOW),
+        Some(title) => {
+            Paragraph::new(format!(" {}", loading_text(title, view.loading.unwrap_or_default(), state.lang())))
+                .fg(YELLOW)
+        }
         None => Paragraph::new(format!(" {}", state.status)).fg(FG),
     };
+    // A shaded bar, so it reads apart from the keys below it.
+    frame.render_widget(Block::new().bg(HIGHLIGHT), area);
     frame.render_widget(left, left_area);
-    frame.render_widget(Paragraph::new(right).fg(MUTED).alignment(Alignment::Right), right_area);
+    frame.render_widget(Paragraph::new(right).fg(BLUE).alignment(Alignment::Right), right_area);
 }
 
 /// Keys that work right now, each with what it does.
 pub fn hints(state: &State) -> Vec<(String, &'static str)> {
-    let rows = |table: &[(&str, &'static str)]| table.iter().map(|(k, d)| (k.to_string(), *d)).collect::<Vec<_>>();
-    let all_keys = ("C-y ?".to_string(), "todos los atajos");
+    let lang = state.lang();
+    let rows = |table| keymap::rows(table, lang);
+    let key = |k: &str, es, en| (k.to_string(), lang.pick(es, en));
+    let all_keys = key("C-y ?", "todos los atajos", "every shortcut");
     let mut hints = if state.confirm.is_some() {
-        vec![("s".into(), "sí, desuscribirme"), ("otra tecla".into(), "no")]
+        vec![key("s", "sí, desuscribirme", "yes, unsubscribe"), key(lang.pick("otra tecla", "other key"), "no", "no")]
     } else if state.help {
-        vec![("cualquier tecla".into(), "cerrar la ayuda")]
+        vec![key(lang.pick("cualquier tecla", "any key"), "cerrar la ayuda", "close the help")]
     } else if state.prefix {
-        let mut commands: Vec<_> = keymap::PREFIX.iter().map(|(k, _, d)| (k.to_string(), *d)).collect();
-        commands.insert(4, ("0-9".into(), "ir a la pestaña"));
-        return commands;
+        return keymap::prefix_rows(lang);
     } else if let Some(prompt) = &state.prompt {
         match prompt {
             Prompt::Videos { .. } => rows(keymap::IN_SEARCH),
-            _ => vec![("Enter".into(), "aceptar"), ("Esc".into(), "cancelar")],
+            _ => vec![key("Enter", "aceptar", "accept"), key("Esc", "cancelar", "cancel")],
         }
     } else if state.active_tab().is_some() {
         let mut keys = rows(keymap::IN_TAB);
@@ -526,40 +713,69 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
     } else if state.focus == Focus::Menu || state.listing().is_none() {
         rows(keymap::IN_MENU)
     } else {
-        let back = ("Esc".to_string(), "volver");
+        let back = key("Esc", "volver", "back");
         match state.listing().map(|l| &l.items) {
             Some(Items::Videos(_)) => vec![
-                ("Enter".into(), "ver"),
-                ("l".into(), "ver después"),
-                ("s".into(), "suscribirse"),
-                ("d".into(), "descargar"),
-                ("c".into(), "canal"),
-                ("/".into(), "buscar"),
+                key("Enter", "ver", "play"),
+                key("l", "ver después", "watch later"),
+                key("s", "suscribirse", "subscribe"),
+                key("d", "descargar", "download"),
+                key("c", "canal", "channel"),
+                key("/", "buscar", "search"),
                 back,
             ],
-            Some(Items::Channels(_)) => {
-                vec![("Enter".into(), "ver sus videos"), ("s".into(), "suscribirse / desuscribirse"), back]
+            Some(Items::Channels(_)) => vec![
+                key("Enter", "ver sus videos", "its videos"),
+                key("s", "suscribirse / desuscribirse", "subscribe / unsubscribe"),
+                back,
+            ],
+            Some(Items::Profiles(_)) => vec![key("Enter", "usar esta sesión", "use this login"), back],
+            Some(Items::Files(_, MediaKind::Music)) => {
+                vec![key("Enter", "escuchar desde esta canción", "play from this song"), back]
             }
-            Some(Items::Profiles(_)) => vec![("Enter".into(), "usar esta sesión"), back],
-            Some(Items::Files(_, MediaKind::Music)) => vec![("Enter".into(), "escuchar desde esta canción"), back],
-            Some(Items::Files(_, MediaKind::Video)) => vec![("Enter".into(), "ver"), back],
-            _ => vec![("Enter".into(), "cambiar / abrir"), back],
+            Some(Items::Files(_, MediaKind::Video)) => vec![key("Enter", "ver", "play"), back],
+            Some(Items::About) => vec![back],
+            _ => vec![key("Enter", "cambiar / abrir", "change / open"), back],
         }
     };
     hints.push(all_keys);
     hints
 }
 
+/// As many hints as fit in the line, whole; the last one (`C-y ?`, every
+/// shortcut) is always kept.
 fn draw_hints(frame: &mut Frame, hints: &[(String, &str)], area: Rect) {
+    let hint = |(key, description): &(String, &str)| {
+        [Span::styled(key.clone(), Style::new().fg(CYAN).bold()), Span::styled(format!(" {description}   "), MUTED)]
+    };
+    let width = |spans: &[Span]| spans.iter().map(Span::width).sum::<usize>();
+    let Some((last, rest)) = hints.split_last() else { return };
+    let last = hint(last);
     let mut spans = vec![Span::raw(" ")];
-    for (key, description) in hints {
-        spans.push(Span::styled(format!(" {key} "), Style::new().fg(Color::Black).bg(BLUE).bold()));
-        spans.push(Span::styled(format!(" {description}  "), MUTED));
+    let room = (area.width as usize).saturating_sub(width(&last) + 1);
+    for h in rest {
+        let next = hint(h);
+        if width(&spans) + width(&next) > room {
+            break;
+        }
+        spans.extend(next);
     }
+    spans.extend(last);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_help(frame: &mut Frame) {
+/// Where the help or the confirmation dialog is drawn, if one is open.
+pub fn dialog_area(state: &State, screen: Rect) -> Option<Rect> {
+    if state.help {
+        let (left, right) = help_columns(state.lang());
+        Some(centered(screen, 118, left.len().max(right.len()) as u16 + 3))
+    } else {
+        state.confirm.as_ref().map(|_| centered(screen, 56, 5))
+    }
+}
+
+/// The help screen's two balanced columns, so everything fits on a laptop screen.
+fn help_columns(lang: Lang) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let lines_of = |sections: &[(&'static str, Vec<(String, &'static str)>)]| {
         let mut lines = Vec::new();
         for (title, rows) in sections {
@@ -574,17 +790,21 @@ fn draw_help(frame: &mut Frame) {
         }
         lines
     };
-    let mut sections = keymap::help();
-    // Two balanced columns so everything fits on a laptop screen.
+    let mut sections = keymap::help(lang);
     let sizes: Vec<usize> = sections.iter().map(|(_, rows)| rows.len() + 2).collect();
     let split =
         (1..sections.len()).min_by_key(|&k| sizes[..k].iter().sum::<usize>().max(sizes[k..].iter().sum())).unwrap_or(1);
     let right = sections.split_off(split);
-    let (left, right) = (lines_of(&sections), lines_of(&right));
-    let height = left.len().max(right.len()) as u16 + 3;
-    let area = centered(frame.area(), 118, height);
+    (lines_of(&sections), lines_of(&right))
+}
+
+fn draw_help(frame: &mut Frame, lang: Lang) {
+    let (left, right) = help_columns(lang);
+    let area = centered(frame.area(), 118, left.len().max(right.len()) as u16 + 3);
     frame.render_widget(Clear, area);
-    let block = panel(" ⌨  Atajos de teclado · cualquier tecla cierra ", MAGENTA);
+    let title =
+        lang.pick(" ⌨  Atajos de teclado · cualquier tecla cierra ", " ⌨  Keyboard shortcuts · any key closes ");
+    let block = panel(title, MAGENTA);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [l, r] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).spacing(2).areas(inner);
@@ -592,19 +812,68 @@ fn draw_help(frame: &mut Frame) {
     frame.render_widget(Paragraph::new(right), r);
 }
 
-fn draw_confirm(frame: &mut Frame, name: &str) {
+fn draw_confirm(frame: &mut Frame, name: &str, lang: Lang) {
     let area = centered(frame.area(), 56, 5);
     let lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::raw("¿Desuscribirte de "),
+            Span::raw(lang.pick("¿Desuscribirte de ", "Unsubscribe from ")),
             Span::styled(name, Style::new().fg(MAGENTA).bold()),
             Span::raw("?"),
         ]),
-        Line::from("s = sí · cualquier otra tecla = no").fg(MUTED),
+        Line::from(lang.pick("s = sí · cualquier otra tecla = no", "y = yes · any other key = no")).fg(MUTED),
     ];
+    let title = lang.pick(" Confirmar ", " Confirm ");
     frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel(" Confirmar ", RED)), area);
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel(title, RED)), area);
+}
+
+/// Version, links and the donation addresses from `donate.toml`.
+fn draw_about(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
+    let lang = state.lang();
+    let label = |text: &'static str| Span::styled(format!("{text:>12}  "), MUTED);
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw(format!("{}  ", icons.logo)),
+            Span::styled("tube", Style::new().fg(RED).bold()),
+            Span::styled("tui", Style::new().fg(FG).bold()),
+            Span::styled(format!("  v{}", env!("CARGO_PKG_VERSION")), MUTED),
+        ]),
+        Line::from(lang.pick(
+            "YouTube y tus videos y música, en la terminal",
+            "YouTube and your own videos and music, in the terminal",
+        ))
+        .fg(FG),
+        Line::from(""),
+        Line::from(vec![label("GitHub"), Span::styled(env!("CARGO_PKG_REPOSITORY"), CYAN)]),
+        Line::from(vec![label("crates.io"), Span::styled("https://crates.io/crates/tubetui", CYAN)]),
+        Line::from(vec![label(lang.pick("Licencia", "License")), Span::styled("MIT / Apache-2.0", FG)]),
+        Line::from(vec![
+            label(lang.pick("Errores", "Bugs")),
+            Span::styled(concat!(env!("CARGO_PKG_REPOSITORY"), "/issues"), CYAN),
+        ]),
+    ];
+    let wallets = donations();
+    if !wallets.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(
+            Line::from(lang.pick(
+                "☕ ¿Te sirve? Podés apoyar el proyecto con una donación:",
+                "☕ Find it useful? You can support the project with a donation:",
+            ))
+            .fg(YELLOW)
+            .bold(),
+        );
+        for wallet in wallets {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:>12}  ", wallet.network), MAGENTA),
+                Span::styled(wallet.address, Style::new().fg(GREEN).bold()),
+            ]));
+        }
+    }
+    let title = format!(" {} {} ", icons.sections[10], Section::AcercaDe.label(lang));
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel(title, PURPLE)), area);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -641,7 +910,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    const VIEW: View = View { embedded: true, now: 1_791_590_400, loading: None, opening: None };
+    const VIEW: View = View { embedded: true, now: 1_791_590_400, loading: None, opening: None, thumbnails: true };
 
     fn render_with(state: &State, view: &View) -> String {
         let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
@@ -725,7 +994,7 @@ mod tests {
         s.later = vec![video("x"), video("y")];
         let screen = render(&s);
         for (section, icon) in Section::ALL.iter().zip(UNICODE.sections) {
-            assert!(screen.contains(&format!("{icon} {}", section.label())), "{section:?}\n{screen}");
+            assert!(screen.contains(&format!("{icon} {}", section.label(Lang::Es))), "{section:?}\n{screen}");
         }
         assert!(screen.contains("Ver después (2)"));
         assert!(screen.contains("Elegí una sección"));
@@ -776,7 +1045,7 @@ mod tests {
     fn settings_screen_shows_labels_and_values() {
         let screen = render(&open_settings());
         for setting in Setting::ALL {
-            assert!(screen.contains(setting.label()), "{setting:?}\n{screen}");
+            assert!(screen.contains(setting.label(Lang::Es)), "{setting:?}\n{screen}");
         }
         assert!(screen.contains("720p"));
         assert!(screen.contains("~/Videos"));
@@ -825,7 +1094,7 @@ mod tests {
         let mut s = state();
         s.update(Action::ToggleHelp);
         let screen = render(&s);
-        for (title, rows) in keymap::help() {
+        for (title, rows) in keymap::help(Lang::Es) {
             assert!(screen.contains(title), "{title}\n{screen}");
             for (_, description) in rows {
                 assert!(screen.contains(description), "{description}\n{screen}");
@@ -851,8 +1120,8 @@ mod tests {
     #[test]
     fn hint_bar_shows_keys_with_descriptions() {
         let screen = render(&with_items(Items::Videos(vec![video("a")])));
-        assert!(screen.contains(" l  ver después"), "{screen}");
-        assert!(screen.contains(" C-y ?  todos los atajos"));
+        assert!(screen.contains("l ver después"), "{screen}");
+        assert!(screen.contains("C-y ? todos los atajos"));
     }
 
     #[test]
@@ -927,6 +1196,59 @@ mod tests {
         assert!(!render(&with_tab()).contains("Cargando"), "playing: nothing under the video");
         let window = View { embedded: false, ..VIEW };
         assert!(render_with(&with_tab(), &window).contains("ventana de mpv"));
+    }
+
+    #[test]
+    fn english_interface() {
+        let mut s = with_tab();
+        s.update(Action::ToggleUiLang);
+        s.update(Action::GoTab(0));
+        let screen = render(&s);
+        for text in ["Home", "Watch later", "ON THIS COMPUTER", "Settings", "About", "TABS", "every shortcut"] {
+            assert!(screen.contains(text), "{text} missing\n{screen}");
+        }
+        assert!(!screen.contains("Suscripciones"), "{screen}");
+        s.update(Action::ToggleHelp);
+        assert!(render(&s).contains("Keyboard shortcuts"));
+    }
+
+    #[test]
+    fn about_shows_version_and_links() {
+        let mut s = state();
+        s.menu = Section::ALL.iter().position(|x| *x == Section::AcercaDe).unwrap();
+        s.update(Action::Enter);
+        let screen = render(&s);
+        assert!(screen.contains(env!("CARGO_PKG_VERSION")), "{screen}");
+        assert!(screen.contains("github.com/polblancoo/tubetui"), "{screen}");
+    }
+
+    #[test]
+    fn hints_fit_whole_and_keep_the_help_key() {
+        let mut terminal = Terminal::new(TestBackend::new(60, 1)).unwrap();
+        let hints = hints(&with_tab());
+        terminal.draw(|f| draw_hints(f, &hints, f.area())).unwrap();
+        let line: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(line.contains("C-y ? todos los atajos"), "{line}");
+        assert!(line.contains("espacio pausa"), "{line}");
+        assert!(!line.contains("silenciar"), "does not fit, left out whole: {line}");
+    }
+
+    #[test]
+    fn wide_video_lists_show_a_preview_of_the_selection() {
+        let mut s = with_items(Items::Videos(vec![video("a"), video("b")]));
+        s.update(Action::Down);
+        let screen = render(&s); // 130 columns: room for the panel
+        assert!(screen.contains("Vista previa"), "{screen}");
+        let screen_area = Rect::new(0, 0, 130, 40);
+        let (id, cells) = thumbnail_area(&s, screen_area).unwrap();
+        assert_eq!(id, "b", "the selected video");
+        assert_eq!(cells.width, PREVIEW_WIDTH - 2);
+        assert_eq!(cells.height, (PREVIEW_WIDTH - 2) * 9 / 32);
+        s.update(Action::ToggleHelp);
+        assert_eq!(thumbnail_area(&s, screen_area), None, "kitty would draw it over the help");
+        s.update(Action::ToggleHelp);
+        assert_eq!(thumbnail_area(&s, Rect::new(0, 0, 100, 40)), None, "too narrow");
+        assert!(!render_with(&s, &View { thumbnails: false, ..VIEW }).contains("⏳"));
     }
 
     #[test]

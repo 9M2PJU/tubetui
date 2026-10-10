@@ -6,6 +6,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::app::Action;
+use crate::i18n::{Lang, Text};
 
 /// The slice of state that decides how a key is read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -25,51 +26,76 @@ pub const SEEK_SECONDS: i32 = 5;
 pub const VOLUME_STEP: i32 = 5;
 
 /// `Ctrl+y` commands. Digits (`0`–`9`, go to tab) are handled apart.
-pub const PREFIX: &[(char, Action, &str)] = &[
-    ('b', Action::ToggleSidebar, "mostrar / ocultar el menú"),
-    ('m', Action::FocusMenu, "ir al menú"),
-    ('f', Action::ToggleFullscreen, "pantalla completa"),
-    ('n', Action::NextTab, "pestaña siguiente"),
-    ('p', Action::PrevTab, "pestaña anterior"),
-    ('x', Action::CloseTab, "cerrar la pestaña"),
-    ('/', Action::FocusSearch, "buscar videos"),
-    ('?', Action::ToggleHelp, "esta ayuda"),
-    ('q', Action::Quit, "salir"),
+pub const PREFIX: &[(char, Action, Text)] = &[
+    ('b', Action::ToggleSidebar, Text::new("mostrar / ocultar el menú", "show / hide the menu")),
+    ('m', Action::FocusMenu, Text::new("ir al menú", "go to the menu")),
+    ('f', Action::ToggleFullscreen, Text::new("pantalla completa", "fullscreen")),
+    ('n', Action::NextTab, Text::new("pestaña siguiente", "next tab")),
+    ('p', Action::PrevTab, Text::new("pestaña anterior", "previous tab")),
+    ('x', Action::CloseTab, Text::new("cerrar la pestaña", "close the tab")),
+    ('/', Action::FocusSearch, Text::new("buscar videos", "search videos")),
+    ('l', Action::ToggleUiLang, Text::new("idioma: pasar a English", "language: switch to español")),
+    ('?', Action::ToggleHelp, Text::new("esta ayuda", "this help")),
+    ('q', Action::Quit, Text::new("salir", "quit")),
 ];
 
 /// Keys that act on the selected video, in lists and in video tabs.
-pub const ON_VIDEO: &[(&str, &str)] = &[
-    ("l", "agregar / quitar de Ver después"),
-    ("s", "suscribirse / desuscribirse del canal"),
-    ("d", "descargar (con subtítulos)"),
-    ("c", "ver los videos del canal"),
+pub const ON_VIDEO: &[(&str, Text)] = &[
+    ("l", Text::new("agregar / quitar de Ver después", "add to / remove from Watch later")),
+    ("s", Text::new("suscribirse / desuscribirse del canal", "subscribe / unsubscribe")),
+    ("d", Text::new("descargar (con subtítulos)", "download (with subtitles)")),
+    ("c", Text::new("ver los videos del canal", "the channel's videos")),
 ];
 
-pub const IN_MENU: &[(&str, &str)] =
-    &[("↑ ↓", "elegir sección"), ("Enter", "abrir"), ("Tab", "ir a la lista"), ("/", "buscar videos")];
-
-pub const IN_LISTS: &[(&str, &str)] = &[
-    ("↑ ↓  j k", "moverse"),
-    ("Enter", "ver video · abrir canal · cambiar opción"),
-    ("Esc  ←  h", "volver"),
-    ("Tab", "ir al menú"),
-    ("/", "buscar (dentro de un canal: en ese canal)"),
+pub const IN_MENU: &[(&str, Text)] = &[
+    ("↑ ↓", Text::new("elegir sección", "choose a section")),
+    ("Enter", Text::new("abrir", "open")),
+    ("Tab", Text::new("ir a la lista", "go to the list")),
+    ("/", Text::new("buscar videos", "search videos")),
 ];
 
-pub const IN_SEARCH: &[(&str, &str)] =
-    &[("Enter", "buscar / aceptar"), ("Tab", "dónde buscar: todo / mis canales / canal"), ("Esc", "cancelar")];
-
-pub const IN_TAB: &[(&str, &str)] = &[
-    ("espacio", "pausa"),
-    ("f  Esc", "pantalla completa / salir"),
-    ("← →", "retroceder / avanzar 5 s"),
-    ("↑ ↓", "subir / bajar volumen"),
-    ("m", "silenciar"),
-    ("j", "subtítulos sí / no"),
-    ("i", "modo: subtítulos → original → doblado"),
-    ("o", "otro idioma (es → en → pt …)"),
-    (". ,", "música: siguiente / anterior"),
+pub const IN_LISTS: &[(&str, Text)] = &[
+    ("↑ ↓  j k", Text::new("moverse", "move")),
+    ("Enter", Text::new("ver video · abrir canal · cambiar opción", "play · open channel · change option")),
+    ("Esc  ←  h", Text::new("volver", "back")),
+    ("Tab", Text::new("ir al menú", "go to the menu")),
+    ("/", Text::new("buscar (dentro de un canal: en ese canal)", "search (inside a channel: in that channel)")),
 ];
+
+pub const IN_SEARCH: &[(&str, Text)] = &[
+    ("Enter", Text::new("buscar / aceptar", "search / accept")),
+    ("Tab", Text::new("dónde buscar: todo / mis canales / canal", "where: everywhere / my channels / channel")),
+    ("Esc", Text::new("cancelar", "cancel")),
+];
+
+pub const IN_TAB: &[(&str, Text)] = &[
+    ("espacio", Text::new("pausa", "pause")),
+    ("f  Esc", Text::new("pantalla completa / salir", "fullscreen / leave")),
+    ("← →", Text::new("retroceder / avanzar 5 s", "back / forward 5 s")),
+    ("↑ ↓", Text::new("subir / bajar volumen", "volume up / down")),
+    ("m", Text::new("silenciar", "mute")),
+    ("j", Text::new("subtítulos sí / no", "subtitles on / off")),
+    ("i", Text::new("modo: subtítulos → original → doblado", "mode: subtitles → original → dubbed")),
+    ("o", Text::new("otro idioma (es → en → pt …)", "another language (es → en → pt …)")),
+    (". ,", Text::new("música: siguiente / anterior", "music: next / previous")),
+];
+
+/// `(keys, description)` rows of a table, in `lang`.
+pub fn rows(table: &[(&str, Text)], lang: Lang) -> Vec<(String, &'static str)> {
+    table.iter().map(|(k, d)| (space_key(k, lang), d.get(lang))).collect()
+}
+
+/// The space bar is named in the interface language.
+fn space_key(keys: &str, lang: Lang) -> String {
+    if keys == "espacio" { lang.pick("espacio", "space").into() } else { keys.into() }
+}
+
+/// `Ctrl+y` commands plus the digits, in `lang`.
+pub fn prefix_rows(lang: Lang) -> Vec<(String, &'static str)> {
+    let mut commands: Vec<_> = PREFIX.iter().map(|(k, _, d)| (k.to_string(), d.get(lang))).collect();
+    commands.insert(6, ("0-9".into(), lang.pick("ir a la pestaña (0 = Inicio)", "go to tab (0 = Home)")));
+    commands
+}
 
 pub fn map(key: KeyEvent, ctx: KeyContext) -> Option<Action> {
     if key.kind == KeyEventKind::Release {
@@ -157,18 +183,15 @@ fn lists(code: KeyCode) -> Option<Action> {
 }
 
 /// Sections of the help screen: title and `(keys, description)` rows.
-pub fn help() -> Vec<(&'static str, Vec<(String, &'static str)>)> {
-    let rows = |table: &[(&str, &'static str)]| table.iter().map(|(k, d)| (k.to_string(), *d)).collect();
-    let mut commands: Vec<(String, &'static str)> = PREFIX.iter().map(|(k, _, d)| (k.to_string(), *d)).collect();
-    commands.insert(6, ("0-9".into(), "ir a la pestaña (0 = Inicio)"));
+pub fn help(lang: Lang) -> Vec<(&'static str, Vec<(String, &'static str)>)> {
     vec![
-        ("Comandos: Ctrl+y y después una tecla", commands),
-        ("Menú", rows(IN_MENU)),
-        ("Listas", rows(IN_LISTS)),
-        ("Sobre un video (lista o pestaña)", rows(ON_VIDEO)),
-        ("Pestaña de video", rows(IN_TAB)),
-        ("Cuadro de búsqueda", rows(IN_SEARCH)),
-        ("Siempre", vec![("Ctrl+c".into(), "salir")]),
+        (lang.pick("Comandos: Ctrl+y y después una tecla", "Commands: Ctrl+y, then a key"), prefix_rows(lang)),
+        (lang.pick("Menú", "Menu"), rows(IN_MENU, lang)),
+        (lang.pick("Listas", "Lists"), rows(IN_LISTS, lang)),
+        (lang.pick("Sobre un video (lista o pestaña)", "On a video (list or tab)"), rows(ON_VIDEO, lang)),
+        (lang.pick("Pestaña de video", "Video tab"), rows(IN_TAB, lang)),
+        (lang.pick("Cuadro de búsqueda", "Search box"), rows(IN_SEARCH, lang)),
+        (lang.pick("Siempre", "Always"), vec![("Ctrl+c".into(), lang.pick("salir", "quit"))]),
     ]
 }
 
@@ -306,11 +329,21 @@ mod tests {
 
     #[test]
     fn help_lists_every_prefix_command() {
-        let help = help();
-        let (_, commands) = &help[0];
-        for (c, ..) in PREFIX {
-            assert!(commands.iter().any(|(k, _)| *k == c.to_string()), "{c} missing from help");
+        for lang in [Lang::Es, Lang::En] {
+            let help = help(lang);
+            let (_, commands) = &help[0];
+            for (c, ..) in PREFIX {
+                assert!(commands.iter().any(|(k, _)| *k == c.to_string()), "{c} missing from help");
+            }
+            assert!(commands.iter().any(|(k, _)| k == "0-9"));
         }
-        assert!(commands.iter().any(|(k, _)| k == "0-9"));
+    }
+
+    #[test]
+    fn help_is_translated() {
+        assert_eq!(help(Lang::En)[0].1.iter().find(|(k, _)| k == "q").unwrap().1, "quit");
+        assert_eq!(help(Lang::Es)[0].1.iter().find(|(k, _)| k == "q").unwrap().1, "salir");
+        assert_eq!(rows(IN_TAB, Lang::En)[0].0, "space");
+        assert_eq!(map(char('l'), PREFIXED), Some(Action::ToggleUiLang));
     }
 }
