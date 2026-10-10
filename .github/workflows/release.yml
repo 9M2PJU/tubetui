@@ -1,0 +1,106 @@
+# On every `v*` tag: build Linux, Windows and macOS packages and attach them
+# to the GitHub release. File names carry no version, so the website can link
+# to https://github.com/polblancoo/tubetui/releases/latest/download/<file>.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.5.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release (once; the builds below add their files to it)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "tubetui $TAG"
+
+  linux:
+    needs: create
+    # The oldest supported runner: the binary then runs on older glibc too.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir -p dist/tubetui
+          cp target/release/tubetui README.md dist/tubetui/
+          tar -C dist -czf dist/tubetui-x86_64-linux.tar.gz tubetui
+          cargo deb --no-build --output dist/tubetui_amd64.deb
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/tubetui-x86_64-linux.tar.gz
+            dist/tubetui_amd64.deb
+
+  windows:
+    needs: create
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/release/tubetui.exe, README.md -DestinationPath dist/tubetui-x86_64-windows.zip
+      - name: Installer
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          $version = "$env:TAG".TrimStart("v")
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" "/DExe=$PWD\target\release\tubetui.exe" "/DOutDir=$PWD\dist" packaging\windows\tubetui.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/tubetui-x86_64-windows.zip
+            dist/tubetui-x86_64-windows-setup.exe
+
+  macos:
+    needs: create
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir -p dist/tubetui
+          cp target/release/tubetui README.md dist/tubetui/
+          tar -C dist -czf dist/tubetui-aarch64-macos.tar.gz tubetui
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          fail_on_unmatched_files: true
+          files: dist/tubetui-aarch64-macos.tar.gz

@@ -242,22 +242,125 @@ fn video_renderer(r: &Value, now: i64) -> Option<Video> {
 }
 
 /// `"1:52:00"` → 6720 seconds.
+/// What the watch page says about a video, and what it suggests next.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Watch {
+    pub views: Option<u64>,
+    pub likes: Option<u64>,
+    /// When it was published, approximately (YouTube says "3 weeks ago").
+    pub published: Option<i64>,
+    /// The channel's subscribers, shortened by YouTube: `559K`.
+    pub subscribers: Option<String>,
+    /// "Up next".
+    pub related: Vec<Video>,
+}
+
+/// The watch page of `id`: details and related videos (anonymous, about a second).
+pub fn watch(id: &str) -> Result<Watch, YoutubeError> {
+    let reply = InnerTube::anonymous().call("next", json!({ "videoId": id }))?;
+    Ok(parse_watch(&reply, unix_now()))
+}
+
+pub fn parse_watch(reply: &Value, now: i64) -> Watch {
+    let mut watch = Watch::default();
+    let mut seen = HashSet::new();
+    walk(reply, &mut |object| {
+        if let Some(primary) = object.get("videoPrimaryInfoRenderer") {
+            // `originalViewCount` is sometimes "0" while the text says "6,984 views".
+            let views = &primary["viewCount"]["videoViewCountRenderer"];
+            watch.views = text(&views["viewCount"])
+                .and_then(|t| first_number(&t))
+                .or_else(|| views["originalViewCount"].as_str().and_then(|v| v.parse().ok()).filter(|n| *n > 0));
+            watch.published = text(&primary["relativeDateText"]).and_then(|t| parse_age(&t, now));
+            let mut likes = None;
+            walk(primary, &mut |o| {
+                // "like this video along with 733 other people"
+                if let Some(label) = o.get("accessibilityText").and_then(Value::as_str)
+                    && label.contains("along with")
+                {
+                    likes = likes.or_else(|| first_number(label));
+                }
+            });
+            watch.likes = likes;
+        }
+        if let Some(owner) = object.get("videoOwnerRenderer") {
+            watch.subscribers =
+                text(&owner["subscriberCountText"]).and_then(|t| t.split_whitespace().next().map(str::to_owned));
+        }
+        if let Some(video) = object.get("lockupViewModel").and_then(|l| lockup_video(l, now))
+            && seen.insert(video.id.clone())
+        {
+            watch.related.push(video);
+        }
+    });
+    watch
+}
+
+/// A suggested video in YouTube's newer "lockup" format.
+fn lockup_video(lockup: &Value, now: i64) -> Option<Video> {
+    if lockup["contentType"] != "LOCKUP_CONTENT_TYPE_VIDEO" {
+        return None; // playlists, mixes
+    }
+    let metadata = &lockup["metadata"]["lockupMetadataViewModel"];
+    let rows: Vec<Vec<&str>> = metadata["metadata"]["contentMetadataViewModel"]["metadataRows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|row| {
+            row["metadataParts"].as_array().into_iter().flatten().filter_map(|p| p["text"]["content"].as_str()).collect()
+        })
+        .collect();
+    let channel = &metadata["image"]["decoratedAvatarViewModel"]["rendererContext"]["commandContext"]["onTap"]
+        ["innertubeCommand"]["browseEndpoint"];
+    let mut badges = Vec::new();
+    walk(&lockup["contentImage"], &mut |o| {
+        if let Some(text) = o.get("thumbnailBadgeViewModel").and_then(|b| b["text"].as_str()) {
+            badges.push(text);
+        }
+    });
+    let live = if badges.iter().any(|b| b.eq_ignore_ascii_case("live")) { Live::Now } else { Live::No };
+    Some(Video {
+        id: lockup["contentId"].as_str()?.to_owned(),
+        title: metadata["title"]["content"].as_str()?.to_owned(),
+        channel: rows.first().and_then(|r| r.first()).map(|c| (*c).to_owned()).unwrap_or_default(),
+        channel_id: channel["browseId"].as_str().map(str::to_owned),
+        channel_url: channel["canonicalBaseUrl"].as_str().map(|path| format!("{ORIGIN}{path}")),
+        duration: badges.iter().find_map(|b| parse_clock(b)),
+        published: rows.get(1).and_then(|r| r.iter().find_map(|part| parse_age(part, now))),
+        live,
+    })
+}
+
+/// `733` in "along with 733 other people"; `1,234` counts as 1234.
+fn first_number(text: &str) -> Option<u64> {
+    let start = text.find(|c: char| c.is_ascii_digit())?;
+    let digits: String =
+        text[start..].chars().take_while(|c| c.is_ascii_digit() || *c == ',').filter(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
 fn parse_clock(text: &str) -> Option<u32> {
     text.split(':').try_fold(0u32, |total, part| Some(total * 60 + part.trim().parse::<u32>().ok()?))
 }
 
-/// `"3 weeks ago"`, `"Streamed 1 year ago"` → an approximate Unix time.
+/// `"3 weeks ago"`, `"Streamed 1 year ago"`, and the short form of suggested
+/// videos, `"3h ago"`, `"2mo ago"` → an approximate Unix time.
 fn parse_age(text: &str, now: i64) -> Option<i64> {
-    let mut words = text.trim_start_matches("Streamed ").split_whitespace();
-    let n: i64 = words.next()?.parse().ok()?;
-    let unit = match words.next()?.trim_end_matches('s') {
+    let text = text.trim_start_matches("Streamed ");
+    let digits = text.find(|c: char| !c.is_ascii_digit()).filter(|end| *end > 0)?;
+    let n: i64 = text[..digits].parse().ok()?;
+    let rest = text[digits..].trim_start();
+    if !rest.ends_with(" ago") {
+        return None;
+    }
+    let unit = match rest.split_whitespace().next()?.trim_end_matches('s') {
         "second" => 1,
-        "minute" => 60,
-        "hour" => 3_600,
-        "day" => 86_400,
-        "week" => 7 * 86_400,
-        "month" => 30 * 86_400,
-        "year" => 365 * 86_400,
+        "minute" | "m" | "min" => 60,
+        "hour" | "h" => 3_600,
+        "day" | "d" => 86_400,
+        "week" | "w" | "wk" => 7 * 86_400,
+        "month" | "mo" => 30 * 86_400,
+        "year" | "y" | "yr" => 365 * 86_400,
         _ => return None,
     };
     Some(now - n * unit)
@@ -496,7 +599,7 @@ pub fn parse_channels(json: &str) -> Result<Vec<Channel>, serde_json::Error> {
 }
 
 /// `950`, `12 k`, `1,2 M`.
-fn compact(n: u64) -> String {
+pub fn compact(n: u64) -> String {
     match n {
         0..1_000 => n.to_string(),
         1_000..1_000_000 => format!("{} k", n / 1_000),
@@ -701,6 +804,9 @@ mod tests {
         assert_eq!(parse_age("3 weeks ago", 1_000_000_000), Some(1_000_000_000 - 21 * 86_400));
         assert_eq!(parse_age("1 hour ago", 100_000), Some(96_400));
         assert_eq!(parse_age("Premieres soon", 0), None);
+        assert_eq!(parse_age("3h ago", 100_000), Some(100_000 - 3 * 3_600));
+        assert_eq!(parse_age("2mo ago", 100_000_000), Some(100_000_000 - 60 * 86_400));
+        assert_eq!(parse_age("8.2K", 100), None, "view counts are not ages");
     }
 
     #[test]
@@ -757,6 +863,60 @@ mod tests {
         assert!(joined.contains("-f best"));
         assert!(joined.contains("--sub-langs es"));
         assert!(joined.contains("-o /v/%(title)s.%(ext)s"));
+    }
+
+    /// Same shape as a real `next` reply (trimmed).
+    fn watch_reply() -> Value {
+        let lockup = |id: &str, kind: &str, rows: Value, badge: &str| {
+            json!({ "lockupViewModel": {
+                "contentId": id, "contentType": kind,
+                "contentImage": { "thumbnailViewModel": { "overlays": [{ "thumbnailBottomOverlayViewModel": {
+                    "badges": [{ "thumbnailBadgeViewModel": { "text": badge } }] } }] } },
+                "metadata": { "lockupMetadataViewModel": {
+                    "title": { "content": format!("title {id}") },
+                    "image": { "decoratedAvatarViewModel": { "rendererContext": { "commandContext": { "onTap": {
+                        "innertubeCommand": { "browseEndpoint": { "browseId": "UCx", "canonicalBaseUrl": "/@x" } } } } } } },
+                    "metadata": { "contentMetadataViewModel": { "metadataRows": rows } } } } } })
+        };
+        let parts = |texts: &[&str]| json!({ "metadataParts": texts.iter().map(|t| json!({ "text": { "content": t } })).collect::<Vec<_>>() });
+        json!({ "contents": { "twoColumnWatchNextResults": {
+            "results": { "results": { "contents": [
+                { "videoPrimaryInfoRenderer": {
+                    "viewCount": { "videoViewCountRenderer": {
+                        "viewCount": { "simpleText": "5,771 views" }, "originalViewCount": "0" } },
+                    "relativeDateText": { "simpleText": "3 hours ago" },
+                    "videoActions": { "menuRenderer": { "topLevelButtons": [{ "segmentedLikeDislikeButtonViewModel": {
+                        "likeButtonViewModel": { "toggleButtonViewModel": { "defaultButtonViewModel": { "buttonViewModel": {
+                            "accessibilityText": "like this video along with 1,733 other people" } } } } } }] } } } },
+                { "videoSecondaryInfoRenderer": { "owner": { "videoOwnerRenderer": {
+                    "subscriberCountText": { "simpleText": "559K subscribers" } } } } }
+            ] } },
+            "secondaryResults": { "secondaryResults": { "results": [
+                lockup("a", "LOCKUP_CONTENT_TYPE_VIDEO", json!([parts(&["Chan A"]), parts(&["8.2K", "2d ago"])]), "19:42"),
+                lockup("mix", "LOCKUP_CONTENT_TYPE_PLAYLIST", json!([]), "50 videos"),
+                lockup("b", "LOCKUP_CONTENT_TYPE_VIDEO", json!([parts(&["Chan B"]), parts(&["1K watching"])]), "LIVE"),
+                lockup("a", "LOCKUP_CONTENT_TYPE_VIDEO", json!([]), "1:00"),
+                { "continuationItemRenderer": {} }
+            ] } } } } })
+    }
+
+    #[test]
+    fn parses_watch_details_and_related_videos() {
+        let now = 1_000_000;
+        let watch = parse_watch(&watch_reply(), now);
+        assert_eq!(watch.views, Some(5771));
+        assert_eq!(watch.likes, Some(1733));
+        assert_eq!(watch.published, Some(now - 3 * 3600));
+        assert_eq!(watch.subscribers.as_deref(), Some("559K"));
+        let ids: Vec<&str> = watch.related.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"], "no playlists, no repeats");
+        let a = &watch.related[0];
+        assert_eq!((a.title.as_str(), a.channel.as_str()), ("title a", "Chan A"));
+        assert_eq!(a.channel_id.as_deref(), Some("UCx"));
+        assert_eq!(a.channel_url.as_deref(), Some("https://www.youtube.com/@x"));
+        assert_eq!((a.duration, a.published, a.live), (Some(19 * 60 + 42), Some(now - 2 * 86_400), Live::No));
+        assert_eq!((watch.related[1].duration, watch.related[1].live), (None, Live::Now));
+        assert_eq!(first_number("no digits"), None);
     }
 
     #[test]

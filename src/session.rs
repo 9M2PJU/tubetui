@@ -13,6 +13,7 @@ const COOKIES_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 /// Chromium-family browsers: yt-dlp name and config dir relative to `$HOME`.
 /// The first dir of each is where yt-dlp looks by itself; profiles in the
 /// others (snap, flatpak) are passed to it by path.
+#[cfg(not(any(windows, target_os = "macos")))]
 const CHROMIUM: &[(&str, &[&str])] = &[
     ("brave", &[".config/BraveSoftware/Brave-Browser", ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"]),
     ("chrome", &[".config/google-chrome", ".var/app/com.google.Chrome/config/google-chrome"]),
@@ -22,14 +23,41 @@ const CHROMIUM: &[(&str, &[&str])] = &[
     ("opera", &[".config/opera", ".var/app/com.opera.Opera/config/opera"]),
 ];
 
+#[cfg(windows)]
+const CHROMIUM: &[(&str, &[&str])] = &[
+    ("brave", &["AppData/Local/BraveSoftware/Brave-Browser/User Data"]),
+    ("chrome", &["AppData/Local/Google/Chrome/User Data"]),
+    ("chromium", &["AppData/Local/Chromium/User Data"]),
+    ("vivaldi", &["AppData/Local/Vivaldi/User Data"]),
+    ("edge", &["AppData/Local/Microsoft/Edge/User Data"]),
+    ("opera", &["AppData/Roaming/Opera Software/Opera Stable"]),
+];
+
+#[cfg(target_os = "macos")]
+const CHROMIUM: &[(&str, &[&str])] = &[
+    ("brave", &["Library/Application Support/BraveSoftware/Brave-Browser"]),
+    ("chrome", &["Library/Application Support/Google/Chrome"]),
+    ("chromium", &["Library/Application Support/Chromium"]),
+    ("vivaldi", &["Library/Application Support/Vivaldi"]),
+    ("edge", &["Library/Application Support/Microsoft Edge"]),
+    ("opera", &["Library/Application Support/com.operasoftware.Opera"]),
+];
+
 /// Firefox profile folders: the classic one (yt-dlp's own), the newer XDG
 /// one, snap (Ubuntu's default) and flatpak.
+#[cfg(not(any(windows, target_os = "macos")))]
 const FIREFOX: &[&str] = &[
     ".mozilla/firefox",
     ".config/mozilla/firefox",
     "snap/firefox/common/.mozilla/firefox",
     ".var/app/org.mozilla.firefox/.mozilla/firefox",
 ];
+
+#[cfg(windows)]
+const FIREFOX: &[&str] = &["AppData/Roaming/Mozilla/Firefox/Profiles"];
+
+#[cfg(target_os = "macos")]
+const FIREFOX: &[&str] = &["Library/Application Support/Firefox/Profiles"];
 
 /// Browser profiles with cookies under `home`, as yt-dlp
 /// `--cookies-from-browser` specs (`brave+KEYRING:Default`, `firefox:abcd.default`,
@@ -195,6 +223,7 @@ mod tests {
         assert_eq!(cookies["SID"], "secret");
     }
 
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn scan_finds_chromium_and_firefox_profiles() {
         let home = temp_dir("scan");

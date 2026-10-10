@@ -21,7 +21,7 @@ use ratatui::layout::Rect;
 
 use tubetui::anim::Animations;
 use tubetui::app::{Action, Effect, Playback, PlayerCommand, SettingValue, State};
-use tubetui::config::{self, Config};
+use tubetui::config::{self, Config, PlayerMode};
 use tubetui::domain::{TabId, Video};
 use tubetui::i18n::Lang;
 use tubetui::media::{self, MediaKind};
@@ -256,7 +256,9 @@ impl Runtime {
             if dirty || self.animations.running() {
                 let loading = self.loading_since.map(|t| t.elapsed());
                 let embedded = self.mode().in_pane();
-                let thumbnails = embedded && self.state.config.ui.thumbnails;
+                // Thumbnails need kitty itself, whatever the video mode.
+                let kitty = player::resolve_mode(PlayerMode::Auto, |key| std::env::var(key).ok()) == Mode::Embedded;
+                let thumbnails = kitty && self.state.config.ui.thumbnails;
                 let playing = self.state.active_tab().and_then(|t| self.players.get(&t.id)).map(Player::info);
                 let view = ui::View { embedded, now: now(), loading, opening, thumbnails, playing };
                 let t = Instant::now();
@@ -270,13 +272,18 @@ impl Runtime {
                 self.place_videos(terminal.size()?.into());
                 dbg(format!("place {:?}", t.elapsed()));
                 if thumbnails {
-                    self.thumbs.want(self.state.videos_from_selection(THUMBS_AHEAD).iter().map(|v| v.id.as_str()));
+                    let tab = self.state.active_tab();
+                    let current = tab.and_then(|t| t.playback.video.as_ref()).map(|v| v.id.as_str());
+                    self.thumbs.want(current.into_iter().chain(
+                        self.state.videos_from_selection(THUMBS_AHEAD).iter().map(|v| v.id.as_str()),
+                    ));
                     self.thumbs.show(ui::thumbnail_area(&self.state, terminal.size()?.into()));
                 } else {
                     self.thumbs.show(None);
                 }
                 dirty = false;
             }
+            self.state.video_window = self.mode() == Mode::Window;
             if self.mode() == Mode::Overlay
                 && self.state.active_tab().is_some()
                 && self.grid_checked.is_none_or(|t| t.elapsed() >= OVERLAY_FOLLOW)
@@ -383,6 +390,9 @@ impl Runtime {
                 self.background(move || {
                     Action::Page(id, youtube::search(&query, next.as_deref()).map_err(|e| e.to_string()))
                 });
+            }
+            Effect::Watch { tab, video } => {
+                self.background(move || Action::Watched(tab, youtube::watch(&video).map_err(|e| e.to_string())));
             }
             Effect::ScanBrowsers { id } => {
                 let home = directories::BaseDirs::new().map(|d| d.home_dir().to_owned()).unwrap_or_default();

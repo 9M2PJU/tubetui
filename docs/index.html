@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="es" data-lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tubetui — YouTube en tu terminal</title>
+<meta name="description" content="tubetui: YouTube y tus videos y música locales en la terminal. Pestañas, suscripciones, Ver después, video integrado en kitty, en ventana o superpuesto. Linux, Windows y macOS.">
+<meta property="og:title" content="tubetui — YouTube in your terminal">
+<meta property="og:description" content="Browse and watch YouTube from the terminal: tabs, subscriptions, watch later, embedded video. Linux, Windows, macOS.">
+<meta property="og:image" content="https://polblancoo.github.io/tubetui/preview.png">
+<meta property="og:url" content="https://polblancoo.github.io/tubetui/">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>▶️</text></svg>">
+<style>
+  :root {
+    --bg: #1a1b26; --bg2: #16161e; --panel: #24283b; --line: #3b4261;
+    --fg: #c0caf5; --muted: #737aa2; --blue: #7aa2f7; --cyan: #7dcfff;
+    --magenta: #bb9af7; --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
+    --mono: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html[data-lang="es"] [lang="en"], html[data-lang="en"] [lang="es"] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre, kbd { font-family: var(--mono); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+
+  header { position: sticky; top: 0; z-index: 10; background: rgba(22, 22, 30, .92); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
+  header .wrap { display: flex; align-items: center; gap: 22px; height: 58px; }
+  .logo { font: 700 20px var(--mono); color: var(--fg); }
+  .logo b { color: var(--red); }
+  nav { display: flex; gap: 18px; flex: 1; flex-wrap: wrap; }
+  nav a { color: var(--muted); font-size: 15px; }
+  nav a:hover { color: var(--fg); text-decoration: none; }
+  .lang { background: none; border: 1px solid var(--line); color: var(--fg); border-radius: 6px; padding: 4px 10px; cursor: pointer; font: 13px var(--mono); }
+
+  .hero { padding: 64px 0 36px; text-align: center; }
+  .hero h1 { font: 800 clamp(38px, 7vw, 68px)/1.05 var(--mono); margin: 0 0 14px; }
+  .hero h1 b { color: var(--red); }
+  .hero p.tag { font-size: clamp(18px, 2.4vw, 22px); color: var(--muted); max-width: 720px; margin: 0 auto 28px; }
+  .buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 22px; border-radius: 10px; font-weight: 600; border: 1px solid var(--line); color: var(--fg); background: var(--panel); }
+  .btn:hover { text-decoration: none; border-color: var(--blue); }
+  .btn.primary { background: var(--blue); color: var(--bg2); border-color: var(--blue); }
+  .btn.primary:hover { background: var(--cyan); border-color: var(--cyan); }
+  .small { font-size: 14px; color: var(--muted); margin-top: 12px; }
+  .shot { margin: 40px auto 0; max-width: 1000px; border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 30px 80px rgba(0, 0, 0, .5); display: block; width: 100%; }
+
+  section { padding: 56px 0; border-top: 1px solid var(--line); }
+  section h2 { font: 700 28px var(--mono); margin: 0 0 8px; }
+  section h2 .hash { color: var(--magenta); }
+  section .lead { color: var(--muted); margin: 0 0 28px; }
+
+  .downloads { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
+  .os { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
+  .os.mine { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
+  .os h3 { margin: 0 0 4px; font-size: 20px; display: flex; gap: 10px; align-items: center; }
+  .os .badge { font-size: 12px; color: var(--bg2); background: var(--blue); border-radius: 20px; padding: 1px 9px; display: none; }
+  .os.mine .badge { display: inline; }
+  .os p { color: var(--muted); font-size: 14px; margin: 0 0 14px; }
+  .os .file { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; margin: 8px 0; border-radius: 8px; background: var(--bg2); border: 1px solid var(--line); color: var(--fg); }
+  .os .file:hover { border-color: var(--blue); text-decoration: none; }
+  .os .file span { color: var(--muted); font-size: 13px; }
+  .os .file b { font-family: var(--mono); font-size: 14px; }
+
+  pre { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; overflow-x: auto; font-size: 14px; margin: 10px 0 18px; position: relative; }
+  pre .c { color: var(--muted); }
+  .copy { position: absolute; top: 8px; right: 8px; background: var(--panel); color: var(--muted); border: 1px solid var(--line); border-radius: 6px; font: 12px var(--mono); padding: 2px 8px; cursor: pointer; }
+  .copy:hover { color: var(--fg); }
+
+  .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .feature { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .feature .icon { font-size: 26px; }
+  .feature h3 { margin: 6px 0 6px; font-size: 17px; }
+  .feature p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+  .tabs { display: flex; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+  .tabs button { background: var(--panel); color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 6px 14px; cursor: pointer; font: 14px var(--mono); }
+  .tabs button.on { color: var(--bg2); background: var(--magenta); border-color: var(--magenta); }
+  .pane { display: none; }
+  .pane.on { display: block; }
+
+  .keys { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+  .keys h3 { margin: 0 0 8px; color: var(--cyan); font-size: 16px; }
+  .keys table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  .keys td { padding: 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .keys td:first-child { width: 120px; }
+  kbd { background: var(--bg2); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 0 6px; font-size: 13px; color: var(--cyan); white-space: nowrap; }
+
+  .docs { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+  .docs a { display: block; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; color: var(--fg); }
+  .docs a:hover { border-color: var(--blue); text-decoration: none; }
+  .docs a span { display: block; color: var(--muted); font-size: 14px; }
+
+  .wallet { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 8px 0; }
+  .wallet b { color: var(--magenta); min-width: 110px; }
+  .wallet code { flex: 1; color: var(--green); font-size: 13.5px; word-break: break-all; }
+  .wallet .copy { position: static; }
+
+  footer { border-top: 1px solid var(--line); padding: 28px 0 40px; color: var(--muted); font-size: 14px; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <a class="logo" href="#">▶ <b>tube</b>tui</a>
+    <nav>
+      <a href="#descargas"><span lang="es">Descargas</span><span lang="en">Download</span></a>
+      <a href="#funciones"><span lang="es">Funciones</span><span lang="en">Features</span></a>
+      <a href="#instalar"><span lang="es">Instalar</span><span lang="en">Install</span></a>
+      <a href="#atajos"><span lang="es">Atajos</span><span lang="en">Keys</span></a>
+      <a href="#docs"><span lang="es">Documentación</span><span lang="en">Docs</span></a>
+      <a href="https://github.com/polblancoo/tubetui">GitHub</a>
+    </nav>
+    <button class="lang" id="lang" title="Español / English">EN</button>
+  </div>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <h1>▶ <b>tube</b>tui</h1>
+    <p class="tag">
+      <span lang="es">YouTube, tus suscripciones y tus videos y música locales, en la terminal. Pestañas, Ver después, búsqueda instantánea y video integrado en kitty.</span>
+      <span lang="en">YouTube, your subscriptions and your local videos and music, in the terminal. Tabs, watch later, instant search and video embedded in kitty.</span>
+    </p>
+    <div class="buttons">
+      <a class="btn primary" id="main-download" href="#descargas">⬇ <span lang="es">Descargar</span><span lang="en">Download</span></a>
+      <a class="btn" href="https://github.com/polblancoo/tubetui">★ <span lang="es">Ver en GitHub</span><span lang="en">View on GitHub</span></a>
+    </div>
+    <p class="small">
+      <span lang="es">Gratis y de código abierto · MIT / Apache-2.0 · Linux, Windows y macOS</span>
+      <span lang="en">Free and open source · MIT / Apache-2.0 · Linux, Windows and macOS</span>
+    </p>
+    <img class="shot" src="preview.png" alt="tubetui: búsqueda con vista previa y portada">
+  </div>
+
+  <section id="descargas">
+    <div class="wrap">
+      <h2><span class="hash">#</span> <span lang="es">Descargas</span><span lang="en">Download</span></h2>
+      <p class="lead">
+        <span lang="es">Siempre la última versión. Todas necesitan <a href="https://mpv.io">mpv</a> y <a href="https://github.com/yt-dlp/yt-dlp">yt-dlp</a> (el instalador de Windows los instala por vos).</span>
+        <span lang="en">Always the latest version. All of them need <a href="https://mpv.io">mpv</a> and <a href="https://github.com/yt-dlp/yt-dlp">yt-dlp</a> (the Windows installer installs them for you).</span>
+      </p>
+      <div class="downloads">
+        <div class="os" data-os="windows">
+          <h3>🪟 Windows <span class="badge"><span lang="es">tu sistema</span><span lang="en">your system</span></span></h3>
+          <p><span lang="es">Windows 10 y 11, 64 bits. Se usa desde Windows Terminal.</span><span lang="en">Windows 10 and 11, 64-bit. Use it from Windows Terminal.</span></p>
+          <a class="file" href="https://github.com/polblancoo/tubetui/releases/latest/download/tubetui-x86_64-windows-setup.exe">
+            <b>tubetui-setup.exe</b><span lang="es">instalador</span><span lang="en">installer</span>
+          </a>
+          <a class="file" href="https://github.com/polblancoo/tubetui/releases/latest/download/tubetui-x86_64-windows.zip">
+            <b>tubetui.zip</b><span lang="es">portable</span><span lang="en">portable</span>
+          </a>
+        </div>
+        <div class="os" data-os="linux">
+          <h3>🐧 Linux <span class="badge"><span lang="es">tu sistema</span><span lang="en">your system</span></span></h3>
+          <p><span lang="es">x86_64. Con kitty el video se ve dentro de la app.</span><span lang="en">x86_64. In kitty the video plays inside the app.</span></p>
+          <a class="file" href="https://github.com/polblancoo/tubetui/releases/latest/download/tubetui_amd64.deb">
+            <b>tubetui_amd64.deb</b><span>Debian · Ubuntu · Mint</span>
+          </a>
+          <a class="file" href="https://github.com/polblancoo/tubetui/releases/latest/download/tubetui-x86_64-linux.tar.gz">
+            <b>tubetui-linux.tar.gz</b><span lang="es">cualquier distro</span><span lang="en">any distro</span>
+          </a>
+        </div>
+        <div class="os" data-os="mac">
+          <h3>🍎 macOS <span class="badge"><span lang="es">tu sistema</span><span lang="en">your system</span></span></h3>
+          <p><span lang="es">Apple Silicon (M1 en adelante).</span><span lang="en">Apple Silicon (M1 and later).</span></p>
+          <a class="file" href="https://github.com/polblancoo/tubetui/releases/latest/download/tubetui-aarch64-macos.tar.gz">
+            <b>tubetui-macos.tar.gz</b><span>arm64</span>
+          </a>
+          <a class="file" href="https://crates.io/crates/tubetui">
+            <b>cargo install tubetui</b><span lang="es">Intel y el resto</span><span lang="en">Intel and the rest</span>
+          </a>
+        </div>
+      </div>
+      <p class="small">
+        <span lang="es">Todas las versiones y sus notas: </span><span lang="en">Every version and its notes: </span>
+        <a href="https://github.com/polblancoo/tubetui/releases">GitHub Releases</a> ·
+        <a href="https://crates.io/crates/tubetui">crates.io</a>
+      </p>
+    </div>
+  </section>
+
+  <section id="funciones">
+    <div class="wrap">
+      <h2><span class="hash">#</span> <span lang="es">Funciones</span><span lang="en">Features</span></h2>
+      <p class="lead"><span lang="es">Todo YouTube desde el teclado (o el mouse), sin abrir el navegador.</span><span lang="en">All of YouTube from the keyboard (or the mouse), without opening the browser.</span></p>
+      <div class="features">
+        <div class="feature"><div class="icon">🏠</div>
+          <h3><span lang="es">Inicio y suscripciones</span><span lang="en">Home and subscriptions</span></h3>
+          <p><span lang="es">Tu feed, lo nuevo de tus canales, Descubrir (sin los canales que ya seguís) y Mis canales con su descripción.</span><span lang="en">Your feed, what's new on your channels, Discover (without the ones you follow) and My channels with their description.</span></p></div>
+        <div class="feature"><div class="icon">🔎</div>
+          <h3><span lang="es">Búsqueda en un segundo</span><span lang="en">Search in a second</span></h3>
+          <p><span lang="es">20 resultados y 20 más al bajar, con vista previa y portada. En todo YouTube, en tus canales o dentro de uno.</span><span lang="en">20 results and 20 more as you scroll, with a preview and thumbnail. All of YouTube, your channels or inside one.</span></p></div>
+        <div class="feature"><div class="icon">🎬</div>
+          <h3><span lang="es">Video a tu manera</span><span lang="en">Video your way</span></h3>
+          <p><span lang="es">Integrado en kitty, en una ventana de mpv o superpuesto sobre la app (X11, con la placa de video). Calidad y compresión cambian al vuelo.</span><span lang="en">Embedded in kitty, in an mpv window or laid over the app (X11, GPU decoding). Quality and codec change on the fly.</span></p></div>
+        <div class="feature"><div class="icon">🗂</div>
+          <h3><span lang="es">Pestañas</span><span lang="en">Tabs</span></h3>
+          <p><span lang="es">Un video por pestaña, el audio sigue mientras buscás otra cosa. En ventana aparte, la pestaña muestra la ficha y "A continuación".</span><span lang="en">One video per tab, audio keeps playing while you browse. With a separate window, the tab shows the details and "Up next".</span></p></div>
+        <div class="feature"><div class="icon">🕒</div>
+          <h3><span lang="es">Ver después y descargas</span><span lang="en">Watch later and downloads</span></h3>
+          <p><span lang="es">Guardá videos con <kbd>l</kbd>, suscribite con <kbd>s</kbd>, descargá con subtítulos con <kbd>d</kbd>.</span><span lang="en">Save videos with <kbd>l</kbd>, subscribe with <kbd>s</kbd>, download with subtitles with <kbd>d</kbd>.</span></p></div>
+        <div class="feature"><div class="icon">💬</div>
+          <h3><span lang="es">Subtítulos y doblaje</span><span lang="en">Subtitles and dubbing</span></h3>
+          <p><span lang="es">Original, subtítulos o audio doblado, en el idioma que elijas, sin cortar el video.</span><span lang="en">Original, subtitles or dubbed audio, in the language you choose, without stopping the video.</span></p></div>
+        <div class="feature"><div class="icon">🔐</div>
+          <h3><span lang="es">Tu sesión, sin contraseñas</span><span lang="en">Your login, no passwords</span></h3>
+          <p><span lang="es">Toma la sesión de tu navegador (Brave, Chrome, Firefox, Edge… también snap y flatpak) o de un cookies.txt.</span><span lang="en">Uses your browser's login (Brave, Chrome, Firefox, Edge… snap and flatpak too) or a cookies.txt.</span></p></div>
+        <div class="feature"><div class="icon">📼</div>
+          <h3><span lang="es">Tus archivos</span><span lang="en">Your files</span></h3>
+          <p><span lang="es">Tus videos y tu música locales, con cola de reproducción.</span><span lang="en">Your local videos and music, with a play queue.</span></p></div>
+        <div class="feature"><div class="icon">✨</div>
+          <h3><span lang="es">Liviana y linda</span><span lang="en">Light and pretty</span></h3>
+          <p><span lang="es">25 MB de memoria, arranca al instante. Animaciones, íconos y mouse, todo configurable. Español e inglés.</span><span lang="en">25 MB of memory, starts instantly. Animations, icons and mouse, all configurable. Spanish and English.</span></p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="instalar">
+    <div class="wrap">
+      <h2><span class="hash">#</span> <span lang="es">Instalar</span><span lang="en">Install</span></h2>
+      <p class="lead"><span lang="es">Elegí tu sistema.</span><span lang="en">Pick your system.</span></p>
+      <div class="tabs" data-group="install">
+        <button data-pane="i-windows">Windows</button>
+        <button data-pane="i-debian">Debian / Ubuntu</button>
+        <button data-pane="i-linux">Linux</button>
+        <button data-pane="i-mac">macOS</button>
+        <button data-pane="i-cargo">cargo</button>
+      </div>
+      <div class="pane" id="i-windows">
+        <p><span lang="es">Bajá y ejecutá <a href="https://github.com/polblancoo/tubetui/releases/latest/download/tubetui-x86_64-windows-setup.exe">tubetui-setup.exe</a>: instala para tu usuario (sin administrador), agrega tubetui al menú Inicio y al PATH, y con la casilla marcada instala mpv y yt-dlp. A mano:</span>
+        <span lang="en">Download and run <a href="https://github.com/polblancoo/tubetui/releases/latest/download/tubetui-x86_64-windows-setup.exe">tubetui-setup.exe</a>: it installs for your user (no administrator), adds tubetui to the Start menu and the PATH and, with its box ticked, installs mpv and yt-dlp. By hand:</span></p>
+<pre><code>winget install --id shinchiro.mpv -e
+winget install --id yt-dlp.yt-dlp -e
+tubetui</code></pre>
+        <p class="small"><span lang="es">En Windows el video se abre en una ventana de mpv. Para la sesión de YouTube conviene Firefox: Chrome y Edge cifran sus cookies de una forma que yt-dlp no siempre puede leer.</span><span lang="en">On Windows the video opens in an mpv window. For the YouTube login prefer Firefox: Chrome and Edge encrypt their cookies in a way yt-dlp cannot always read.</span></p>
+      </div>
+      <div class="pane" id="i-debian">
+<pre><code><span class="c"># mpv viene como dependencia; yt-dlp mejor actualizado con pipx</span>
+wget https://github.com/polblancoo/tubetui/releases/latest/download/tubetui_amd64.deb
+sudo apt install ./tubetui_amd64.deb
+pipx install yt-dlp
+tubetui</code></pre>
+      </div>
+      <div class="pane" id="i-linux">
+<pre><code>curl -L https://github.com/polblancoo/tubetui/releases/latest/download/tubetui-x86_64-linux.tar.gz | tar xz
+install -Dm755 tubetui/tubetui ~/.local/bin/tubetui
+<span class="c"># y mpv + yt-dlp con tu gestor de paquetes, por ejemplo:</span>
+sudo pacman -S mpv yt-dlp      <span class="c"># Arch</span>
+sudo dnf install mpv yt-dlp    <span class="c"># Fedora</span></code></pre>
+      </div>
+      <div class="pane" id="i-mac">
+<pre><code>brew install mpv yt-dlp
+curl -L https://github.com/polblancoo/tubetui/releases/latest/download/tubetui-aarch64-macos.tar.gz | tar xz
+install -m755 tubetui/tubetui /usr/local/bin/tubetui
+<span class="c"># la primera vez, si macOS lo bloquea:</span>
+xattr -d com.apple.quarantine /usr/local/bin/tubetui</code></pre>
+      </div>
+      <div class="pane" id="i-cargo">
+<pre><code><span class="c"># cualquier sistema con Rust (rustup.rs)</span>
+cargo install tubetui</code></pre>
+      </div>
+      <p class="small"><span lang="es">Para ver el video dentro de la app usá <a href="https://sw.kovidgoyal.net/kitty/">kitty</a>. En cualquier otra terminal se abre en una ventana.</span><span lang="en">To watch the video inside the app use <a href="https://sw.kovidgoyal.net/kitty/">kitty</a>. In any other terminal it opens in a window.</span></p>
+    </div>
+  </section>
+
+  <section id="atajos">
+    <div class="wrap">
+      <h2><span class="hash">#</span> <span lang="es">Atajos</span><span lang="en">Keys</span></h2>
+      <p class="lead"><span lang="es">La línea de abajo de la app siempre muestra las teclas que sirven en ese momento; <kbd>Ctrl+y</kbd> <kbd>?</kbd> las muestra todas.</span><span lang="en">The app's bottom line always shows the keys that work right now; <kbd>Ctrl+y</kbd> <kbd>?</kbd> shows them all.</span></p>
+      <div class="keys">
+        <div>
+          <h3><span lang="es">Listas</span><span lang="en">Lists</span></h3>
+          <table>
+            <tr><td><kbd>↑↓</kbd> <kbd>j</kbd><kbd>k</kbd></td><td><span lang="es">moverse</span><span lang="en">move</span></td></tr>
+            <tr><td><kbd>Enter</kbd></td><td><span lang="es">ver · abrir canal</span><span lang="en">play · open channel</span></td></tr>
+            <tr><td><kbd>/</kbd></td><td><span lang="es">buscar</span><span lang="en">search</span></td></tr>
+            <tr><td><kbd>l</kbd> <kbd>s</kbd> <kbd>d</kbd> <kbd>c</kbd></td><td><span lang="es">Ver después · suscribirse · descargar · canal</span><span lang="en">watch later · subscribe · download · channel</span></td></tr>
+            <tr><td><kbd>Esc</kbd></td><td><span lang="es">volver</span><span lang="en">back</span></td></tr>
+          </table>
+        </div>
+        <div>
+          <h3><span lang="es">Mirando un video</span><span lang="en">Watching</span></h3>
+          <table>
+            <tr><td><kbd>espacio</kbd></td><td><span lang="es">pausa</span><span lang="en">pause</span></td></tr>
+            <tr><td><kbd>←→</kbd> <kbd>↑↓</kbd></td><td><span lang="es">±5 s · volumen</span><span lang="en">±5 s · volume</span></td></tr>
+            <tr><td><kbd>v</kbd> <kbd>b</kbd></td><td><span lang="es">calidad · compresión</span><span lang="en">quality · codec</span></td></tr>
+            <tr><td><kbd>j</kbd> <kbd>i</kbd> <kbd>o</kbd></td><td><span lang="es">subtítulos · original/doblado · idioma</span><span lang="en">subtitles · original/dubbed · language</span></td></tr>
+            <tr><td><kbd>f</kbd> <kbd>Tab</kbd></td><td><span lang="es">pantalla completa · A continuación</span><span lang="en">fullscreen · Up next</span></td></tr>
+          </table>
+        </div>
+        <div>
+          <h3><span lang="es">Siempre: Ctrl+y y una tecla</span><span lang="en">Anywhere: Ctrl+y, then a key</span></h3>
+          <table>
+            <tr><td><kbd>n</kbd> <kbd>p</kbd> <kbd>0-9</kbd></td><td><span lang="es">pestañas</span><span lang="en">tabs</span></td></tr>
+            <tr><td><kbd>x</kbd></td><td><span lang="es">cerrar la pestaña</span><span lang="en">close the tab</span></td></tr>
+            <tr><td><kbd>b</kbd> <kbd>m</kbd></td><td><span lang="es">mostrar el menú · ir al menú</span><span lang="en">show the menu · go to it</span></td></tr>
+            <tr><td><kbd>l</kbd></td><td>español ⇄ English</td></tr>
+            <tr><td><kbd>?</kbd> <kbd>q</kbd></td><td><span lang="es">ayuda · salir</span><span lang="en">help · quit</span></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="docs">
+    <div class="wrap">
+      <h2><span class="hash">#</span> <span lang="es">Documentación</span><span lang="en">Documentation</span></h2>
+      <p class="lead"><span lang="es">Todo lo que la app puede hacer y cómo configurarla.</span><span lang="en">Everything the app does and how to set it up.</span></p>
+      <div class="docs">
+        <a href="https://github.com/polblancoo/tubetui#readme">📖 README<span lang="es">funciones, teclas, configuración completa</span><span lang="en">features, keys, the whole configuration</span></a>
+        <a href="https://github.com/polblancoo/tubetui#overlay-mode-x11">🎬 <span lang="es">Modos de video</span><span lang="en">Video modes</span><span lang="es">integrado, ventana o superpuesto</span><span lang="en">embedded, window or overlay</span></a>
+        <a href="https://github.com/polblancoo/tubetui/blob/main/docs/benchmark.md">📊 Benchmark<span lang="es">contra ytfzf, youtube-tui y el script original</span><span lang="en">against ytfzf, youtube-tui and the original script</span></a>
+        <a href="https://github.com/polblancoo/tubetui/releases">📝 <span lang="es">Novedades</span><span lang="en">Changelog</span><span lang="es">qué trae cada versión</span><span lang="en">what each version brings</span></a>
+        <a href="https://github.com/polblancoo/tubetui/issues">🐞 <span lang="es">Reportar un problema</span><span lang="en">Report a problem</span><span lang="es">o pedir una función</span><span lang="en">or ask for a feature</span></a>
+        <a href="https://docs.rs/crate/tubetui/latest">📦 crates.io / docs.rs<span lang="es">el código y sus versiones</span><span lang="en">the code and its versions</span></a>
+      </div>
+    </div>
+  </section>
+
+  <section id="apoyar">
+    <div class="wrap">
+      <h2><span class="hash">#</span> <span lang="es">Apoyar el proyecto</span><span lang="en">Support the project</span></h2>
+      <p class="lead"><span lang="es">tubetui es gratis. Si te sirve, una estrella en GitHub ayuda; y si querés, una donación:</span><span lang="en">tubetui is free. If you find it useful, a star on GitHub helps; and if you like, a donation:</span></p>
+      <div class="wallet"><b>Solana</b><code>G5PVFgymo47BE3SoxzB9RvTp2ZR8z6tkXLL8hPFJu1Gm</code><button class="copy">copiar</button></div>
+      <div class="wallet"><b>Ethereum</b><code>0xf0666bcA8F1b1f910E47D0f8e61185EB0E343a22</code><button class="copy">copiar</button></div>
+      <div class="wallet"><b>BNB (BSC)</b><code>0xf0666bcA8F1b1f910E47D0f8e61185EB0E343a22</code><button class="copy">copiar</button></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    ▶ tubetui · MIT / Apache-2.0 ·
+    <a href="https://github.com/polblancoo/tubetui">GitHub</a> ·
+    <a href="https://crates.io/crates/tubetui">crates.io</a> ·
+    <span lang="es">hecho con</span><span lang="en">made with</span> Rust, ratatui, mpv &amp; yt-dlp
+  </div>
+</footer>
+
+<script>
+  // Language: the saved choice, else the browser's.
+  const root = document.documentElement;
+  const setLang = (lang) => {
+    root.dataset.lang = lang;
+    root.lang = lang;
+    document.getElementById("lang").textContent = lang === "es" ? "EN" : "ES";
+    document.querySelectorAll(".copy").forEach((b) => (b.textContent = lang === "es" ? "copiar" : "copy"));
+    localStorage.setItem("lang", lang);
+  };
+  setLang(localStorage.getItem("lang") || (navigator.language.startsWith("es") ? "es" : "en"));
+  document.getElementById("lang").onclick = () => setLang(root.dataset.lang === "es" ? "en" : "es");
+
+  // The visitor's system: highlight its downloads and install steps.
+  const ua = navigator.userAgent;
+  const os = /Windows/.test(ua) ? "windows" : /Mac/.test(ua) ? "mac" : /Linux|X11/.test(ua) ? "linux" : null;
+  const card = os && document.querySelector(`.os[data-os="${os}"]`);
+  if (card) {
+    card.classList.add("mine");
+    const main = document.getElementById("main-download");
+    main.href = card.querySelector(".file").href;
+  }
+
+  // Install tabs.
+  const show = (id) => {
+    document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.pane === id));
+    document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("on", p.id === id));
+  };
+  document.querySelectorAll(".tabs button").forEach((b) => (b.onclick = () => show(b.dataset.pane)));
+  show({ windows: "i-windows", mac: "i-mac", linux: "i-debian" }[os] || "i-cargo");
+
+  // Copy buttons: code blocks and wallets.
+  document.querySelectorAll("pre").forEach((pre) => {
+    const b = document.createElement("button");
+    b.className = "copy";
+    pre.appendChild(b);
+  });
+  document.querySelectorAll(".copy").forEach((b) => {
+    b.textContent = root.dataset.lang === "es" ? "copiar" : "copy";
+    b.onclick = () => {
+      const source = b.parentElement.querySelector("code");
+      const text = [...source.childNodes].filter((n) => !(n.classList && n.classList.contains("c"))).map((n) => n.textContent).join("");
+      navigator.clipboard.writeText(text.replace(/[ \t]+$/gm, "").trim());
+      b.textContent = "✓";
+      setTimeout(() => (b.textContent = root.dataset.lang === "es" ? "copiar" : "copy"), 1200);
+    };
+  });
+</script>
+</body>
+</html>

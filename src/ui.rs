@@ -16,7 +16,9 @@ use crate::i18n::Lang;
 use crate::{keymap, session};
 use crate::media::{LocalFile, MediaKind};
 use crate::player::Info;
-use crate::youtube::Items;
+#[cfg(test)]
+use crate::youtube::Watch;
+use crate::youtube::{Items, compact};
 
 pub const SIDEBAR_WIDTH: u16 = 26;
 /// Width of the preview panel next to video lists.
@@ -241,6 +243,12 @@ pub fn spot(state: &State, playing: Option<&Info>, screen: Rect, x: u16, y: u16)
             let fraction = (f64::from(x - bar.x) + 0.5) / f64::from(bar.width);
             return Some(Spot::Progress((fraction * duration) as u32));
         }
+        if state.video_window {
+            // The video is elsewhere: here are its details and the related list.
+            state.related_shown()?;
+            let list = Block::bordered().inner(watch_layout(Block::bordered().inner(areas.content)).related);
+            return list_row(list, tab.related, tab.related_videos().len(), at);
+        }
         let inner = Block::bordered().inner(areas.content);
         return (!tab.playback.audio_only && inner.contains(at)).then_some(Spot::Video);
     }
@@ -254,14 +262,18 @@ pub fn spot(state: &State, playing: Option<&Info>, screen: Rect, x: u16, y: u16)
         Items::About => return None,
         _ => rest,
     };
-    let inner = Block::bordered().inner(list);
+    list_row(Block::bordered().inner(list), listing.selected, listing.items.len(), at)
+}
+
+/// The row of a list (drawn in `inner`, `selected` of `len`) at `at`.
+fn list_row(inner: Rect, selected: usize, len: usize, at: Position) -> Option<Spot> {
     if !inner.contains(at) || inner.height == 0 {
         return None;
     }
     // A list drawn from offset 0 scrolls just enough to show the selection last.
-    let offset = listing.selected.saturating_sub(usize::from(inner.height) - 1);
-    let row = offset + usize::from(y - inner.y);
-    (row < listing.items.len()).then_some(Spot::Row(row))
+    let offset = selected.saturating_sub(usize::from(inner.height) - 1);
+    let row = offset + usize::from(at.y - inner.y);
+    (row < len).then_some(Spot::Row(row))
 }
 
 /// The cells the embedded video may cover: the active video tab, unless a
@@ -333,8 +345,8 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
                     Line::from(bouncing_bar(30, elapsed)).fg(BLUE),
                 ])
                 .alignment(Alignment::Center)
-            } else if view.embedded {
-                Paragraph::default()
+            } else if view.embedded || (state.video_window && playback.video.is_some()) {
+                Paragraph::default() // the video, or the details drawn below
             } else {
                 Paragraph::new(lang.pick("Se reproduce en una ventana de mpv", "Playing in an mpv window")).fg(MUTED)
             };
@@ -346,6 +358,9 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
                 }
             }
             frame.render_widget(body.block(block), areas.content);
+            if state.video_window && !view.embedded {
+                draw_watch(frame, state, icons, view, tab, Block::bordered().inner(areas.content));
+            }
         }
     }
     draw_status(frame, state, icons, view, areas.status);
@@ -356,6 +371,90 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
     if let Some(u) = &state.confirm {
         draw_confirm(frame, &u.name, lang);
     }
+}
+
+/// Cells of a video tab whose video plays in its own window.
+struct WatchLayout {
+    thumbnail: Rect,
+    details: Rect,
+    related: Rect,
+}
+
+/// Columns of the thumbnail on a video tab.
+const WATCH_THUMBNAIL_WIDTH: u16 = 36;
+
+fn watch_layout(inner: Rect) -> WatchLayout {
+    let width = WATCH_THUMBNAIL_WIDTH.min(inner.width / 3);
+    let rows = (u32::from(width) * 9 / 32) as u16;
+    let [card, _, related] =
+        Layout::vertical([Constraint::Length(rows.max(7)), Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
+    let [thumbnail, _, details] =
+        Layout::horizontal([Constraint::Length(width), Constraint::Length(2), Constraint::Fill(1)]).areas(card);
+    WatchLayout { thumbnail: Rect { height: rows.min(card.height), ..thumbnail }, details, related }
+}
+
+/// The video plays in its own window: the tab shows its details and what to watch next.
+fn draw_watch(frame: &mut Frame, state: &State, icons: &Icons, view: &View, tab: &Tab, inner: Rect) {
+    let lang = state.lang();
+    let Some(video) = &tab.playback.video else { return };
+    let layout = watch_layout(inner);
+    let details = if view.thumbnails {
+        let middle = Rect { y: layout.thumbnail.y + layout.thumbnail.height / 2, height: 1, ..layout.thumbnail };
+        frame.render_widget(Paragraph::new("⏳").fg(MUTED).alignment(Alignment::Center), middle);
+        layout.details
+    } else {
+        Rect { x: inner.x, width: inner.width, ..layout.details }
+    };
+    let watch = tab.watch.as_ref();
+    let mut channel = vec![Span::styled(video.channel.as_str(), MAGENTA)];
+    if let Some(subscribers) = watch.and_then(|w| w.subscribers.as_deref()) {
+        channel.push(Span::styled(format!(" · {subscribers} {}", lang.pick("suscriptores", "subscribers")), MUTED));
+    }
+    if video.channel_id.as_ref().is_some_and(|c| state.subs.contains(c)) {
+        channel.push(Span::styled(format!("  {} {}", icons.subscribed, lang.pick("Suscripto", "Subscribed")), GREEN));
+    }
+    let mut numbers = Vec::new();
+    if let Some(views) = watch.and_then(|w| w.views) {
+        numbers.push(format!("{} {}", compact(views), lang.pick("vistas", "views")));
+    }
+    if let Some(likes) = watch.and_then(|w| w.likes) {
+        numbers.push(format!("👍 {}", compact(likes)));
+    }
+    let mut when = vec![video.duration_label()];
+    if let Some(ts) = watch.and_then(|w| w.published).or(video.published) {
+        let (date, age) = date_labels(ts, view.now, lang);
+        when.push(format!("{age} ({date})"));
+    }
+    let mut lines = vec![Line::from(video.title.as_str()).fg(FG).bold(), Line::from(""), Line::from(channel)];
+    for row in [numbers, when] {
+        let row: Vec<String> = row.into_iter().filter(|p| !p.is_empty()).collect();
+        if !row.is_empty() {
+            lines.push(Line::from(row.join(" · ")).fg(MUTED));
+        }
+    }
+    if state.later.iter().any(|l| l.id == video.id) {
+        lines.push(Line::from(format!("{} {}", icons.later, lang.pick("En Ver después", "In Watch later"))).fg(CYAN));
+    }
+    if let Some(elapsed) = view.opening {
+        lines.push(Line::from(loading_text(lang.pick("el video", "the video"), elapsed, lang)).fg(YELLOW));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }), details);
+
+    let related = tab.related_videos();
+    let focused = tab.on_related && !related.is_empty();
+    let title = match watch {
+        None => format!(" {} ", lang.pick("Buscando videos relacionados…", "Looking for related videos…")),
+        Some(_) if related.is_empty() => format!(" {} ", lang.pick("Sin videos relacionados", "No related videos")),
+        Some(_) if focused => format!(" {} · {} ", lang.pick("A continuación", "Up next"), related.len()),
+        Some(_) => format!(" {} · {} · Tab ", lang.pick("A continuación", "Up next"), related.len()),
+    };
+    let highlight = if focused { Style::new().bg(HIGHLIGHT).add_modifier(Modifier::BOLD) } else { Style::new() };
+    let list = List::new(related.iter().map(|v| video_row(state, icons, view, v)))
+        .block(panel(title, if focused { BLUE } else { MUTED }))
+        .highlight_symbol(if focused { "▌" } else { " " })
+        .highlight_style(highlight);
+    let selected = (!related.is_empty()).then_some(tab.related);
+    frame.render_stateful_widget(list, layout.related, &mut ListState::default().with_selected(selected));
 }
 
 fn tab_icon<'a>(icons: &'a Icons, tab: &Tab) -> &'a str {
@@ -531,6 +630,11 @@ fn thumbnail_cells(preview: Rect) -> Rect {
 pub fn thumbnail_area(state: &State, screen: Rect) -> Option<(String, Rect)> {
     if state.help || state.confirm.is_some() || state.prompt == Some(Prompt::CookiesFile) {
         return None;
+    }
+    if let Some(tab) = state.active_tab() {
+        let video = tab.playback.video.as_ref().filter(|_| state.video_window && !state.fullscreen)?;
+        let inner = Block::bordered().inner(areas(screen, state.sidebar).content);
+        return Some((video.id.clone(), watch_layout(inner).thumbnail)).filter(|(_, cells)| cells.height > 0);
     }
     let video = state.videos_from_selection(0).first()?;
     let (_, list) = split_prompt(state, areas(screen, state.sidebar).content);
@@ -913,8 +1017,20 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
             Prompt::Videos { .. } => rows(keymap::IN_SEARCH),
             _ => vec![key("Enter", "aceptar", "accept"), key("Esc", "cancelar", "cancel")],
         }
+    } else if state.key_context().related {
+        vec![
+            key("Enter", "ver", "play"),
+            key("↑ ↓", "elegir", "choose"),
+            key("Tab", "volver al video", "back to the video"),
+            key("l", "ver después", "watch later"),
+            key("c", "canal", "channel"),
+            key("espacio", "pausa", "pause"),
+        ]
     } else if state.active_tab().is_some() {
         let mut keys = rows(keymap::IN_TAB);
+        if state.related_shown().is_some() {
+            keys.insert(0, key("Tab", "A continuación", "Up next"));
+        }
         keys.extend(rows(keymap::ON_VIDEO));
         keys
     } else if state.focus == Focus::Menu || state.listing().is_none() {
@@ -1562,6 +1678,43 @@ mod tests {
         assert!(matches!(middle, Some(Spot::Progress(49..=51))), "{middle:?}");
         s.update(Action::ToggleHelp);
         assert_eq!(spot_at(&s, (80, 20)), None, "the help covers everything");
+    }
+
+    #[test]
+    fn video_tab_in_window_mode_shows_details_and_related() {
+        let mut s = with_items(Items::Videos(vec![video("a")]));
+        s.video_window = true;
+        s.update(Action::Enter);
+        let tab = s.active_tab().unwrap().id;
+        let screen = render_with(&s, &View { embedded: false, ..VIEW });
+        assert!(screen.contains("Buscando videos relacionados"), "{screen}");
+        let watch = Watch {
+            views: Some(5771),
+            likes: Some(739),
+            published: None,
+            subscribers: Some("559K".into()),
+            related: vec![video("r1"), video("r2")],
+        };
+        s.update(Action::Watched(tab, Ok(watch)));
+        let view = View { embedded: false, ..VIEW };
+        let screen = render_with(&s, &view);
+        for text in ["title a", "chan a · 559K suscriptores", "5 k vistas", "A continuación · 2 · Tab", "title r2"] {
+            assert!(screen.contains(text), "{text}\n{screen}");
+        }
+        assert!(!screen.contains("ventana de mpv"));
+        let screen_area = Rect::new(0, 0, 130, 40);
+        let (id, cells) = thumbnail_area(&s, screen_area).unwrap();
+        assert_eq!(id, "a");
+        assert_eq!((cells.width, cells.height), (34, 34 * 9 / 32), "a third of the tab, at most 36 columns");
+        let (x, y) = find(&screen, "title r2  1:00");
+        assert_eq!(spot(&s, None, screen_area, x, y), Some(Spot::Row(1)));
+        assert_eq!(hints(&s)[0].0, "Tab");
+        s.update(Action::ToggleFocus);
+        let screen = render_with(&s, &view);
+        assert!(screen.contains("A continuación · 2 "), "{screen}");
+        assert_eq!(hints(&s)[0].1, "ver");
+        s.video_window = false;
+        assert_eq!(thumbnail_area(&s, screen_area), None, "embedded: the video covers the tab");
     }
 
     #[test]

@@ -20,6 +20,8 @@ pub struct KeyContext {
     pub typing: bool,
     /// A video tab is active.
     pub in_tab: bool,
+    /// ... and its related list has the keys.
+    pub related: bool,
 }
 
 pub const SEEK_SECONDS: i32 = 5;
@@ -89,6 +91,7 @@ pub const IN_TAB: &[(&str, Text)] = &[
     ("i", Text::new("modo: subtítulos → original → doblado", "mode: subtitles → original → dubbed")),
     ("o", Text::new("otro idioma (es → en → pt …)", "another language (es → en → pt …)")),
     (". ,", Text::new("música: siguiente / anterior", "music: next / previous")),
+    ("Tab", Text::new("videos relacionados (en ventana)", "related videos (in a window)")),
 ];
 
 /// `(keys, description)` rows of a table, in `lang`.
@@ -138,7 +141,11 @@ pub fn map(key: KeyEvent, ctx: KeyContext) -> Option<Action> {
         KeyCode::Char('c') => return Some(Action::OpenChannel),
         _ => {}
     }
-    if ctx.in_tab { player(key.code) } else { lists(key.code) }
+    match (ctx.in_tab, ctx.related) {
+        (true, true) => related(key.code).or_else(|| player(key.code)),
+        (true, false) => player(key.code),
+        _ => lists(key.code),
+    }
 }
 
 fn prefixed(code: KeyCode) -> Action {
@@ -177,8 +184,20 @@ fn player(code: KeyCode) -> Option<Action> {
         KeyCode::Char('b') => Some(Action::CycleCodec),
         KeyCode::Char('.') => Some(Action::NextTrack),
         KeyCode::Char('f') => Some(Action::ToggleFullscreen),
+        KeyCode::Tab => Some(Action::ToggleFocus),
         KeyCode::Esc => Some(Action::Back),
         KeyCode::Char(',') => Some(Action::PrevTrack),
+        _ => None,
+    }
+}
+
+/// The related videos of a tab: move and open; the rest still drives the player.
+fn related(code: KeyCode) -> Option<Action> {
+    match code {
+        KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
+        KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
+        KeyCode::Enter => Some(Action::Enter),
+        KeyCode::Tab | KeyCode::Esc => Some(Action::ToggleFocus),
         _ => None,
     }
 }
@@ -226,7 +245,7 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
-    const LISTS: KeyContext = KeyContext { prefix: false, help: false, confirm: false, typing: false, in_tab: false };
+    const LISTS: KeyContext = KeyContext { prefix: false, help: false, confirm: false, typing: false, in_tab: false, related: false };
     const TYPING: KeyContext = KeyContext { typing: true, ..LISTS };
     const TAB: KeyContext = KeyContext { in_tab: true, ..LISTS };
     const PREFIXED: KeyContext = KeyContext { prefix: true, ..LISTS };

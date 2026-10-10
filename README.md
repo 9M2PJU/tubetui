@@ -7,6 +7,8 @@ their own window elsewhere. Every video opens in its own tab.
 
 > Interface in English and Spanish (`Ctrl+y l` switches). Early but usable:
 > feedback welcome.
+>
+> **Website and downloads:** https://polblancoo.github.io/tubetui/
 
 ![Search results with the preview panel and the selected video's thumbnail](https://raw.githubusercontent.com/polblancoo/tubetui/main/docs/preview.png)
 
@@ -22,6 +24,9 @@ their own window elsewhere. Every video opens in its own tab.
   you scroll), only in your channels, or inside a channel (`Tab` switches the
   scope); search channels (with their description, whole in the side panel)
 - A **preview** of the selected video with its **thumbnail** (in kitty)
+- With the video in its own window, its tab shows the **video's details**
+  (thumbnail, subscribers, views, likes, date) and **Up next**: `Tab` moves
+  into it, `Enter` opens one in a new tab
 - A **progress bar** under the video (played, downloaded, rest) and its
   volume, resolution and codec on top
 - **Mouse**: click to select, double click to open, wheel to scroll (on the
@@ -63,6 +68,19 @@ their own window elsewhere. Every video opens in its own tab.
 - Optional: `wmctrl` (X11) for window fullscreen
 
 ## Install
+
+Ready-made packages for every release are on the
+[website](https://polblancoo.github.io/tubetui/#descargas) and in
+[GitHub Releases](https://github.com/polblancoo/tubetui/releases/latest):
+
+- **Windows**: `tubetui-x86_64-windows-setup.exe` (installs for your user,
+  adds tubetui to the PATH and the Start menu, and can install mpv and yt-dlp
+  with winget), or the portable `.zip`
+- **Debian / Ubuntu / Mint**: `sudo apt install ./tubetui_amd64.deb`
+- **Other Linux**: `tubetui-x86_64-linux.tar.gz`
+- **macOS (Apple Silicon)**: `tubetui-aarch64-macos.tar.gz`
+
+Or from source, anywhere Rust runs:
 
 ```sh
 cargo install tubetui

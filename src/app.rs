@@ -15,7 +15,7 @@ use crate::domain::{TabId, Video};
 use crate::i18n::Lang;
 use crate::keymap::KeyContext;
 use crate::media::{LocalFile, MediaKind, parse_dirs};
-use crate::youtube::{Items, SearchPage, Source};
+use crate::youtube::{Items, SearchPage, Source, Watch};
 
 /// Lists that are filtered afterwards ask YouTube for more videos.
 pub const FILTERED_LIMIT: u32 = 200;
@@ -229,6 +229,8 @@ pub enum ListKind {
     Later,
     /// A channel's videos; `/` searches inside it.
     Channel(ChannelRef),
+    /// "Mis canales": unsubscribing takes the channel out.
+    MyChannels,
     Settings,
 }
 
@@ -287,6 +289,8 @@ pub enum Action {
     Page(u64, Result<SearchPage, String>),
     /// Cached channel ids, read at startup.
     SubsLoaded(HashSet<String>),
+    /// The watch page of a tab's video arrived.
+    Watched(TabId, Result<Watch, String>),
     /// The login was (re)read. `cookies` is for the runtime; `subs` are my channels.
     SessionReady {
         cookies: Option<PathBuf>,
@@ -354,6 +358,11 @@ pub enum Action {
 /// Side effects requested by `update`, performed by the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    /// Fetch the details and related videos of a tab's video.
+    Watch {
+        tab: TabId,
+        video: String,
+    },
     Load {
         id: u64,
         source: Source,
@@ -465,6 +474,22 @@ impl Playback {
 pub struct Tab {
     pub id: TabId,
     pub playback: Playback,
+    /// Details and "up next" of its YouTube video, once fetched.
+    pub watch: Option<Watch>,
+    /// Selected row of `watch.related`.
+    pub related: usize,
+    /// The keys move in the related list instead of driving the player.
+    pub on_related: bool,
+}
+
+impl Tab {
+    fn new(id: TabId, playback: Playback) -> Self {
+        Self { id, playback, watch: None, related: 0, on_related: false }
+    }
+
+    pub fn related_videos(&self) -> &[Video] {
+        self.watch.as_ref().map_or(&[], |w| &w.related)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,6 +537,9 @@ pub struct State {
     pub active: usize,
     pub status: String,
     pub quit: bool,
+    /// Videos play in their own window, so the video tab has room for its
+    /// details and related videos (set by the runtime).
+    pub video_window: bool,
     pending: Option<Pending>,
     next_tab: u64,
     next_request: u64,
@@ -538,6 +566,7 @@ impl State {
             active: 0,
             status: String::new(),
             quit: false,
+            video_window: false,
             pending: None,
             next_tab: 0,
             next_request: 0,
@@ -569,6 +598,20 @@ impl State {
         self.active.checked_sub(1).and_then(|i| self.tabs.get(i))
     }
 
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.active.checked_sub(1).and_then(|i| self.tabs.get_mut(i))
+    }
+
+    /// The active tab shows its related videos (video in a window, list fetched).
+    pub fn related_shown(&self) -> Option<&Tab> {
+        self.active_tab().filter(|t| self.video_window && !t.playback.audio_only && !t.related_videos().is_empty())
+    }
+
+    /// The related list of the active tab takes the keys.
+    fn on_related(&self) -> bool {
+        self.related_shown().is_some_and(|t| t.on_related)
+    }
+
     pub fn listing(&self) -> Option<&Listing> {
         self.stack.last()
     }
@@ -580,6 +623,7 @@ impl State {
             confirm: self.confirm.is_some(),
             typing: self.prompt.is_some(),
             in_tab: self.active_tab().is_some(),
+            related: self.on_related(),
         }
     }
 
@@ -691,16 +735,35 @@ impl State {
                 self.focus = Focus::Menu;
                 return self.open_section(*section);
             }
+            Action::Select(row) if self.related_shown().is_some() => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.related = row.min(tab.related_videos().len().saturating_sub(1));
+                    tab.on_related = true;
+                }
+            }
             Action::Select(row) => {
                 let Some(listing) = self.stack.last_mut().filter(|_| self.active == 0) else { return Vec::new() };
                 listing.selected = row.min(listing.items.len().saturating_sub(1));
                 self.focus = Focus::List;
                 return self.more_if_near_the_end();
             }
+            Action::Scroll(rows) if self.related_shown().is_some() => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.on_related = true;
+                }
+                return self.move_selection(rows);
+            }
             Action::Scroll(rows) => {
                 if self.active == 0 && !self.stack.is_empty() {
                     self.focus = Focus::List;
                     return self.move_selection(rows);
+                }
+            }
+            Action::ToggleFocus if self.active_tab().is_some() => {
+                if self.related_shown().is_some()
+                    && let Some(tab) = self.active_tab_mut()
+                {
+                    tab.on_related = !tab.on_related;
                 }
             }
             Action::ToggleFocus => {
@@ -727,6 +790,12 @@ impl State {
             Action::Loaded(id, result) => self.loaded(id, result, None),
             Action::Page(id, result) => self.page(id, result),
             Action::SubsLoaded(subs) => self.subs = subs,
+            Action::Watched(id, result) => {
+                // Without details the tab just stays as it is.
+                if let (Some(tab), Ok(watch)) = (self.tabs.iter_mut().find(|t| t.id == id), result) {
+                    tab.watch = Some(watch);
+                }
+            }
             Action::SessionReady { subs, .. } => return self.session_ready(subs),
             Action::CookiesImported(Ok(path)) => {
                 self.status = self
@@ -866,6 +935,12 @@ impl State {
 
     fn move_selection(&mut self, delta: isize) -> Vec<Effect> {
         let step = |value: usize, len: usize| value.saturating_add_signed(delta).min(len.saturating_sub(1));
+        if self.on_related() {
+            if let Some(tab) = self.active_tab_mut() {
+                tab.related = step(tab.related, tab.related_videos().len());
+            }
+            return Vec::new();
+        }
         match self.focus {
             Focus::Menu => self.menu = step(self.menu, Section::ALL.len()),
             Focus::List => {
@@ -894,6 +969,10 @@ impl State {
     fn enter(&mut self) -> Vec<Effect> {
         if let Some(prompt) = self.prompt.clone() {
             return self.submit(prompt);
+        }
+        if self.on_related() {
+            let video = self.active_tab().and_then(|t| t.related_videos().get(t.related)).cloned();
+            return video.map(|v| self.play(Playback::youtube(v))).unwrap_or_default();
         }
         if self.active_tab().is_some() {
             return Vec::new();
@@ -949,7 +1028,7 @@ impl State {
             Section::Inicio => self.load(Source::Recommended, title, Filter::None, false, ListKind::Plain),
             Section::Descubrir => self.load(Source::Recommended, title, Filter::NotMine, false, ListKind::Plain),
             Section::Suscripciones => self.load(Source::Subscriptions, title, Filter::None, false, ListKind::Plain),
-            Section::Canales => self.load(Source::MyChannels, title, Filter::None, false, ListKind::Plain),
+            Section::Canales => self.load(Source::MyChannels, title, Filter::None, false, ListKind::MyChannels),
             Section::VerDespues => {
                 let items = Items::Videos(self.later.clone());
                 self.show(Listing::new(title, items, ListKind::Later));
@@ -1286,6 +1365,9 @@ impl State {
     /// The video the user is pointing at: the open tab, or the selected list row.
     fn selected_video(&self) -> Option<&Video> {
         if let Some(tab) = self.active_tab() {
+            if self.on_related() {
+                return tab.related_videos().get(tab.related);
+            }
             return tab.playback.video.as_ref();
         }
         match self.stack.last() {
@@ -1351,6 +1433,12 @@ impl State {
             Ok(false) => {
                 self.subs.remove(&channel_id);
                 self.status = format!("🔕 {}: {name}", self.tr("Desuscripto", "Unsubscribed"));
+                for listing in self.stack.iter_mut().filter(|l| l.kind == ListKind::MyChannels) {
+                    if let Items::Channels(channels) = &mut listing.items {
+                        channels.retain(|c| c.id != channel_id);
+                        listing.selected = listing.selected.min(channels.len().saturating_sub(1));
+                    }
+                }
             }
             Err(error) => {
                 let failed = self.tr("No se pudo cambiar la suscripción a", "Could not change the subscription to");
@@ -1391,9 +1479,10 @@ impl State {
         }
         let id = TabId(self.next_tab);
         self.next_tab += 1;
-        self.tabs.push(Tab { id, playback: playback.clone() });
+        self.tabs.push(Tab::new(id, playback.clone()));
         self.active = self.tabs.len();
-        vec![Effect::Open(id, playback)]
+        let watch = playback.video.as_ref().map(|v| Effect::Watch { tab: id, video: v.id.clone() });
+        std::iter::once(Effect::Open(id, playback)).chain(watch).collect()
     }
 
     /// Removes a tab; the active one moves to its right neighbour, like browsers do.
@@ -1492,8 +1581,8 @@ mod tests {
         s.update(Action::GoTab(0));
         s.stack.last_mut().unwrap().selected = index;
         match s.update(Action::Enter).as_slice() {
-            [Effect::Open(id, _)] => *id,
-            other => panic!("expected Open, got {other:?}"),
+            [Effect::Open(id, _), Effect::Watch { tab, .. }] if tab == id => *id,
+            other => panic!("expected Open and Watch, got {other:?}"),
         }
     }
 
@@ -1844,7 +1933,7 @@ mod tests {
         let mut s = with_videos(&["a", "b"]);
         let id = play(&mut s, 1);
         assert_eq!(s.active, 1);
-        assert_eq!(s.active_tab().unwrap(), &Tab { id, playback: Playback::youtube(video("b")) });
+        assert_eq!(s.active_tab().unwrap(), &Tab::new(id, Playback::youtube(video("b"))));
     }
 
     #[test]
@@ -1981,6 +2070,20 @@ mod tests {
     }
 
     #[test]
+    fn unsubscribing_takes_the_channel_out_of_my_channels() {
+        let mut s = state();
+        let id = load_id(&open(&mut s, Section::Canales));
+        s.update(Action::Loaded(id, Ok(Items::Channels(vec![channel("UCa"), channel("UCb")]))));
+        s.subs.extend(["UCa".to_string(), "UCb".to_string()]);
+        s.stack[0].selected = 1;
+        assert!(s.update(Action::ToggleSubscription).is_empty(), "asks first");
+        assert!(matches!(s.update(Action::Confirm(true)).as_slice(), [Effect::Subscribe { subscribe: false, .. }]));
+        s.update(Action::SubscriptionDone { channel_id: "UCb".into(), name: "b".into(), result: Ok(false) });
+        assert_eq!(s.listing().unwrap().items, Items::Channels(vec![channel("UCa")]));
+        assert_eq!(s.listing().unwrap().selected, 0);
+    }
+
+    #[test]
     fn subscribe_from_channel_list() {
         let mut s = state();
         let id = load_id(&open(&mut s, Section::Canales));
@@ -2062,6 +2165,38 @@ mod tests {
         assert!(s.status.contains("recargando"));
         s.update(Action::GoTab(0));
         assert_eq!(s.update(Action::CycleLanguage), [saved("player", "language", text("dubbed"))]);
+    }
+
+    #[test]
+    fn related_videos_take_the_keys_with_tab() {
+        let mut s = with_videos(&["a"]);
+        s.video_window = true;
+        let a = play(&mut s, 0);
+        s.update(Action::Watched(TabId(99), Ok(Watch::default())));
+        assert_eq!(s.update(Action::ToggleFocus), [], "nothing related yet");
+        assert!(!s.key_context().related);
+        let watch = Watch { related: vec![video("r1"), video("r2"), video("r3")], ..Watch::default() };
+        s.update(Action::Watched(a, Ok(watch)));
+        s.update(Action::ToggleFocus);
+        assert!(s.key_context().related);
+        s.update(Action::Down);
+        s.update(Action::Down);
+        s.update(Action::Down);
+        assert_eq!(s.active_tab().unwrap().related, 2, "stops at the end");
+        s.update(Action::Up);
+        assert_eq!(s.selected_video().unwrap().id, "r2", "l / s / d / c act on it");
+        let effects = s.update(Action::Enter);
+        assert!(matches!(effects.as_slice(), [Effect::Open(_, p), Effect::Watch { video, .. }]
+            if p.video.as_ref().unwrap().id == "r2" && video == "r2"), "{effects:?}");
+        assert_eq!(s.tabs.len(), 2);
+        s.update(Action::GoTab(1));
+        s.update(Action::Select(0));
+        assert_eq!(s.active_tab().unwrap().related, 0);
+        s.update(Action::ToggleFocus);
+        assert!(!s.key_context().related, "Tab goes back to the player keys");
+        s.video_window = false;
+        s.update(Action::ToggleFocus);
+        assert!(!s.key_context().related, "embedded: the list is under the video");
     }
 
     #[test]
