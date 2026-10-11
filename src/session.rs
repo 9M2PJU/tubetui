@@ -95,6 +95,80 @@ pub fn scan_browsers(home: &Path, keyring: &str) -> Vec<String> {
     found
 }
 
+/// The keyring to use: `configured` if set, else the one detected on this machine.
+pub fn resolve_keyring(configured: &str) -> String {
+    if configured.is_empty() { detect_keyring() } else { configured.to_string() }
+}
+
+/// The keyring Chromium browsers keep their cookie key in, as yt-dlp's
+/// `+KEYRING`. yt-dlp guesses it from the desktop name and gets it wrong on
+/// plain window managers (fluxbox, i3, openbox…): it falls back to plain text
+/// and can't decrypt the cookies. Empty when nothing was found.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn detect_keyring() -> String {
+    let running = running_programs();
+    let is_running = |name: &str| running.iter().any(|p| p == name);
+    // KWallet 6 also answers as a Secret Service, so it goes first.
+    if is_running("kwalletd6") {
+        "KWALLET6".into()
+    } else if is_running("kwalletd5") {
+        "KWALLET5".into()
+    } else if is_running("gnome-keyring-d") || is_running("keepassxc") || secret_service_available() {
+        "GNOMEKEYRING".into()
+    } else {
+        String::new()
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub fn detect_keyring() -> String {
+    String::new()
+}
+
+/// Process names (`/proc/*/comm`, cut to 15 bytes) of everything running.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn running_programs() -> Vec<String> {
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| std::fs::read_to_string(e.path().join("comm")).ok())
+        .map(|comm| comm.trim_end().to_string())
+        .collect()
+}
+
+/// Whether the session bus has, or can start, a Secret Service (gnome-keyring
+/// is often started on demand).
+#[cfg(not(any(windows, target_os = "macos")))]
+fn secret_service_available() -> bool {
+    Command::new("dbus-send")
+        .args([
+            "--session",
+            "--print-reply",
+            "--dest=org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus.ListActivatableNames",
+        ])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("\"org.freedesktop.secrets\""))
+}
+
+/// `spec` with `+keyring` added when it is a Chromium browser without one:
+/// `brave:Default` → `brave+GNOMEKEYRING:Default`. Firefox needs no keyring.
+pub fn with_keyring(spec: &str, keyring: &str) -> String {
+    let (browser, profile) = match spec.split_once(':') {
+        Some((browser, profile)) => (browser, Some(profile)),
+        None => (spec, None),
+    };
+    if keyring.is_empty() || browser.contains('+') || !CHROMIUM.iter().any(|(name, _)| *name == browser) {
+        return spec.to_string();
+    }
+    match profile {
+        Some(profile) => format!("{browser}+{keyring}:{profile}"),
+        None => format!("{browser}+{keyring}"),
+    }
+}
+
 /// A spec as people read it: `brave · Default`, `firefox (snap) · abcd.default`.
 pub fn label(spec: &str) -> String {
     let (browser, profile) = spec.split_once(':').unwrap_or((spec, ""));
@@ -143,12 +217,28 @@ pub fn refresh_cookies(spec: &str, path: &Path, force: bool) -> Result<(), Strin
         .arg(":ytsubs")
         .output()
         .map_err(|e| format!("no se pudo ejecutar yt-dlp: {e}"))?;
-    if path.exists() {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Some(error) = decrypt_error(spec, &stderr) {
+        // The jar was written without the login; dropping it retries next time.
+        let _ = std::fs::remove_file(path);
+        Err(error)
+    } else if path.exists() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("no se pudo leer la sesión de {spec}: {}", stderr.lines().last().unwrap_or("sin detalle")))
     }
+}
+
+/// yt-dlp only warns when it can't decrypt the cookies (wrong keyring) and
+/// still writes a jar, just without the login.
+fn decrypt_error(spec: &str, stderr: &str) -> Option<String> {
+    stderr.contains("cannot decrypt").then(|| {
+        format!(
+            "yt-dlp no pudo descifrar las cookies de {}: poné keyring = \"GNOMEKEYRING\" o \"KWALLET6\" \
+             en config.toml y volvé a elegir el navegador",
+            label(spec)
+        )
+    })
 }
 
 pub fn is_fresh(path: &Path, max_age: Duration) -> bool {
@@ -262,6 +352,23 @@ mod tests {
         assert_eq!(label(&format!("chrome+GNOMEKEYRING:{flatpak}")), "chrome (flatpak) · Default");
         assert_eq!(label("brave+GNOMEKEYRING:Profile 1"), "brave · Profile 1");
         assert_eq!(label("firefox"), "firefox");
+    }
+
+    #[test]
+    fn adds_the_keyring_to_chromium_specs_only() {
+        assert_eq!(with_keyring("brave:Default", "GNOMEKEYRING"), "brave+GNOMEKEYRING:Default");
+        assert_eq!(with_keyring("chrome", "KWALLET6"), "chrome+KWALLET6");
+        assert_eq!(with_keyring("brave+BASICTEXT:Default", "GNOMEKEYRING"), "brave+BASICTEXT:Default");
+        assert_eq!(with_keyring("firefox:ab12.default", "GNOMEKEYRING"), "firefox:ab12.default");
+        assert_eq!(with_keyring("brave:Default", ""), "brave:Default");
+        assert_eq!(resolve_keyring("KWALLET5"), "KWALLET5");
+    }
+
+    #[test]
+    fn spots_cookies_yt_dlp_could_not_decrypt() {
+        let error = decrypt_error("brave+BASICTEXT:Default", "WARNING: cannot decrypt v11 cookies: no key found\n");
+        assert!(error.unwrap().contains("brave · Default"));
+        assert_eq!(decrypt_error("brave:Default", "WARNING: something else\n"), None);
     }
 
     #[test]

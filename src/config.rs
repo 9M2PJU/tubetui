@@ -40,7 +40,8 @@ pub struct SessionConfig {
     /// Empty means no login.
     pub browser: String,
     /// Keyring used when picking a browser from the "Sesión" list, e.g.
-    /// `GNOMEKEYRING`. Empty lets yt-dlp guess.
+    /// `GNOMEKEYRING`. Empty detects it (KWallet, gnome-keyring or another
+    /// Secret Service), which matters on window managers where yt-dlp guesses wrong.
     pub keyring: String,
     /// An imported `cookies.txt`, for machines without a browser (SSH,
     /// servers). Takes precedence over `browser`.

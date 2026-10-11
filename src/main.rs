@@ -436,7 +436,8 @@ impl Runtime {
             }
             Effect::ScanBrowsers { id } => {
                 let home = directories::BaseDirs::new().map(|d| d.home_dir().to_owned()).unwrap_or_default();
-                let mut profiles = session::scan_browsers(&home, &self.state.config.session.keyring);
+                let mut profiles =
+                    session::scan_browsers(&home, &session::resolve_keyring(&self.state.config.session.keyring));
                 profiles.push(String::new()); // "Sin sesión"
                 self.send(Action::Loaded(id, Ok(Items::Profiles(profiles))));
             }
@@ -607,8 +608,9 @@ impl Runtime {
             let cookies = if !session.cookies_file.is_empty() {
                 PathBuf::from(&session.cookies_file)
             } else if !session.browser.is_empty() {
-                let path = session::cookies_path(&cache, &session.browser);
-                if let Err(e) = session::refresh_cookies(&session.browser, &path, force) {
+                let spec = session::with_keyring(&session.browser, &session::resolve_keyring(&session.keyring));
+                let path = session::cookies_path(&cache, &spec);
+                if let Err(e) = session::refresh_cookies(&spec, &path, force) {
                     return Action::SessionReady { cookies: None, subs: Err(e) };
                 }
                 path
