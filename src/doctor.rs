@@ -74,6 +74,8 @@ pub enum Tool {
     Xwininfo,
     Xprop,
     Wmctrl,
+    /// The keyring the browsers' cookie key is in, and what yt-dlp needs to open it.
+    Keyring,
 }
 
 impl Tool {
@@ -87,6 +89,7 @@ impl Tool {
             Self::Xwininfo => "xwininfo",
             Self::Xprop => "xprop",
             Self::Wmctrl => "wmctrl",
+            Self::Keyring => "keyring",
         }
     }
 
@@ -107,6 +110,10 @@ impl Tool {
             Self::Xwininfo => Text::new("modo superpuesto (X11)", "overlay mode (X11)"),
             Self::Xprop => Text::new("modo superpuesto (X11)", "overlay mode (X11)"),
             Self::Wmctrl => Text::new("pantalla completa de la terminal (X11)", "terminal fullscreen (X11)"),
+            Self::Keyring => Text::new(
+                "llavero: guarda la clave de la sesión de Chrome/Brave",
+                "keyring: holds the key to Chrome/Brave's login",
+            ),
         }
     }
 
@@ -114,7 +121,7 @@ impl Tool {
     fn package(self, manager: Manager) -> Option<&'static str> {
         use Manager::*;
         Some(match (self, manager) {
-            (_, Unknown) => return None,
+            (_, Unknown) | (Self::Keyring, _) => return None,
             (Self::Mpv, Winget) => "shinchiro.mpv",
             (Self::YtDlp, Winget) => "yt-dlp.yt-dlp",
             (Self::Ffmpeg, Winget) => "Gyan.FFmpeg",
@@ -136,7 +143,7 @@ pub fn tools(os: &str) -> Vec<Tool> {
         tools.push(Tool::Kitty);
     }
     if os == "linux" {
-        tools.extend([Tool::Xdotool, Tool::Xwininfo, Tool::Xprop, Tool::Wmctrl]);
+        tools.extend([Tool::Xdotool, Tool::Xwininfo, Tool::Xprop, Tool::Wmctrl, Tool::Keyring]);
     }
     tools
 }
@@ -178,13 +185,27 @@ pub fn update_yt_dlp(path: &str, manager: Manager) -> String {
     }
 }
 
+/// How to give yt-dlp the `secretstorage` module it opens gnome-keyring with.
+pub fn install_secretstorage(yt_dlp: &str, manager: Manager) -> String {
+    if yt_dlp.contains("pipx") || yt_dlp.contains("/.local/bin/") {
+        return "pipx inject yt-dlp secretstorage".into();
+    }
+    match manager {
+        Manager::Apt => "sudo apt install python3-secretstorage".into(),
+        Manager::Pacman => "sudo pacman -S python-secretstorage".into(),
+        Manager::Dnf => "sudo dnf install python3-secretstorage".into(),
+        Manager::Zypper => "sudo zypper install python3-SecretStorage".into(),
+        _ => "pip install secretstorage".into(),
+    }
+}
+
 /// One line of the check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Check {
     pub tool: Tool,
     /// Where it is, and its version when it tells.
     pub found: Option<(String, Option<String>)>,
-    /// yt-dlp is there but too old.
+    /// yt-dlp is there but too old; for the keyring, yt-dlp can't open it.
     pub outdated: bool,
     /// What to run: install it, or update it.
     pub fix: Option<String>,
@@ -201,11 +222,19 @@ pub fn run() -> (Manager, Vec<Check>) {
     let os = std::env::consts::OS;
     let release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
     let manager = manager(os, &release);
-    let checks = tools(os).into_iter().map(|tool| check(tool, manager)).collect();
+    let checks = tools(os)
+        .into_iter()
+        .map(|tool| check(tool, manager))
+        // No keyring is fine: the browsers then keep their cookies unencrypted.
+        .filter(|c| c.tool != Tool::Keyring || c.found.is_some())
+        .collect();
     (manager, checks)
 }
 
 fn check(tool: Tool, manager: Manager) -> Check {
+    if tool == Tool::Keyring {
+        return check_keyring(manager);
+    }
     let Some(path) = find(tool.program()) else {
         return Check { tool, found: None, outdated: false, fix: install_command(tool, manager) };
     };
@@ -215,6 +244,30 @@ fn check(tool: Tool, manager: Manager) -> Check {
         tool == Tool::YtDlp && version.as_deref().is_some_and(|v| yt_dlp_age_days(v, today()) > YT_DLP_MAX_AGE_DAYS);
     let fix = outdated.then(|| update_yt_dlp(&path, manager));
     Check { tool, found: Some((path, version)), outdated, fix }
+}
+
+/// The keyring found (as yt-dlp names it), and whether yt-dlp can open it:
+/// gnome-keyring needs its `secretstorage` module, KWallet `kwallet-query`.
+fn check_keyring(manager: Manager) -> Check {
+    let keyring = crate::session::detect_keyring();
+    let mut check = Check { tool: Tool::Keyring, found: None, outdated: false, fix: None };
+    if keyring.is_empty() {
+        return check;
+    }
+    if keyring.starts_with("KWALLET") {
+        check.outdated = find("kwallet-query").is_none();
+    } else if let Some(yt_dlp) = find("yt-dlp") {
+        let yt_dlp = yt_dlp.display().to_string();
+        // `-v` lists the optional modules yt-dlp could load.
+        let out = Command::new(&yt_dlp).arg("-v").stdin(Stdio::null()).output();
+        let text = out.map(|o| String::from_utf8_lossy(&o.stderr).into_owned()).unwrap_or_default();
+        if text.contains("Optional libraries") && !text.contains("secretstorage") {
+            check.outdated = true;
+            check.fix = Some(install_secretstorage(&yt_dlp, manager));
+        }
+    }
+    check.found = Some((keyring.clone(), Some(keyring)));
+    check
 }
 
 /// The program on `PATH` (with Windows' `.exe`).
@@ -297,8 +350,19 @@ mod tests {
     fn tools_depend_on_the_system() {
         assert_eq!(tools("windows"), [Tool::Mpv, Tool::YtDlp, Tool::Ffmpeg]);
         assert!(tools("macos").contains(&Tool::Kitty) && !tools("macos").contains(&Tool::Xdotool));
-        assert_eq!(tools("linux").len(), 8);
+        assert_eq!(tools("linux").len(), 9);
+        assert!(tools("linux").contains(&Tool::Keyring) && !tools("macos").contains(&Tool::Keyring));
         assert!(Tool::Mpv.required() && Tool::YtDlp.required() && !Tool::Kitty.required());
+    }
+
+    #[test]
+    fn secretstorage_goes_where_yt_dlp_is() {
+        assert_eq!(
+            install_secretstorage("/home/u/.local/bin/yt-dlp", Manager::Apt),
+            "pipx inject yt-dlp secretstorage"
+        );
+        assert_eq!(install_secretstorage("/usr/bin/yt-dlp", Manager::Apt), "sudo apt install python3-secretstorage");
+        assert_eq!(install_secretstorage("/usr/bin/yt-dlp", Manager::Pacman), "sudo pacman -S python-secretstorage");
     }
 
     #[test]

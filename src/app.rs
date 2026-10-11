@@ -1111,7 +1111,15 @@ impl State {
                         self.tr("Cerrando sesión…", "Logging out…").into()
                     } else {
                         let label = crate::session::label(&spec);
-                        format!("{} {label}…", self.tr("Leyendo la sesión de", "Reading the login of"))
+                        let reading = self.tr("Leyendo la sesión de", "Reading the login of");
+                        if cfg!(target_os = "linux") && !spec.starts_with("firefox") {
+                            // Chromium's cookie key is in the keyring, which may ask to be unlocked.
+                            let note = self
+                                .tr("puede pedir la contraseña del llavero", "the keyring may ask for its password");
+                            format!("{reading} {label}… ({note})")
+                        } else {
+                            format!("{reading} {label}…")
+                        }
                     };
                     effects.extend(self.set_session(spec, String::new()));
                     effects
@@ -1423,8 +1431,10 @@ impl State {
         } else if let Items::Profiles(profiles) = &items {
             if profiles.iter().all(String::is_empty) {
                 self.tr(
-                    "No encontré navegadores: sin navegador, importá un cookies.txt desde Configuración",
-                    "No browsers found: without one, import a cookies.txt from Settings",
+                    "No encontré navegadores: iniciá sesión en youtube.com con tu navegador, navegá un poco y \
+                     volvé a Configuración → Sesión desde un navegador; o importá un cookies.txt",
+                    "No browsers found: log in to youtube.com in your browser, browse a little and come back \
+                     to Settings → Log in with a browser; or import a cookies.txt",
                 )
                 .into()
             } else {
@@ -2484,7 +2494,11 @@ mod tests {
         assert_eq!(change(&mut s, Setting::Language), [saved("player", "language", text("original"))]);
         assert_eq!(s.config.player.language, Language::Original);
         assert_eq!(change(&mut s, Setting::Quality), [saved("player", "max_height", SettingValue::Number(1080))]);
-        assert_eq!(change(&mut s, Setting::VideoMode), [saved("player", "mode", text("overlay"))], "from the default, window");
+        assert_eq!(
+            change(&mut s, Setting::VideoMode),
+            [saved("player", "mode", text("overlay"))],
+            "from the default, window"
+        );
         assert_eq!(s.config.player.mode, PlayerMode::Overlay);
         assert_eq!(change(&mut s, Setting::Icons), [saved("ui", "icons", text("nerd"))]);
         assert_eq!(s.config.ui.icons, IconSet::Nerd);
@@ -2743,6 +2757,9 @@ mod tests {
             ]
         );
         assert_eq!(s.session_label(), "brave · Default");
+        if cfg!(target_os = "linux") {
+            assert!(s.status.contains("llavero"), "{}", s.status);
+        }
     }
 
     #[test]
@@ -2795,6 +2812,7 @@ mod tests {
         };
         bare.update(Action::Loaded(id, Ok(Items::Profiles(vec![String::new()]))));
         assert!(bare.status.contains("cookies.txt"), "{}", bare.status);
+        assert!(bare.status.contains("iniciá sesión en youtube.com"), "{}", bare.status);
     }
 
     #[test]

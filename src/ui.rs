@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 
 use crate::app::{Confirm, Focus, Group, Listing, Prompt, Section, Setting, State, Tab, language_label};
 use crate::config::{IconSet, donations};
-use crate::doctor::Manager;
+use crate::doctor::{Manager, Tool};
 use crate::domain::{Channel, Live, Video, clock, date_labels};
 use crate::i18n::Lang;
 use crate::media::{LocalFile, MediaKind};
@@ -1286,6 +1286,17 @@ fn draw_system(frame: &mut Frame, state: &State, area: Rect) {
     for check in checks {
         let (mark, color, note) = match (&check.found, check.outdated) {
             (Some(_), false) => ("✓", GREEN, String::new()),
+            (Some((keyring, _)), true) if check.tool == Tool::Keyring => {
+                let missing = if keyring.starts_with("KWALLET") { "kwallet-query" } else { "secretstorage" };
+                (
+                    "⚠",
+                    YELLOW,
+                    format!(
+                        "{}: {missing}",
+                        lang.pick("yt-dlp no lo puede abrir, falta", "yt-dlp can't open it, missing")
+                    ),
+                )
+            }
             (Some(_), true) => {
                 ("⚠", YELLOW, lang.pick("viejo: YouTube cambia seguido", "too old: YouTube changes often").into())
             }
@@ -1953,7 +1964,7 @@ mod tests {
 
     #[test]
     fn system_check_page_says_what_to_install() {
-        use crate::doctor::{Check, Tool};
+        use crate::doctor::Check;
         let mut s = state();
         let missing = Check { tool: Tool::Mpv, found: None, outdated: false, fix: Some("sudo apt install mpv".into()) };
         let old = Check {
@@ -1968,7 +1979,13 @@ mod tests {
             outdated: false,
             fix: None,
         };
-        s.update(Action::SystemChecked(Manager::Apt, vec![missing, old, fine]));
+        let keyring = Check {
+            tool: Tool::Keyring,
+            found: Some(("GNOMEKEYRING".into(), Some("GNOMEKEYRING".into()))),
+            outdated: true,
+            fix: Some("pipx inject yt-dlp secretstorage".into()),
+        };
+        s.update(Action::SystemChecked(Manager::Apt, vec![missing, old, fine, keyring]));
         let screen = render(&s);
         for text in [
             "✗ mpv",
@@ -1978,6 +1995,9 @@ mod tests {
             "2024.04.09",
             "pipx install yt-dlp",
             "✓ kitty",
+            "⚠ keyring",
+            "falta: secretstorage",
+            "pipx inject yt-dlp secretstorage",
             "Comandos para: apt",
         ] {
             assert!(screen.contains(text), "{text}\n{screen}");

@@ -465,7 +465,7 @@ impl Runtime {
             }
             Effect::ImportCookies(path) => {
                 let dest = self.paths.cache.join("cookies-imported.txt");
-                self.send(Action::CookiesImported(import_cookies(&expand_home(&path), &dest)));
+                self.send(Action::CookiesImported(import_cookies(&expand_home(&path), &dest, self.state.lang())));
             }
             Effect::EditConfig => self.edit_config(terminal)?,
             Effect::SaveLater(videos) => {
@@ -602,6 +602,7 @@ impl Runtime {
     /// background. `force` re-reads both even when the cached copies are fresh.
     fn start_session(&self, force: bool) {
         let session = self.state.config.session.clone();
+        let lang = self.state.lang();
         let cache = self.paths.cache.clone();
         let subs_cache = self.paths.subs.clone();
         self.background(move || {
@@ -610,7 +611,7 @@ impl Runtime {
             } else if !session.browser.is_empty() {
                 let spec = session::with_keyring(&session.browser, &session::resolve_keyring(&session.keyring));
                 let path = session::cookies_path(&cache, &spec);
-                if let Err(e) = session::refresh_cookies(&spec, &path, force) {
+                if let Err(e) = session::refresh_cookies(&spec, &path, force, lang) {
                     return Action::SessionReady { cookies: None, subs: Err(e) };
                 }
                 path
@@ -732,10 +733,13 @@ impl Runtime {
 }
 
 /// Validates a `cookies.txt` and keeps a private copy at `dest`.
-fn import_cookies(source: &Path, dest: &Path) -> Result<String, String> {
-    let text = std::fs::read_to_string(source).map_err(|e| format!("no se pudo leer {}: {e}", source.display()))?;
-    if session::authorization(&session::parse_cookies(&text), 0).is_none() {
-        return Err(format!("{} no tiene una sesión de YouTube (falta SAPISID)", source.display()));
+fn import_cookies(source: &Path, dest: &Path, lang: Lang) -> Result<String, String> {
+    let read_error = lang.pick("no se pudo leer", "couldn't read");
+    let text = std::fs::read_to_string(source).map_err(|e| format!("{read_error} {}: {e}", source.display()))?;
+    if !session::has_login(&text) {
+        let no_login =
+            lang.pick("no tiene una sesión de YouTube (falta SAPISID)", "has no YouTube login (SAPISID is missing)");
+        return Err(format!("{} {no_login}", source.display()));
     }
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;

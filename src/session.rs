@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use crate::i18n::Lang;
+
 const ORIGIN: &str = "https://www.youtube.com";
 /// Reading cookies from the browser is slow, so the export is reused for a day.
 const COOKIES_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
@@ -203,7 +205,7 @@ pub fn cookies_path(cache_dir: &Path, spec: &str) -> PathBuf {
 }
 
 /// Exports the browser's cookies to `path` unless a fresh export exists.
-pub fn refresh_cookies(spec: &str, path: &Path, force: bool) -> Result<(), String> {
+pub fn refresh_cookies(spec: &str, path: &Path, force: bool, lang: Lang) -> Result<(), String> {
     if !force && is_fresh(path, COOKIES_MAX_AGE) {
         return Ok(());
     }
@@ -216,29 +218,100 @@ pub fn refresh_cookies(spec: &str, path: &Path, force: bool) -> Result<(), Strin
         .arg(path)
         .arg(":ytsubs")
         .output()
-        .map_err(|e| format!("no se pudo ejecutar yt-dlp: {e}"))?;
+        .map_err(|e| format!("{}: {e}", lang.pick("no se pudo ejecutar yt-dlp", "couldn't run yt-dlp")))?;
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if let Some(error) = decrypt_error(spec, &stderr) {
-        // The jar was written without the login; dropping it retries next time.
+    let jar = std::fs::read_to_string(path).ok();
+    let error = cookie_error(spec, &stderr, lang)
+        .or_else(|| jar.as_deref().is_some_and(|text| !has_login(text)).then(|| no_login(spec, lang)));
+    if let Some(error) = error {
+        // The jar holds no login; dropping it reads the browser again next time.
         let _ = std::fs::remove_file(path);
         Err(error)
-    } else if path.exists() {
+    } else if jar.is_some() {
         Ok(())
     } else {
-        Err(format!("no se pudo leer la sesión de {spec}: {}", stderr.lines().last().unwrap_or("sin detalle")))
+        let detail = stderr.lines().last().unwrap_or(lang.pick("sin detalle", "no details"));
+        Err(format!("{} {spec}: {detail}", lang.pick("no se pudo leer la sesión de", "couldn't read the login of")))
     }
 }
 
-/// yt-dlp only warns when it can't decrypt the cookies (wrong keyring) and
-/// still writes a jar, just without the login.
-fn decrypt_error(spec: &str, stderr: &str) -> Option<String> {
-    stderr.contains("cannot decrypt").then(|| {
-        format!(
-            "yt-dlp no pudo descifrar las cookies de {}: poné keyring = \"GNOMEKEYRING\" o \"KWALLET6\" \
-             en config.toml y volvé a elegir el navegador",
-            label(spec)
+/// Whether a Netscape cookie file carries a YouTube login.
+pub fn has_login(text: &str) -> bool {
+    authorization(&parse_cookies(text), 0).is_some()
+}
+
+/// The browser has cookies but none from a YouTube login.
+fn no_login(spec: &str, lang: Lang) -> String {
+    let (label, browser) = (label(spec), browser_name(spec));
+    match lang {
+        Lang::Es => format!(
+            "{label} no tiene sesión de YouTube: entrá a youtube.com en {browser}, iniciá sesión y navegá un poco; \
+             después volvé y usá Configuración → Releer la sesión"
+        ),
+        Lang::En => format!(
+            "{label} has no YouTube login: open youtube.com in {browser}, log in and browse a little; \
+             then come back and use Settings → Read the login again"
+        ),
+    }
+}
+
+/// What went wrong reading the browser, from yt-dlp's messages. Most are only
+/// warnings: yt-dlp still writes a jar, just without the login.
+fn cookie_error(spec: &str, stderr: &str, lang: Lang) -> Option<String> {
+    let (label, browser) = (label(spec), browser_name(spec));
+    let error = if stderr.contains("secretstorage not available") {
+        lang.pick(
+            "a yt-dlp le falta el módulo secretstorage para abrir el llavero: \
+             Configuración → Revisar el sistema te da el comando para instalarlo",
+            "yt-dlp lacks the secretstorage module to open the keyring: \
+             Settings → Check the system gives the command to install it",
         )
-    })
+        .to_string()
+    } else if stderr.contains("kwallet-query command not found") {
+        lang.pick(
+            "falta kwallet-query para abrir KWallet: instalalo (viene con el paquete kwallet de tu distribución)",
+            "kwallet-query is missing to open KWallet: install it (it comes with your distribution's kwallet package)",
+        )
+        .to_string()
+    } else if stderr.contains("failed to read from keyring") || stderr.contains("kwallet-query failed") {
+        match lang {
+            Lang::Es => format!(
+                "no encontré la clave de {browser} en el llavero: desbloquealo, abrí {browser} una vez \
+                 y volvé a leer la sesión"
+            ),
+            Lang::En => {
+                format!("{browser}'s key isn't in the keyring: unlock it, open {browser} once and read the login again")
+            }
+        }
+    } else if stderr.contains("Could not copy Chrome cookie database") {
+        match lang {
+            Lang::Es => format!(
+                "no pude copiar las cookies de {browser}: cerralo y volvé a leer la sesión, o usá Firefox o un cookies.txt"
+            ),
+            Lang::En => format!(
+                "couldn't copy {browser}'s cookies: close it and read the login again, or use Firefox or a cookies.txt"
+            ),
+        }
+    } else if stderr.contains("cannot decrypt") {
+        match lang {
+            Lang::Es => format!(
+                "yt-dlp no pudo descifrar las cookies de {label}: poné keyring = \"GNOMEKEYRING\" o \"KWALLET6\" \
+                 en config.toml y volvé a elegir el navegador"
+            ),
+            Lang::En => format!(
+                "yt-dlp couldn't decrypt {label}'s cookies: set keyring = \"GNOMEKEYRING\" or \"KWALLET6\" \
+                 in config.toml and pick the browser again"
+            ),
+        }
+    } else {
+        return None;
+    };
+    Some(error)
+}
+
+/// `brave+GNOMEKEYRING:Default` → `brave`.
+fn browser_name(spec: &str) -> &str {
+    spec.split([':', '+']).next().unwrap_or(spec)
 }
 
 pub fn is_fresh(path: &Path, max_age: Duration) -> bool {
@@ -365,10 +438,31 @@ mod tests {
     }
 
     #[test]
-    fn spots_cookies_yt_dlp_could_not_decrypt() {
-        let error = decrypt_error("brave+BASICTEXT:Default", "WARNING: cannot decrypt v11 cookies: no key found\n");
-        assert!(error.unwrap().contains("brave · Default"));
-        assert_eq!(decrypt_error("brave:Default", "WARNING: something else\n"), None);
+    fn explains_why_the_browser_could_not_be_read() {
+        let spec = "brave+GNOMEKEYRING:Default";
+        let error = |stderr: &str| cookie_error(spec, stderr, Lang::Es).unwrap_or_default();
+        assert!(error("WARNING: cannot decrypt v11 cookies: no key found\n").contains("brave · Default"));
+        let missing = "ERROR: secretstorage not available No module named 'secretstorage'\n\
+                       WARNING: cannot decrypt v11 cookies: no key found\n";
+        assert!(error(missing).contains("secretstorage"), "the cause wins over its effect");
+        assert!(error("ERROR: kwallet-query command not found. KWallet…").contains("kwallet-query"));
+        assert!(error("ERROR: failed to read from keyring\n").contains("clave de brave"));
+        assert!(error("ERROR: Could not copy Chrome cookie database. See …").contains("cerralo"));
+        assert_eq!(cookie_error(spec, "WARNING: something else\n", Lang::Es), None);
+        let english = cookie_error(spec, "ERROR: failed to read from keyring\n", Lang::En).unwrap();
+        assert!(english.contains("brave's key isn't in the keyring"), "{english}");
+    }
+
+    #[test]
+    fn a_jar_without_youtube_login_says_how_to_get_one() {
+        assert!(has_login(".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tabc\n"));
+        assert!(!has_login(".youtube.com\tTRUE\t/\tTRUE\t0\tYSC\tabc\n"));
+        let message = no_login("firefox:ab12.default", Lang::Es);
+        assert!(message.contains("firefox · ab12.default no tiene sesión"), "{message}");
+        assert!(message.contains("entrá a youtube.com en firefox"), "{message}");
+        assert!(message.contains("Releer la sesión"), "{message}");
+        let english = no_login("firefox:ab12.default", Lang::En);
+        assert!(english.contains("has no YouTube login") && english.contains("Read the login again"), "{english}");
     }
 
     #[test]
