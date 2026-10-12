@@ -46,6 +46,20 @@ const OVERLAY_FOLLOW: Duration = Duration::from_millis(500);
 /// Two clicks on the same cell within this time are a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
+/// Started from a launcher (`kitty -e tubetui`), the window closes as soon as
+/// the app exits: keep a startup error on screen until Enter.
+fn wait_on_error(error: &dyn std::fmt::Display) {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return;
+    }
+    eprintln!("tubetui: {error}\n");
+    eprintln!("Corregí el archivo o actualizá tubetui (una versión vieja no conoce las opciones nuevas).");
+    eprintln!("Fix the file or update tubetui (an old version doesn't know newer options).\n");
+    eprint!("Enter: salir / quit ");
+    let _ = std::io::stdin().read_line(&mut String::new());
+}
+
 /// YouTube in your terminal.
 #[derive(Parser)]
 #[command(version, about)]
@@ -59,7 +73,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config_path = cli.config.or_else(Config::default_path);
     let mut config = match &config_path {
-        Some(path) => Config::load(path)?,
+        Some(path) => Config::load(path).inspect_err(|e| wait_on_error(e))?,
         None => Config::default(),
     };
     // Until a language is chosen, follow the system's.
