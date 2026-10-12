@@ -18,9 +18,11 @@ Every video opens in its own tab.
 ## What it does
 
 **YouTube**
-- **Inicio** (your home feed), **Descubrir** (the home feed without channels
-  you already follow), **Suscripciones** (newest from your channels, live and
-  upcoming first), **Mis canales**
+- **Inicio** (your home feed, in YouTube's own order), **Descubrir** (this
+  week's most watched videos on your topics, e.g. `rust, nba, jazz`, outside
+  your channels and your history), **Suscripciones** (newest from your
+  channels, live and upcoming first), **Mis canales**, **Descubrir canales**
+  (YouTube's picks from channels you don't follow yet)
 - **Search** videos in all of YouTube (about a second, more results load as
   you scroll), only in your channels, or inside a channel (`Tab` switches the
   scope); search channels (with their description, whole in the side panel)

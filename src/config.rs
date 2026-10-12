@@ -282,6 +282,8 @@ pub fn codec_name(codec: &str, lang: Lang) -> &str {
 pub struct SearchConfig {
     /// Videos fetched per list.
     pub results: u32,
+    /// What "Descubrir" looks for, e.g. `["rust", "nba", "jazz"]`.
+    pub topics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -322,7 +324,7 @@ impl Default for UiConfig {
 
 impl Default for SearchConfig {
     fn default() -> Self {
-        Self { results: 60 }
+        Self { results: 60, topics: Vec::new() }
     }
 }
 

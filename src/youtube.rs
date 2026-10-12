@@ -50,16 +50,24 @@ pub enum Source {
         url: String,
         query: String,
     },
+    /// This week's videos on my topics, for discovering ("Descubrir").
+    Discover(Vec<String>),
 }
 
 impl Source {
+    /// Feeds that are empty, or refused, without a working login.
+    pub fn needs_login(&self) -> bool {
+        matches!(self, Self::Recommended | Self::Subscriptions)
+    }
+
     pub fn lists_channels(&self) -> bool {
         matches!(self, Self::MyChannels | Self::ChannelSearch(_))
     }
 
-    /// Feeds read best newest first; searches keep YouTube's relevance order.
+    /// Subscriptions and channels read best newest first; the home feed and
+    /// searches keep YouTube's order, which is what it thinks I want to see.
     fn newest_first(&self) -> bool {
-        matches!(self, Self::Recommended | Self::Subscriptions | Self::Channel(_))
+        matches!(self, Self::Subscriptions | Self::Channel(_))
     }
 
     fn target(&self, limit: u32) -> String {
@@ -76,6 +84,7 @@ impl Source {
             Self::SearchInChannel { url, query } => {
                 format!("{}/search?query={}", url.trim_end_matches('/'), percent_encode(query))
             }
+            Self::Discover(_) => String::new(), // read by `discover`, not yt-dlp
         }
     }
 }
@@ -131,10 +140,22 @@ pub fn fetch_args(source: &Source, limit: u32, cookies: Option<&Path>) -> Vec<St
     args
 }
 
+/// What a feed brings when the login copy went stale: nothing, or yt-dlp
+/// asking for one.
+pub fn looks_logged_out(result: &Result<Items, YoutubeError>) -> bool {
+    match result {
+        Ok(items) => items.is_empty(),
+        Err(e) => e.to_string().contains("Login details are needed"),
+    }
+}
+
 /// Fetches a list; blocking, run it off the UI thread.
 pub fn fetch(source: &Source, limit: u32, cookies: Option<&Path>) -> Result<Items, YoutubeError> {
     if source == &Source::MyChannels {
         return my_channels(cookies.ok_or(YoutubeError::NoSession)?).map(Items::Channels);
+    }
+    if let Source::Discover(topics) = source {
+        return discover(topics).map(Items::Videos);
     }
     if cookies.is_none() && source == &Source::Subscriptions {
         return Err(YoutubeError::NoSession);
@@ -222,6 +243,85 @@ pub fn search(query: &str, next: Option<&str>) -> Result<SearchPage, YoutubeErro
     };
     let reply = InnerTube::anonymous().call("search", body)?;
     Ok(parse_search(&reply, unix_now()))
+}
+
+/// Search filter "Videos" + "This week".
+const THIS_WEEK: &str = "EgQIAxAB";
+
+/// This week's videos on each topic, the most watched of each topic first and
+/// the topics taking turns. Anonymous, so neither my history nor my channels
+/// shape what comes up.
+pub fn discover(topics: &[String]) -> Result<Vec<Video>, YoutubeError> {
+    let replies: Vec<Result<Value, YoutubeError>> = std::thread::scope(|scope| {
+        let searches: Vec<_> = topics
+            .iter()
+            .map(|topic| {
+                scope.spawn(move || {
+                    InnerTube::anonymous().call("search", json!({ "query": topic, "params": THIS_WEEK }))
+                })
+            })
+            .collect();
+        searches
+            .into_iter()
+            .map(|search| search.join().unwrap_or_else(|_| Err(YoutubeError::Http("search failed".into()))))
+            .collect()
+    });
+    let now = unix_now();
+    let mut per_topic = Vec::new();
+    let mut failure = None;
+    for reply in replies {
+        match reply {
+            Ok(reply) => per_topic.push(parse_discover(&reply, now)),
+            Err(e) => failure = Some(e),
+        }
+    }
+    // One topic failing is fine while the others bring something.
+    match failure {
+        Some(e) if per_topic.iter().all(Vec::is_empty) => Err(e),
+        _ => Ok(take_turns(per_topic)),
+    }
+}
+
+/// The videos of a search reply with their views.
+pub fn parse_discover(reply: &Value, now: i64) -> Vec<(Video, u64)> {
+    let mut found = Vec::new();
+    walk(reply, &mut |object| {
+        if let Some(r) = object.get("videoRenderer")
+            && let Some(video) = video_renderer(r, now)
+        {
+            let views = text(&r["viewCountText"]).and_then(|t| first_number(&t)).unwrap_or(0);
+            found.push((video, views));
+        }
+    });
+    found
+}
+
+/// One video of each topic in turn, each topic's most watched first, so a
+/// big topic doesn't bury a small one; without repeats (a video can match two).
+fn take_turns(per_topic: Vec<Vec<(Video, u64)>>) -> Vec<Video> {
+    let mut queues: Vec<_> = per_topic
+        .into_iter()
+        .map(|mut found| {
+            found.sort_by_key(|(_, views)| std::cmp::Reverse(*views));
+            found.into_iter()
+        })
+        .collect();
+    let mut seen = HashSet::new();
+    let mut videos = Vec::new();
+    loop {
+        let mut any = false;
+        for queue in &mut queues {
+            if let Some((video, _)) = queue.next() {
+                any = true;
+                if seen.insert(video.id.clone()) {
+                    videos.push(video);
+                }
+            }
+        }
+        if !any {
+            return videos;
+        }
+    }
 }
 
 /// Videos and the next-page token of a search reply (first page or continuation).
@@ -892,6 +992,8 @@ mod tests {
     #[test]
     fn targets() {
         assert_eq!(Source::Recommended.target(60), ":ytrec");
+        assert!(!Source::Recommended.newest_first(), "the home feed keeps YouTube's ranking");
+        assert!(Source::Subscriptions.newest_first());
         assert_eq!(Source::Subscriptions.target(60), ":ytsubs");
         assert_eq!(Source::Search("lofi".into()).target(20), "ytsearch20:lofi");
         assert_eq!(
@@ -1010,6 +1112,33 @@ mod tests {
         assert_eq!((a.duration, a.published, a.live), (Some(19 * 60 + 42), Some(now - 2 * 86_400), Live::No));
         assert_eq!((watch.related[1].duration, watch.related[1].live), (None, Live::Now));
         assert_eq!(first_number("no digits"), None);
+    }
+
+    #[test]
+    fn discover_takes_turns_between_topics() {
+        let renderer = |id: &str, views: &str| {
+            json!({ "videoRenderer": {
+                "videoId": id, "title": { "runs": [{ "text": format!("title {id}") }] },
+                "ownerText": { "runs": [{ "text": "Chan", "navigationEndpoint": {
+                    "browseEndpoint": { "browseId": "UCx" } } }] },
+                "viewCountText": { "simpleText": views } } })
+        };
+        let rust = json!({ "contents": [renderer("a", "1,200 views"), renderer("b", "52,577 views")] });
+        let nba = json!({ "contents": [renderer("c", "9,000 views"), renderer("d", "90,000 views"), renderer("b", "1 view")] });
+        let per_topic = vec![parse_discover(&rust, 0), parse_discover(&nba, 0)];
+        assert_eq!(per_topic[0][1].1, 52_577);
+        let ids: Vec<String> = take_turns(per_topic).into_iter().map(|v| v.id).collect();
+        assert_eq!(ids, ["b", "d", "a", "c"], "rust, nba, rust, nba; b only once");
+        assert!(!Source::Discover(vec!["rust".into()]).newest_first());
+    }
+
+    #[test]
+    fn a_stale_login_shows_as_an_empty_or_refused_feed() {
+        assert!(looks_logged_out(&Ok(Items::Videos(Vec::new()))));
+        assert!(!looks_logged_out(&Ok(Items::Profiles(vec!["brave".into()]))));
+        let refused = YoutubeError::Http("ERROR: [youtube:subscriptions] Login details are needed".into());
+        assert!(looks_logged_out(&Err(refused)));
+        assert!(Source::Recommended.needs_login() && !Source::Search("x".into()).needs_login());
     }
 
     #[test]

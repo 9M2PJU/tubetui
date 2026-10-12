@@ -212,6 +212,8 @@ pub fn refresh_cookies(spec: &str, path: &Path, force: bool, lang: Lang) -> Resu
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
+    // yt-dlp also loads an existing jar, and its stale login would win over the browser's.
+    let _ = std::fs::remove_file(path);
     // Any authenticated request makes yt-dlp write the jar; `-I 0` downloads nothing.
     let output = Command::new("yt-dlp")
         .args(["-q", "--skip-download", "--flat-playlist", "-I", "0", "--cookies-from-browser", spec, "--cookies"])

@@ -31,6 +31,8 @@ pub enum Section {
     Suscripciones,
     VerDespues,
     Canales,
+    /// YouTube's picks from channels I don't follow.
+    DescubrirCanales,
     BuscarVideos,
     BuscarCanales,
     MisVideos,
@@ -59,12 +61,13 @@ impl Group {
 }
 
 impl Section {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Inicio,
         Self::Descubrir,
         Self::Suscripciones,
         Self::VerDespues,
         Self::Canales,
+        Self::DescubrirCanales,
         Self::BuscarVideos,
         Self::BuscarCanales,
         Self::MisVideos,
@@ -89,6 +92,7 @@ impl Section {
             Self::Suscripciones => ("Suscripciones", "Subscriptions"),
             Self::VerDespues => ("Ver después", "Watch later"),
             Self::Canales => ("Mis canales", "My channels"),
+            Self::DescubrirCanales => ("Descubrir canales", "Discover channels"),
             Self::BuscarVideos => ("Buscar videos", "Search videos"),
             Self::BuscarCanales => ("Buscar canales", "Search channels"),
             Self::MisVideos => ("Mis videos", "My videos"),
@@ -123,6 +127,7 @@ pub enum Setting {
     VideoDirs,
     MusicDirs,
     DownloadDir,
+    DiscoverTopics,
     SystemCheck,
     HideWatched,
     CheckUpdates,
@@ -130,7 +135,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Browser,
         Self::ImportCookies,
         Self::Refresh,
@@ -150,6 +155,7 @@ impl Setting {
         Self::VideoDirs,
         Self::MusicDirs,
         Self::DownloadDir,
+        Self::DiscoverTopics,
         Self::SystemCheck,
         Self::HideWatched,
         Self::CheckUpdates,
@@ -179,6 +185,7 @@ impl Setting {
             Self::VideoDirs => ("Carpetas de videos", "Video folders"),
             Self::MusicDirs => ("Carpetas de música", "Music folders"),
             Self::DownloadDir => ("Carpeta de descargas", "Downloads folder"),
+            Self::DiscoverTopics => ("Temas de Descubrir", "Discover topics"),
             Self::SystemCheck => ("Revisar el sistema (mpv, yt-dlp…)", "Check the system (mpv, yt-dlp…)"),
             Self::HideWatched => {
                 ("Ocultar los vistos en Inicio (v los muestra)", "Hide watched in Home (v shows them)")
@@ -233,6 +240,8 @@ pub enum Prompt {
     DownloadDir,
     /// Comma-separated folders for local videos or music.
     MediaDirs(MediaKind),
+    /// Comma-separated topics for "Descubrir".
+    Topics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,7 +253,7 @@ pub enum ListKind {
     Channel(ChannelRef),
     /// "Mis canales": unsubscribing takes the channel out.
     MyChannels,
-    /// Inicio, Descubrir, Suscripciones: videos already watched can be hidden.
+    /// Inicio, Descubrir, Suscripciones, Descubrir canales: videos already watched can be hidden.
     Feed,
     Settings,
 }
@@ -554,7 +563,7 @@ enum Filter {
     None,
     /// Keep only videos from my channels.
     Mine,
-    /// Drop videos from my channels ("Descubrir").
+    /// Drop videos from my channels ("Descubrir", "Descubrir canales").
     NotMine,
 }
 
@@ -781,6 +790,10 @@ impl State {
             Setting::DownloadDir => match self.config.download.dir.as_str() {
                 "" => "~/Videos".into(),
                 dir => dir.into(),
+            },
+            Setting::DiscoverTopics => match self.config.search.topics.as_slice() {
+                [] => self.tr("ninguno", "none").into(),
+                topics => topics.join(", "),
             },
         }
     }
@@ -1161,7 +1174,8 @@ impl State {
         let title = section.label(self.lang()).to_owned();
         match section {
             Section::Inicio => self.load_feed(Source::Recommended, title, Filter::None),
-            Section::Descubrir => self.load_feed(Source::Recommended, title, Filter::NotMine),
+            Section::Descubrir => self.discover(),
+            Section::DescubrirCanales => self.load_feed(Source::Recommended, title, Filter::NotMine),
             Section::Suscripciones => self.load_feed(Source::Subscriptions, title, Filter::None),
             Section::Canales => self.load(Source::MyChannels, title, Filter::None, false, ListKind::MyChannels),
             Section::VerDespues => {
@@ -1301,8 +1315,31 @@ impl State {
                 self.start_prompt(Prompt::DownloadDir, current);
                 Vec::new()
             }
+            Setting::DiscoverTopics => {
+                let current = self.config.search.topics.join(", ");
+                self.start_prompt(Prompt::Topics, current);
+                Vec::new()
+            }
             Setting::EditFile => vec![Effect::EditConfig],
         }
+    }
+
+    /// This week's videos on my topics, out of my channels; without topics,
+    /// asks for them first.
+    fn discover(&mut self) -> Vec<Effect> {
+        let topics = self.config.search.topics.clone();
+        if topics.is_empty() {
+            self.status = self
+                .tr(
+                    "Escribí qué te interesa descubrir, separado por coma: rust, nba, jazz",
+                    "Type what you'd like to discover, comma separated: rust, nba, jazz",
+                )
+                .into();
+            self.start_prompt(Prompt::Topics, String::new());
+            return Vec::new();
+        }
+        let title = Section::Descubrir.label(self.lang()).to_owned();
+        self.load_feed(Source::Discover(topics), title, Filter::NotMine)
     }
 
     /// Switches the login to a browser profile or an imported file (both empty = none).
@@ -1344,7 +1381,7 @@ impl State {
 
     fn submit(&mut self, prompt: Prompt) -> Vec<Effect> {
         let query = self.query.trim().to_owned();
-        if query.is_empty() && !matches!(prompt, Prompt::DownloadDir | Prompt::MediaDirs(_)) {
+        if query.is_empty() && !matches!(prompt, Prompt::DownloadDir | Prompt::MediaDirs(_) | Prompt::Topics) {
             return Vec::new();
         }
         self.prompt = None;
@@ -1386,6 +1423,16 @@ impl State {
                     }
                 };
                 vec![Effect::SaveSetting { table: "media", key, value: SettingValue::List(dirs) }]
+            }
+            Prompt::Topics => {
+                let topics = parse_dirs(&query);
+                self.config.search.topics = topics.clone();
+                let mut effects =
+                    vec![Effect::SaveSetting { table: "search", key: "topics", value: SettingValue::List(topics) }];
+                if !self.config.search.topics.is_empty() {
+                    effects.extend(self.discover());
+                }
+                effects
             }
         }
     }
@@ -2023,7 +2070,7 @@ mod tests {
     fn feed_sections_load_their_source() {
         let cases = [
             (Section::Inicio, Source::Recommended, 60),
-            (Section::Descubrir, Source::Recommended, FILTERED_LIMIT),
+            (Section::DescubrirCanales, Source::Recommended, FILTERED_LIMIT),
             (Section::Suscripciones, Source::Subscriptions, 60),
             (Section::Canales, Source::MyChannels, 60),
         ];
@@ -2072,10 +2119,32 @@ mod tests {
     fn discover_hides_my_channels_and_channelless_entries() {
         let mut s = state();
         s.update(Action::SubsLoaded(HashSet::from(["UCa".to_string()])));
-        let id = load_id(&open(&mut s, Section::Descubrir));
+        let id = load_id(&open(&mut s, Section::DescubrirCanales));
         let mix = Video { channel_id: None, ..video("RDmix") };
         s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a"), video("b"), mix]))));
         assert_eq!(s.listing().unwrap().items, Items::Videos(vec![video("b")]));
+    }
+
+    #[test]
+    fn discover_asks_for_topics_then_searches_them() {
+        let mut s = state();
+        assert!(open(&mut s, Section::Descubrir).is_empty());
+        assert_eq!(s.prompt, Some(Prompt::Topics));
+        type_text(&mut s, "rust, nba");
+        let topics = vec!["rust".to_string(), "nba".into()];
+        match s.update(Action::Enter).as_slice() {
+            [Effect::SaveSetting { table: "search", key: "topics", value }, Effect::Load { source, .. }] => {
+                assert_eq!(value, &SettingValue::List(topics.clone()));
+                assert_eq!(source, &Source::Discover(topics.clone()));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(s.setting_value(Setting::DiscoverTopics), "rust, nba");
+        match open(&mut s, Section::Descubrir).as_slice() {
+            [Effect::Load { source, .. }, ..] => assert_eq!(source, &Source::Discover(topics)),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(s.pending.as_ref().map(|p| p.filter), Some(Filter::NotMine), "out of my channels");
     }
 
     #[test]

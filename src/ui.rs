@@ -51,14 +51,14 @@ const TEAL: Color = Color::Rgb(115, 218, 202);
 const PURPLE: Color = Color::Rgb(157, 124, 216);
 
 /// One colour per menu entry, in `Section::ALL` order.
-const SECTION_COLORS: [Color; 12] =
-    [BLUE, CYAN, RED, YELLOW, ORANGE, GREEN, TEAL, PURPLE, MAGENTA, BLUE, PURPLE, MUTED];
+const SECTION_COLORS: [Color; 13] =
+    [BLUE, CYAN, RED, YELLOW, ORANGE, MAGENTA, GREEN, TEAL, PURPLE, MAGENTA, BLUE, PURPLE, MUTED];
 
 pub struct Icons {
     /// In `Section::ALL` order.
-    pub sections: [&'static str; 12],
+    pub sections: [&'static str; 13],
     /// In `Setting::ALL` order.
-    pub settings: [&'static str; 23],
+    pub settings: [&'static str; 24],
     pub logo: &'static str,
     pub tab: &'static str,
     pub live: &'static str,
@@ -75,11 +75,17 @@ pub struct Icons {
     pub watched: &'static str,
 }
 
+impl Icons {
+    fn section(&self, section: Section) -> &'static str {
+        self.sections[Section::ALL.iter().position(|s| *s == section).unwrap_or(0)]
+    }
+}
+
 const EMOJI: Icons = Icons {
-    sections: ["🏠", "🧭", "📺", "🕒", "⭐", "🔎", "📡", "📼", "🎵", "🔧", "💜", "🚪"],
+    sections: ["🏠", "🧭", "📺", "🕒", "⭐", "💡", "🔎", "📡", "📼", "🎵", "🔧", "💜", "🚪"],
     settings: [
         "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "🗣", "😀", "🖼", "🖱", "✨", "🌊", "💥", "📼", "🎵", "📁",
-        "🩺", "👁", "⬆", "📝",
+        "🏷", "🩺", "👁", "⬆", "📝",
     ],
     logo: "▶️",
     tab: "🎬",
@@ -103,6 +109,7 @@ const NERD: Icons = Icons {
         "\u{f05c6}",
         "\u{f017}",
         "\u{f005}",
+        "\u{f0eb}",
         "\u{f002}",
         "\u{f2ce}",
         "\u{f03d}",
@@ -114,7 +121,7 @@ const NERD: Icons = Icons {
     settings: [
         "\u{f007}", "\u{f15b}", "\u{f021}", "\u{f08b}", "\u{f1ab}", "\u{f075}", "\u{f1de}", "\u{f008}", "\u{f025}",
         "\u{f0ac}", "\u{f118}", "\u{f03e}", "\u{f245}", "\u{f0d0}", "\u{f0e7}", "\u{f0a1}", "\u{f03d}", "\u{f001}",
-        "\u{f07b}", "\u{f0f1}", "\u{f06e}", "\u{f01b}", "\u{f044}",
+        "\u{f07b}", "\u{f02c}", "\u{f0f1}", "\u{f06e}", "\u{f01b}", "\u{f044}",
     ],
     logo: "\u{f16a}",
     tab: "\u{f144}",
@@ -132,10 +139,10 @@ const NERD: Icons = Icons {
 };
 
 const UNICODE: Icons = Icons {
-    sections: ["⌂", "◎", "▣", "◷", "★", "⌕", "⌁", "▷", "♫", "⚙", "♥", "⏻"],
+    sections: ["⌂", "◎", "▣", "◷", "★", "✧", "⌕", "⌁", "▷", "♫", "⚙", "♥", "⏻"],
     settings: [
-        "☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "✚", "◉", "↑",
-        "✎",
+        "☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "#", "✚", "◉",
+        "↑", "✎",
     ],
     logo: "▶",
     tab: "▶",
@@ -344,7 +351,7 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
                 let songs = playback.queue.len();
                 Paragraph::new(vec![
                     Line::from(""),
-                    Line::from(format!("{}  {}", icons.sections[8], playback.title)).fg(FG).bold(),
+                    Line::from(format!("{}  {}", icons.section(Section::MiMusica), playback.title)).fg(FG).bold(),
                     Line::from(playback.subtitle.clone()).fg(MAGENTA),
                     Line::from(""),
                     Line::from(format!(
@@ -479,7 +486,7 @@ fn draw_watch(frame: &mut Frame, state: &State, icons: &Icons, view: &View, tab:
 }
 
 fn tab_icon<'a>(icons: &'a Icons, tab: &Tab) -> &'a str {
-    if tab.playback.audio_only { icons.sections[8] } else { icons.tab }
+    if tab.playback.audio_only { icons.section(Section::MiMusica) } else { icons.tab }
 }
 
 /// `" 🔊 85 %  720p  H.264 "`: what the video keys change, as it is now.
@@ -606,7 +613,7 @@ fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
 
 fn tab_titles(state: &State, icons: &Icons) -> Vec<String> {
     let home = Section::Inicio.label(state.lang());
-    std::iter::once(format!("{} {home}", icons.sections[0]))
+    std::iter::once(format!("{} {home}", icons.section(Section::Inicio)))
         .chain(
             state
                 .tabs
@@ -676,13 +683,19 @@ fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, are
         (Some(prompt), Some(input)) => {
             let title = match prompt {
                 Prompt::Videos { scope, .. } => Line::from(vec![
-                    Span::raw(format!(" {} {} ", icons.sections[5], lang.pick("Buscar videos en", "Search videos in"))),
+                    Span::raw(format!(
+                        " {} {} ",
+                        icons.section(Section::BuscarVideos),
+                        lang.pick("Buscar videos en", "Search videos in")
+                    )),
                     Span::styled(scope.label(lang), Style::new().fg(YELLOW).bold()),
                     Span::raw(lang.pick(" · Tab cambia ", " · Tab changes ")).fg(MUTED),
                 ]),
-                Prompt::Channels => {
-                    Line::from(format!(" {} {} ", icons.sections[6], lang.pick("Buscar canales", "Search channels")))
-                }
+                Prompt::Channels => Line::from(format!(
+                    " {} {} ",
+                    icons.section(Section::BuscarCanales),
+                    lang.pick("Buscar canales", "Search channels")
+                )),
                 Prompt::CookiesFile => Line::from(format!(
                     " {} {} ",
                     icons.settings[1],
@@ -704,6 +717,11 @@ fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, are
                     );
                     Line::from(format!(" {icon} {what}, {how} "))
                 }
+                Prompt::Topics => Line::from(format!(
+                    " {} {} ",
+                    icons.settings[19],
+                    lang.pick("Temas de Descubrir, separados por coma", "Discover topics, comma separated")
+                )),
             };
             frame.render_widget(Paragraph::new(state.query.as_str()).block(panel(title, CYAN)), input);
             let x = input.x + 1 + state.query.chars().count() as u16;
@@ -1032,8 +1050,8 @@ fn profile_row<'a>(state: &State, icons: &Icons, spec: &'a str) -> ListItem<'a> 
 
 fn file_row<'a>(icons: &Icons, file: &'a LocalFile, kind: MediaKind, marked: bool) -> ListItem<'a> {
     let icon = match kind {
-        MediaKind::Video => icons.sections[7],
-        MediaKind::Music => icons.sections[8],
+        MediaKind::Video => icons.section(Section::MisVideos),
+        MediaKind::Music => icons.section(Section::MiMusica),
     };
     ListItem::new(Line::from(vec![
         Span::styled(if marked { "✗" } else { " " }, Style::new().fg(RED).bold()),
@@ -1427,7 +1445,7 @@ fn draw_about(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
             ]));
         }
     }
-    let title = format!(" {} {} ", icons.sections[10], Section::AcercaDe.label(lang));
+    let title = format!(" {} {} ", icons.section(Section::AcercaDe), Section::AcercaDe.label(lang));
     // Wrapped: the update command can be longer than the panel.
     let about = Paragraph::new(lines).alignment(Alignment::Center).wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(about.block(panel(title, PURPLE)), area);

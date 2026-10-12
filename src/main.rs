@@ -397,9 +397,19 @@ impl Runtime {
         match effect {
             Effect::Load { id, source, limit } => {
                 let cookies = self.cookies.clone();
+                let reread = self.browser_spec().filter(|_| source.needs_login());
+                let lang = self.state.lang();
                 self.background(move || {
-                    let result = youtube::fetch(&source, limit, cookies.as_deref()).map_err(|e| e.to_string());
-                    Action::Loaded(id, result)
+                    let mut result = youtube::fetch(&source, limit, cookies.as_deref());
+                    // The browser renews the login, so our copy can go stale before a day:
+                    // read the browser again once.
+                    if let (Some(spec), Some(path)) = (&reread, &cookies)
+                        && youtube::looks_logged_out(&result)
+                        && session::refresh_cookies(spec, path, true, lang).is_ok()
+                    {
+                        result = youtube::fetch(&source, limit, Some(path));
+                    }
+                    Action::Loaded(id, result.map_err(|e| e.to_string()))
                 });
             }
             Effect::Search { id, query, next } => {
@@ -613,29 +623,45 @@ impl Runtime {
 
     /// Reads the login in `config.session` and my channels in the
     /// background. `force` re-reads both even when the cached copies are fresh.
+    /// The `--cookies-from-browser` spec of the login, unless it comes from an
+    /// imported `cookies.txt`.
+    fn browser_spec(&self) -> Option<String> {
+        let session = &self.state.config.session;
+        (session.cookies_file.is_empty() && !session.browser.is_empty())
+            .then(|| session::with_keyring(&session.browser, &session::resolve_keyring(&session.keyring)))
+    }
+
     fn start_session(&self, force: bool) {
         let session = self.state.config.session.clone();
+        let spec = self.browser_spec();
         let lang = self.state.lang();
         let cache = self.paths.cache.clone();
         let subs_cache = self.paths.subs.clone();
         self.background(move || {
             let cookies = if !session.cookies_file.is_empty() {
                 PathBuf::from(&session.cookies_file)
-            } else if !session.browser.is_empty() {
-                let spec = session::with_keyring(&session.browser, &session::resolve_keyring(&session.keyring));
-                let path = session::cookies_path(&cache, &spec);
-                if let Err(e) = session::refresh_cookies(&spec, &path, force, lang) {
+            } else if let Some(spec) = &spec {
+                let path = session::cookies_path(&cache, spec);
+                if let Err(e) = session::refresh_cookies(spec, &path, force, lang) {
                     return Action::SessionReady { cookies: None, subs: Err(e) };
                 }
                 path
             } else {
                 return Action::SessionReady { cookies: None, subs: Ok(HashSet::new()) };
             };
-            let subs = if !force && session::is_fresh(&subs_cache, SUBS_MAX_AGE) {
+            let mut subs = if !force && session::is_fresh(&subs_cache, SUBS_MAX_AGE) {
                 Ok(store::load_subs(&subs_cache))
             } else {
                 youtube::subscribed_channels(&cookies).map_err(|e| e.to_string())
             };
+            // No channels from a day-old copy of the login: the browser renewed it.
+            if !force
+                && let Some(spec) = &spec
+                && subs.as_ref().is_ok_and(HashSet::is_empty) | subs.is_err()
+                && session::refresh_cookies(spec, &cookies, true, lang).is_ok()
+            {
+                subs = youtube::subscribed_channels(&cookies).map_err(|e| e.to_string());
+            }
             Action::SessionReady { cookies: Some(cookies), subs }
         });
     }
