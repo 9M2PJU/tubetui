@@ -58,6 +58,8 @@ pub enum Source {
     },
     /// This week's videos on my topics, for discovering ("Descubrir").
     Discover(Vec<String>),
+    /// The "up next" of these videos (the last ones I watched), taking turns.
+    UpNext(Vec<String>),
 }
 
 impl Source {
@@ -92,7 +94,7 @@ impl Source {
             Self::SearchInChannel { url, query } => {
                 format!("{}/search?query={}", url.trim_end_matches('/'), percent_encode(query))
             }
-            Self::Discover(_) => String::new(), // read by `discover`, not yt-dlp
+            Self::Discover(_) | Self::UpNext(_) => String::new(), // read through InnerTube, not yt-dlp
         }
     }
 }
@@ -173,6 +175,9 @@ pub fn fetch(source: &Source, limit: u32, cookies: Option<&Path>) -> Result<Item
     }
     if let Source::Discover(topics) = source {
         return discover(topics).map(Items::Videos);
+    }
+    if let Source::UpNext(ids) = source {
+        return up_next(ids, cookies).map(Items::Videos);
     }
     if source == &Source::MyPlaylists {
         return my_playlists(cookies.ok_or(YoutubeError::NoSession)?).map(Items::Playlists);
@@ -367,6 +372,30 @@ pub fn parse_discover(reply: &Value, now: i64) -> Vec<(Video, u64)> {
 
 /// One video of each topic in turn, each topic's most watched first, so a
 /// big topic doesn't bury a small one; without repeats (a video can match two).
+/// What YouTube puts next to each of `ids`, one from each in turn, without
+/// repeats nor `ids` themselves.
+pub fn up_next(ids: &[String], cookies: Option<&Path>) -> Result<Vec<Video>, YoutubeError> {
+    let replies: Vec<Result<Watch, YoutubeError>> = std::thread::scope(|scope| {
+        let calls: Vec<_> = ids.iter().map(|id| scope.spawn(move || watch(id, cookies))).collect();
+        calls.into_iter().map(|c| c.join().unwrap_or_else(|_| Err(YoutubeError::Http("next failed".into())))).collect()
+    });
+    let mut lists = Vec::new();
+    let mut failure = None;
+    for reply in replies {
+        match reply {
+            // In YouTube's order: no views to sort by.
+            Ok(watch) => lists.push(watch.related.into_iter().map(|v| (v, 0)).collect()),
+            Err(e) => failure = Some(e),
+        }
+    }
+    if let Some(e) = failure.filter(|_| lists.iter().all(Vec::is_empty)) {
+        return Err(e);
+    }
+    let mut videos = take_turns(lists);
+    videos.retain(|v| !ids.contains(&v.id));
+    Ok(videos)
+}
+
 fn take_turns(per_topic: Vec<Vec<(Video, u64)>>) -> Vec<Video> {
     let mut queues: Vec<_> = per_topic
         .into_iter()
@@ -547,6 +576,12 @@ pub fn watch(id: &str, cookies: Option<&Path>) -> Result<Watch, YoutubeError> {
         watch.rating = None;
     }
     Ok(watch)
+}
+
+/// Deletes one of my playlists, for good.
+pub fn delete_playlist(cookies: &Path, id: &str) -> Result<(), YoutubeError> {
+    InnerTube::new(cookies)?.call("playlist/delete", json!({ "playlistId": id }))?;
+    Ok(())
 }
 
 /// Likes, dislikes or takes my vote back from a video.
@@ -820,6 +855,18 @@ pub fn collect_guide_channels(guide: &Value) -> Vec<Channel> {
 /// Reads `updateSubscribeButtonAction.subscribed` from the API reply.
 pub fn parse_subscription_reply(reply: &Value) -> Option<bool> {
     reply["actions"].as_array()?.iter().find_map(|a| a["updateSubscribeButtonAction"]["subscribed"].as_bool())
+}
+
+/// What `url` weighs in `format`, and how long it is. Blocking, a few seconds.
+pub fn size(url: &str, format: &str, cookies: Option<&Path>) -> Result<crate::domain::Size, YoutubeError> {
+    let mut args: Vec<String> =
+        ["--no-warnings", "--skip-download", "--no-playlist", "-f", format].map(String::from).into();
+    args.extend(["--print", "%(filesize,filesize_approx)s|%(duration)s|%(height)s"].map(String::from));
+    if let Some(cookies) = cookies {
+        args.extend(["--cookies".into(), cookies.display().to_string()]);
+    }
+    args.push(url.to_owned());
+    Ok(crate::domain::parse_size(&run_yt_dlp(&args)?))
 }
 
 fn run_yt_dlp(args: &[String]) -> Result<String, YoutubeError> {

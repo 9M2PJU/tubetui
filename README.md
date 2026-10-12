@@ -23,8 +23,10 @@ Every video opens in its own tab.
   e.g. `rust, nba, jazz`, outside your channels and your history), **Suscripciones** (newest from your
   channels, live and upcoming first), **Mis canales**, **Descubrir canales**
   (YouTube's picks from channels you don't follow yet)
+- **Según lo que vi**: what YouTube puts *Up next* to the last 10 videos you
+  watched, all together and taking turns, without the ones you already saw
 - **Mis listas**: your YouTube playlists, plus *Liked videos* and *Watch
-  later*; `Enter` opens one
+  later*; `Enter` opens one, `x` deletes it from YouTube (after asking)
 - **Historial**: everything you watched, newest first, with the day you
   watched it (`x` removes one)
 - **Resume where you left off**: closing a video remembers the second; opening
@@ -38,10 +40,14 @@ Every video opens in its own tab.
 - **Search** videos in all of YouTube (about a second, more results load as
   you scroll), only in your channels, or inside a channel (`Tab` switches the
   scope); search channels (with their description, whole in the side panel)
-- A **preview** of the selected video with its **thumbnail** (in kitty)
+- A **preview** of the selected video with its **thumbnail** (in kitty), its
+  length and **what it weighs** to download at your quality
+  (*💾 Download ≈ 84 MB (1080p)*), asked to yt-dlp once the selection rests
+  on it
 - With the video in its own window, its tab shows the **video's details**
   (thumbnail, subscribers, views, likes, date) and **Up next**: `Tab` moves
-  into it, `Enter` opens one in a new tab
+  into it, `Enter` opens one in a new tab. Closing the video keeps the tab
+  with its details and Up next; `Enter` plays it again where you left it
 - A **progress bar** under the video (played, downloaded, rest) and its
   volume, resolution and codec on top
 - **Mouse**: click to select, double click to open, wheel to scroll (on the
@@ -75,7 +81,7 @@ Every video opens in its own tab.
 - **Mis videos** and **Mi música** list the files in the folders you choose
   (several per kind); music plays from the chosen song to the end of the list
 - **Descargas**: what you download with `d`, with live progress, speed and
-  time left. `x` cancels one (or removes a finished one from the list, the
+  time left, and its size. `x` cancels one (or removes a finished one from the list, the
   file stays), `Enter` plays the file. Quitting with downloads running asks
   first
 

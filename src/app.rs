@@ -12,7 +12,7 @@ use crate::config::{
     Config, EffectsConfig, Language, PlayerMode, codec_name, language_name, next_codec, next_language, next_quality,
 };
 use crate::doctor::{Check, Manager};
-use crate::domain::{Download, DownloadState, HistoryEntry, TabId, Video, clock, resume_point};
+use crate::domain::{Download, DownloadState, HistoryEntry, Size, TabId, Video, clock, resume_point};
 use crate::i18n::Lang;
 use crate::keymap::KeyContext;
 use crate::media::{LocalFile, MediaKind, parse_dirs};
@@ -26,10 +26,14 @@ pub const FILTERED_LIMIT: u32 = 200;
 const PREFETCH_ROWS: usize = 5;
 /// Videos kept in "Historial".
 const HISTORY_MAX: usize = 1000;
+/// How many of the last watched videos "Según lo que vi" draws from.
+const UP_NEXT_FROM: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Inicio,
+    /// What YouTube suggests next to the videos I watched last.
+    ParaVos,
     Descubrir,
     Suscripciones,
     VerDespues,
@@ -70,8 +74,9 @@ impl Group {
 }
 
 impl Section {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::Inicio,
+        Self::ParaVos,
         Self::Descubrir,
         Self::Suscripciones,
         Self::VerDespues,
@@ -100,6 +105,7 @@ impl Section {
     pub fn label(self, lang: Lang) -> &'static str {
         let (es, en) = match self {
             Self::Inicio => ("Mis recomendados", "My recommendations"),
+            Self::ParaVos => ("Según lo que vi", "From what I watched"),
             Self::Descubrir => ("Descubrir", "Discover"),
             Self::Suscripciones => ("Suscripciones", "Subscriptions"),
             Self::VerDespues => ("Ver después", "Watch later"),
@@ -317,6 +323,11 @@ pub enum Confirm {
     Trash(Vec<PathBuf>),
     /// Quitting stops this many downloads.
     Quit(usize),
+    /// One of my YouTube playlists, deleted for good.
+    DeletePlaylist {
+        id: String,
+        title: String,
+    },
 }
 
 /// A value written to `config.toml`.
@@ -378,6 +389,12 @@ pub enum Action {
         rating: Rating,
         result: Result<(), String>,
     },
+    /// A playlist deleted on YouTube, or why not.
+    PlaylistDeleted {
+        id: String,
+        title: String,
+        result: Result<(), String>,
+    },
     Download,
     /// How a download is going.
     DownloadProgress {
@@ -420,6 +437,8 @@ pub enum Action {
     SkipSegment(TabId, usize),
     /// The newest videos of my channels, checked in the background.
     SubsPolled(Result<Vec<Video>, String>),
+    /// What a video weighs (and lasts), asked to yt-dlp in the background.
+    Sized(String, Result<Size, String>),
     /// The top comments of a tab's video arrived.
     CommentsLoaded(TabId, Result<Vec<Comment>, String>),
     /// Move through the comments of the active tab by this many.
@@ -536,6 +555,10 @@ pub enum Effect {
         name: String,
         subscribe: bool,
     },
+    DeletePlaylist {
+        id: String,
+        title: String,
+    },
     Rate {
         video: String,
         title: String,
@@ -642,6 +665,8 @@ pub struct Tab {
     /// Top comments of its video, once fetched; the first one shown.
     pub comments: Option<Vec<Comment>>,
     pub comments_from: usize,
+    /// Its player is gone, but the details and "up next" stay; Enter plays again.
+    pub ended: bool,
 }
 
 impl Tab {
@@ -656,6 +681,7 @@ impl Tab {
             skipped: HashSet::new(),
             comments: None,
             comments_from: 0,
+            ended: false,
         }
     }
 
@@ -711,6 +737,8 @@ pub struct State {
     pub fresh: Vec<Video>,
     /// … and those, marked in the list while it is open.
     pub fresh_shown: HashSet<String>,
+    /// Weight and length of the videos looked at, by id.
+    pub sizes: HashMap<String, Size>,
     /// Unix time, kept current by the runtime (history dates).
     pub clock: i64,
     /// Ids of my channels.
@@ -768,6 +796,7 @@ impl State {
             known_subs: None,
             fresh: Vec::new(),
             fresh_shown: HashSet::new(),
+            sizes: HashMap::new(),
             clock: 0,
             subs: HashSet::new(),
             ratings: HashMap::new(),
@@ -1117,6 +1146,10 @@ impl State {
                     return vec![Effect::Trash(paths)];
                 }
                 Some(Confirm::Quit(_)) => self.quit = true,
+                Some(Confirm::DeletePlaylist { id, title }) => {
+                    self.status = format!("🗑 {} {title}…", self.tr("Borrando la lista", "Deleting the playlist"));
+                    return vec![Effect::DeletePlaylist { id, title }];
+                }
                 None => {}
             },
             Action::SystemChecked(manager, checks) => self.system_checked(manager, checks),
@@ -1149,7 +1182,9 @@ impl State {
             Action::Trash if self.listing().is_some_and(|l| l.kind == ListKind::Downloads) && self.active == 0 => {
                 return self.cancel_or_forget_download();
             }
+            Action::Trash if self.active == 0 && self.selected_playlist().is_some() => self.ask_delete_playlist(),
             Action::Trash => self.ask_trash(),
+            Action::PlaylistDeleted { id, title, result } => self.playlist_deleted(id, title, result),
             Action::Trashed(result) => self.trashed(result),
             Action::SubscriptionDone { channel_id, name, result } => {
                 return self.subscription_done(channel_id, name, result);
@@ -1167,6 +1202,10 @@ impl State {
             }
             Action::Downloaded { id, result } => return self.downloaded(id, result),
             Action::SubsPolled(result) => return self.subs_polled(result),
+            Action::Sized(id, result) => {
+                // Failed: remembered as unknown, not asked again.
+                self.sizes.insert(id, result.unwrap_or_default());
+            }
             Action::OpenChannel => return self.open_channel(),
             Action::Listen => return self.listen(),
             Action::Status(text) => self.status = text,
@@ -1181,10 +1220,20 @@ impl State {
                 }
             }
             Action::PlayerClosed(id, error) => {
-                self.remove_tab(id);
-                if let Some(error) = error {
-                    self.status = error;
+                let keep = error.is_none() && self.tabs.iter().any(|t| t.id == id && self.details_shown(t));
+                if !keep {
+                    self.remove_tab(id);
+                    if let Some(error) = error {
+                        self.status = error;
+                    }
+                    return Vec::new();
                 }
+                let tab = self.tabs.iter_mut().find(|t| t.id == id).expect("kept");
+                tab.ended = true;
+                tab.on_related = !tab.related_videos().is_empty();
+                self.fullscreen = false;
+                self.status =
+                    self.tr("⏹ Video cerrado · Enter lo vuelve a ver", "⏹ Video closed · Enter plays it again").into();
             }
             Action::Stopped { video, position, duration } => {
                 let Some(entry) = self.history.iter_mut().find(|e| e.video.id == video) else { return Vec::new() };
@@ -1196,6 +1245,7 @@ impl State {
                 self.sync_history();
                 return vec![Effect::SaveHistory(self.history.clone())];
             }
+            Action::TogglePause if self.active_tab().is_some_and(|t| t.ended) => return self.replay(),
             Action::TogglePause => return self.command(PlayerCommand::TogglePause),
             Action::Seek(seconds) => return self.command(PlayerCommand::Seek(seconds)),
             Action::SeekTo(second) => return self.command(PlayerCommand::SeekTo(second)),
@@ -1344,7 +1394,7 @@ impl State {
             return video.map(|v| self.play(Playback::youtube(v))).unwrap_or_default();
         }
         if self.active_tab().is_some() {
-            return Vec::new();
+            return self.replay();
         }
         if self.focus == Focus::Menu {
             return self.open_section(Section::ALL[self.menu]);
@@ -1428,6 +1478,7 @@ impl State {
             }
             Section::Inicio => self.load_feed(Source::Recommended, title, Filter::Mine),
             Section::Descubrir => self.discover(),
+            Section::ParaVos => self.up_next(title),
             Section::DescubrirCanales => self.load_feed(Source::Recommended, title, Filter::NotMine),
             Section::Suscripciones => {
                 self.fresh_shown = self.fresh.drain(..).map(|v| v.id).collect();
@@ -1635,6 +1686,18 @@ impl State {
         }
         let title = Section::Descubrir.label(self.lang()).to_owned();
         self.load_feed(Source::Discover(topics), title, Filter::NotMine)
+    }
+
+    /// "Up next" of the last videos I watched, all together.
+    fn up_next(&mut self, title: String) -> Vec<Effect> {
+        let ids: Vec<String> = self.history.iter().take(UP_NEXT_FROM).map(|e| e.video.id.clone()).collect();
+        if ids.is_empty() {
+            self.status = self
+                .tr("Mirá algunos videos y acá aparece qué sigue", "Watch a few videos and what's next shows up here")
+                .into();
+            return Vec::new();
+        }
+        self.load_feed(Source::UpNext(ids), title, Filter::None)
     }
 
     /// Switches the login to a browser profile or an imported file (both empty = none).
@@ -1967,6 +2030,16 @@ impl State {
         }
     }
 
+    /// The video whose weight is worth asking for: the one looked at, then
+    /// the ones downloading. Not live ones, nor those already known.
+    pub fn size_wanted(&self) -> Option<&Video> {
+        let downloading = self.downloads.iter().filter(|d| matches!(d.state, DownloadState::Running { .. }));
+        self.selected_video()
+            .into_iter()
+            .chain(downloading.map(|d| &d.video))
+            .find(|v| v.live == crate::domain::Live::No && !self.sizes.contains_key(&v.id))
+    }
+
     /// `(id, name, url)` of the channel the user is pointing at.
     pub(crate) fn selected_channel(&self) -> Option<(String, String, Option<String>)> {
         if let Some(v) = self.selected_video() {
@@ -2052,6 +2125,42 @@ impl State {
         }
     }
 
+    fn selected_playlist(&self) -> Option<&crate::domain::Playlist> {
+        match self.listing() {
+            Some(Listing { items: Items::Playlists(playlists), selected, .. }) if self.focus == Focus::List => {
+                playlists.get(*selected)
+            }
+            _ => None,
+        }
+    }
+
+    fn ask_delete_playlist(&mut self) {
+        let Some(playlist) = self.selected_playlist() else { return };
+        // Liked videos and Watch later are YouTube's own: they can't go.
+        if matches!(playlist.id.as_str(), "LL" | "WL") {
+            self.status = self
+                .tr("Esa lista es de YouTube: no se puede borrar", "That list is YouTube's: it can't be deleted")
+                .into();
+            return;
+        }
+        let (id, title) = (playlist.id.clone(), playlist.title.clone());
+        self.confirm = Some(Confirm::DeletePlaylist { id, title });
+    }
+
+    fn playlist_deleted(&mut self, id: String, title: String, result: Result<(), String>) {
+        if let Err(error) = result {
+            self.status = format!("❌ {} {title}: {error}", self.tr("No se pudo borrar", "Could not delete"));
+            return;
+        }
+        for listing in &mut self.stack {
+            if let Items::Playlists(playlists) = &mut listing.items {
+                playlists.retain(|p| p.id != id);
+                listing.selected = listing.selected.min(playlists.len().saturating_sub(1));
+            }
+        }
+        self.status = format!("🗑 {} {title}", self.tr("Lista borrada:", "Playlist deleted:"));
+    }
+
     fn trashed(&mut self, result: Result<Vec<PathBuf>, String>) {
         let paths = match result {
             Ok(paths) => paths,
@@ -2135,6 +2244,9 @@ impl State {
             && let Some(tab) = self.active_tab_mut().filter(|t| t.playback.video.is_some())
         {
             tab.playback.audio_only = !tab.playback.audio_only;
+            if tab.ended {
+                return self.replay();
+            }
             let (id, playback) = (tab.id, tab.playback.clone());
             self.fullscreen = false;
             self.status = if playback.audio_only {
@@ -2200,6 +2312,21 @@ impl State {
             effects.push(Effect::Segments { tab: id, video: video.id.clone() });
         }
         effects
+    }
+
+    /// Plays the closed video of the active tab again, from where it was left.
+    fn replay(&mut self) -> Vec<Effect> {
+        let resume = self.active_tab().and_then(|t| t.playback.video.as_ref()).and_then(|v| self.resume_at(&v.id));
+        let Some(tab) = self.active_tab_mut().filter(|t| t.ended) else { return Vec::new() };
+        tab.ended = false;
+        tab.on_related = false;
+        tab.skipped.clear();
+        tab.playback.start = resume;
+        let (id, playback) = (tab.id, tab.playback.clone());
+        if let Some(start) = resume {
+            self.status = format!("⏯ {} {}", self.tr("Sigue desde", "Resuming at"), clock(start));
+        }
+        vec![Effect::Open(id, playback)]
     }
 
     /// Where I left `id`, if it is worth resuming.
@@ -2612,6 +2739,30 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(s.loading.as_deref(), Some("👍 Videos que me gustan"));
+    }
+
+    #[test]
+    fn my_playlists_can_be_deleted_after_asking() {
+        let mut s = state();
+        s.config.session.browser = "brave".into();
+        let id = load_id(&open(&mut s, Section::MisListas));
+        let playlist = |id: &str| crate::domain::Playlist { id: id.into(), title: format!("t {id}"), count: None };
+        s.update(Action::Loaded(id, Ok(Items::Playlists(vec![playlist("LL"), playlist("PLa"), playlist("PLb")]))));
+        s.update(Action::Trash);
+        assert!(s.confirm.is_none(), "Liked videos is YouTube's");
+        s.update(Action::Down);
+        s.update(Action::Trash);
+        assert!(s.update(Action::Confirm(false)).is_empty());
+        s.update(Action::Trash);
+        assert_eq!(
+            s.update(Action::Confirm(true)),
+            [Effect::DeletePlaylist { id: "PLa".into(), title: "t PLa".into() }]
+        );
+        s.update(Action::PlaylistDeleted { id: "PLa".into(), title: "t PLa".into(), result: Err("401".into()) });
+        assert!(matches!(&s.listing().unwrap().items, Items::Playlists(p) if p.len() == 3));
+        s.update(Action::PlaylistDeleted { id: "PLa".into(), title: "t PLa".into(), result: Ok(()) });
+        assert!(matches!(&s.listing().unwrap().items, Items::Playlists(p) if p.len() == 2));
+        assert!(s.status.contains("borrada"));
     }
 
     #[test]
@@ -3423,6 +3574,61 @@ mod tests {
         s.video_window = false;
         s.update(Action::ToggleFocus);
         assert!(!s.key_context().related, "embedded: the list is under the video");
+    }
+
+    #[test]
+    fn from_what_i_watched_asks_for_the_up_next_of_the_last_ones() {
+        let mut s = state();
+        assert!(open(&mut s, Section::ParaVos).is_empty(), "nothing watched yet");
+        assert!(s.status.contains("Mirá algunos"), "{}", s.status);
+        for id in ["a", "b", "c"] {
+            s.remember(video(id), None);
+        }
+        match open(&mut s, Section::ParaVos).as_slice() {
+            [Effect::Load { source: Source::UpNext(ids), .. }, ..] => assert_eq!(ids, &["c", "b", "a"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_selected_video_is_weighed_once() {
+        let mut s = with_videos(&["a", "b"]);
+        s.update(Action::GoTab(0));
+        assert_eq!(s.size_wanted().unwrap().id, "a");
+        s.update(Action::Sized("a".into(), Ok(Size { bytes: Some(1), ..Size::default() })));
+        assert!(s.size_wanted().is_none(), "known");
+        s.update(Action::Down);
+        assert_eq!(s.size_wanted().unwrap().id, "b");
+        s.update(Action::Sized("b".into(), Err("falló".into())));
+        assert!(s.size_wanted().is_none(), "failed: not asked again");
+    }
+
+    #[test]
+    fn a_closed_video_keeps_its_details_and_up_next() {
+        let mut s = with_videos(&["a"]);
+        s.video_window = true;
+        let a = play(&mut s, 0);
+        s.update(Action::Watched(a, Ok(Watch { related: vec![video("r1"), video("r2")], ..Watch::default() })));
+        s.update(Action::Stopped { video: "a".into(), position: Some(125), duration: Some(600) });
+        assert!(s.update(Action::PlayerClosed(a, None)).is_empty());
+        let tab = s.active_tab().unwrap();
+        assert!(tab.ended && tab.on_related, "the tab stays, on its up next list");
+        s.update(Action::Down);
+        let effects = s.update(Action::Enter);
+        assert!(matches!(effects.as_slice(), [Effect::Open(_, p), ..] if p.video.as_ref().unwrap().id == "r2"));
+        s.update(Action::GoTab(1));
+        s.update(Action::ToggleFocus);
+        match s.update(Action::Enter).as_slice() {
+            [Effect::Open(id, p)] => assert!(*id == a && p.start == Some(125), "again, where it was left"),
+            other => panic!("expected Open, got {other:?}"),
+        }
+        assert!(!s.active_tab().unwrap().ended);
+        s.update(Action::PlayerClosed(a, Some("falló".into())));
+        assert_eq!(s.tabs.len(), 1, "errors still close the tab");
+        s.video_window = false;
+        let r1 = s.tabs[0].id;
+        s.update(Action::PlayerClosed(r1, None));
+        assert!(s.tabs.is_empty(), "embedded: nothing left to show");
     }
 
     #[test]

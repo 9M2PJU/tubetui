@@ -51,6 +51,8 @@ const SUBS_POLL: Duration = Duration::from_secs(15 * 60);
 const SUBS_FIRST_POLL: Duration = Duration::from_secs(60);
 /// A running download reports its progress at most this often (each report redraws).
 const DOWNLOAD_REPORT: Duration = Duration::from_millis(500);
+/// How long the selection rests on a video before yt-dlp is asked its weight.
+const SIZE_DELAY: Duration = Duration::from_millis(800);
 
 /// Started from a launcher (`kitty -e tubetui`), the window closes as soon as
 /// the app exits: keep a startup error on screen until Enter.
@@ -169,6 +171,9 @@ struct Runtime {
     videos: HashMap<TabId, String>,
     /// When to check my channels for new videos next.
     next_poll: Instant,
+    /// The video waiting to be weighed, since when; one yt-dlp at a time.
+    size_wait: Option<(String, Instant)>,
+    sizing: bool,
     /// The yt-dlp process of each running download, to cancel it.
     downloads: HashMap<u64, Arc<Mutex<Option<std::process::Child>>>>,
     /// Players of closed tabs, quitting in the background.
@@ -229,6 +234,8 @@ impl Runtime {
             videos: HashMap::new(),
             downloads: HashMap::new(),
             next_poll: Instant::now() + SUBS_FIRST_POLL,
+            size_wait: None,
+            sizing: false,
             closing: Vec::new(),
             animations: Animations::default(),
             thumbs: Thumbnails::default(),
@@ -399,11 +406,15 @@ impl Runtime {
             self.state.clock = now();
             pending.extend(self.segments_to_skip());
             self.poll_subs();
+            self.ask_size();
             self.retry_with_cookies(terminal.size()?.into());
-            pending.extend(
-                (self.players.iter_mut())
-                    .filter_map(|(id, p)| p.has_exited().then_some(Action::PlayerClosed(*id, None))),
-            );
+            // Players that went away: their tab may stay (details and up next).
+            let exited: Vec<TabId> =
+                self.players.iter_mut().filter_map(|(id, p)| p.has_exited().then_some(*id)).collect();
+            for id in exited {
+                self.stop(id);
+                pending.push(Action::PlayerClosed(id, None));
+            }
             for action in pending {
                 dirty = true;
                 if let Action::SessionReady { cookies, subs } = &action {
@@ -411,6 +422,9 @@ impl Runtime {
                 }
                 if let Action::Downloaded { id, .. } = &action {
                     self.downloads.remove(id);
+                }
+                if let Action::Sized(..) = &action {
+                    self.sizing = false;
                 }
                 for effect in self.state.update(action) {
                     let t = Instant::now();
@@ -459,6 +473,34 @@ impl Runtime {
                 Err(e) => Err(e.to_string()),
             };
             Action::SubsPolled(result)
+        });
+    }
+
+    /// Asks yt-dlp what the video looked at weighs, once the selection rests on it.
+    fn ask_size(&mut self) {
+        if self.sizing {
+            return;
+        }
+        let Some(video) = self.state.size_wanted().cloned() else {
+            self.size_wait = None;
+            return;
+        };
+        match &self.size_wait {
+            Some((id, since)) if *id == video.id && since.elapsed() >= SIZE_DELAY => {}
+            Some((id, _)) if *id == video.id => return,
+            _ => {
+                self.size_wait = Some((video.id, Instant::now()));
+                return;
+            }
+        }
+        self.size_wait = None;
+        self.sizing = true;
+        let format = player::ytdl_format(&self.state.config.player, Mode::Window);
+        let cookies = self.cookies.clone();
+        self.background(move || {
+            let copy = cookies.and_then(|c| session::JarCopy::new(&c).ok());
+            let result = youtube::size(&video.url(), &format, copy.as_ref().map(session::JarCopy::path));
+            Action::Sized(video.id, result.map_err(|e| e.to_string()))
         });
     }
 
@@ -555,6 +597,16 @@ impl Runtime {
                         None => Err(youtube::YoutubeError::NoSession.to_string()),
                     };
                     Action::Rated { video, title, rating, result }
+                });
+            }
+            Effect::DeletePlaylist { id, title } => {
+                let cookies = self.cookies.clone();
+                self.background(move || {
+                    let result = match cookies {
+                        Some(cookies) => youtube::delete_playlist(&cookies, &id).map_err(|e| e.to_string()),
+                        None => Err(youtube::YoutubeError::NoSession.to_string()),
+                    };
+                    Action::PlaylistDeleted { id, title, result }
                 });
             }
             Effect::ScanBrowsers { id } => {

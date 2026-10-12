@@ -200,6 +200,7 @@ fn player(code: KeyCode) -> Option<Action> {
         KeyCode::Char('f') => Some(Action::ToggleFullscreen),
         KeyCode::PageDown => Some(Action::ScrollComments(3)),
         KeyCode::PageUp => Some(Action::ScrollComments(-3)),
+        KeyCode::Enter => Some(Action::Enter),
         KeyCode::Char('[') => Some(Action::Chapter(-1)),
         KeyCode::Char(']') => Some(Action::Chapter(1)),
         KeyCode::Tab => Some(Action::ToggleFocus),
@@ -374,7 +375,7 @@ mod tests {
         assert_eq!(map(char(','), TAB), Some(Action::PrevTrack));
         assert_eq!(map(char('['), TAB), Some(Action::Chapter(-1)));
         assert_eq!(map(char(']'), TAB), Some(Action::Chapter(1)));
-        assert_eq!(map(key(KeyCode::Enter), TAB), None);
+        assert_eq!(map(key(KeyCode::Enter), TAB), Some(Action::Enter), "plays a closed video again");
     }
 
     #[test]

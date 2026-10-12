@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 use crate::app::{Confirm, Focus, Group, ListKind, Listing, Prompt, Section, Setting, State, Tab, language_label};
 use crate::config::{IconSet, donations};
 use crate::doctor::{Manager, Tool};
-use crate::domain::{Channel, Download, DownloadState, Live, Playlist, Video, clock, date_labels};
+use crate::domain::{Channel, Download, DownloadState, Live, Playlist, Size, Video, clock, date_labels};
 use crate::i18n::Lang;
 use crate::media::{LocalFile, MediaKind};
 use crate::player::Info;
@@ -52,12 +52,14 @@ const TEAL: Color = Color::Rgb(115, 218, 202);
 const PURPLE: Color = Color::Rgb(157, 124, 216);
 
 /// One colour per menu entry, in `Section::ALL` order.
-const SECTION_COLORS: [Color; 16] =
-    [BLUE, CYAN, RED, YELLOW, TEAL, GREEN, ORANGE, MAGENTA, GREEN, TEAL, PURPLE, MAGENTA, CYAN, BLUE, PURPLE, MUTED];
+const SECTION_COLORS: [Color; 17] = [
+    BLUE, ORANGE, CYAN, RED, YELLOW, TEAL, GREEN, ORANGE, MAGENTA, GREEN, TEAL, PURPLE, MAGENTA, CYAN, BLUE, PURPLE,
+    MUTED,
+];
 
 pub struct Icons {
     /// In `Section::ALL` order.
-    pub sections: [&'static str; 16],
+    pub sections: [&'static str; 17],
     /// In `Setting::ALL` order.
     pub settings: [&'static str; 27],
     pub logo: &'static str,
@@ -87,7 +89,7 @@ impl Icons {
 }
 
 const EMOJI: Icons = Icons {
-    sections: ["🏠", "🧭", "📺", "🕒", "📜", "📚", "⭐", "💡", "🔎", "📡", "📼", "🎵", "📥", "🔧", "💜", "🚪"],
+    sections: ["🏠", "🎯", "🧭", "📺", "🕒", "📜", "📚", "⭐", "💡", "🔎", "📡", "📼", "🎵", "📥", "🔧", "💜", "🚪"],
     settings: [
         "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "⏩", "🗣", "😀", "🖼", "🖱", "✨", "🌊", "💥", "📼", "🎵",
         "📁", "🏷", "🩺", "👁", "🩳", "🔔", "⬆", "📝",
@@ -110,6 +112,7 @@ const EMOJI: Icons = Icons {
 const NERD: Icons = Icons {
     sections: [
         "\u{f015}",
+        "\u{f140}",
         "\u{f14e}",
         "\u{f05c6}",
         "\u{f017}",
@@ -147,7 +150,7 @@ const NERD: Icons = Icons {
 };
 
 const UNICODE: Icons = Icons {
-    sections: ["⌂", "◎", "▣", "◷", "↺", "≣", "★", "✧", "⌕", "⌁", "▷", "♫", "⇩", "⚙", "♥", "⏻"],
+    sections: ["⌂", "◈", "◎", "▣", "◷", "↺", "≣", "★", "✧", "⌕", "⌁", "▷", "♫", "⇩", "⚙", "♥", "⏻"],
     settings: [
         "☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "»", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "#", "✚",
         "◉", "▯", "♪", "↑", "✎",
@@ -468,7 +471,7 @@ fn draw_watch(frame: &mut Frame, state: &State, icons: &Icons, view: &View, tab:
     if let Some(likes) = watch.and_then(|w| w.likes) {
         numbers.push(format!("👍 {}", compact(likes)));
     }
-    let mut when = vec![video.duration_label()];
+    let mut when = vec![length_label(state, video)];
     if let Some(ts) = watch.and_then(|w| w.published).or(video.published) {
         let (date, age) = date_labels(ts, view.now, lang);
         when.push(format!("{age} ({date})"));
@@ -484,9 +487,14 @@ fn draw_watch(frame: &mut Frame, state: &State, icons: &Icons, view: &View, tab:
         lines.push(Line::from(format!("{} {}", icons.later, lang.pick("En Ver después", "In Watch later"))).fg(CYAN));
     }
     lines.extend(rating_line(state, icons, &video.id));
+    lines.extend(size_line(state, video));
     if tab.playback.audio_only {
         let note = lang.pick("🎧 Solo audio · a vuelve al video", "🎧 Sound only · a brings the video back");
         lines.push(Line::from(note).fg(TEAL));
+    }
+    if tab.ended {
+        let note = lang.pick("⏹ Video cerrado · Enter lo vuelve a ver", "⏹ Video closed · Enter plays it again");
+        lines.push(Line::from(note).fg(YELLOW));
     }
     if let Some(elapsed) = view.opening {
         lines.push(Line::from(loading_text(lang.pick("el video", "the video"), elapsed, lang)).fg(YELLOW));
@@ -966,7 +974,7 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
         Items::Files(files, kind) => {
             files.iter().map(|f| file_row(icons, f, *kind, state.marked.contains(&f.path))).collect()
         }
-        Items::Downloads(downloads) => downloads.iter().map(|d| download_row(d, state.lang())).collect(),
+        Items::Downloads(downloads) => downloads.iter().map(|d| download_row(state, d, state.lang())).collect(),
         Items::About | Items::System => Vec::new(),
     };
     let focused = state.focus == Focus::List;
@@ -1008,7 +1016,7 @@ fn draw_preview(frame: &mut Frame, state: &State, icons: &Icons, view: &View, vi
     } else {
         inner
     };
-    let mut details = vec![v.duration_label()];
+    let mut details = vec![length_label(state, v)];
     if let Some(ts) = v.published {
         let (date, age) = date_labels(ts, view.now, lang);
         details.push(format!("{age} ({date})"));
@@ -1019,6 +1027,7 @@ fn draw_preview(frame: &mut Frame, state: &State, icons: &Icons, view: &View, vi
         Line::from(v.channel.as_str()).fg(MAGENTA),
         Line::from(details.into_iter().filter(|d| !d.is_empty()).collect::<Vec<_>>().join(" · ")).fg(MUTED),
     ];
+    lines.extend(size_line(state, v));
     match v.live {
         Live::Now => lines.push(Line::from(format!("{} {}", icons.live, lang.pick("en vivo", "live"))).fg(RED)),
         Live::Upcoming => {
@@ -1167,7 +1176,24 @@ fn playlist_row<'a>(icons: &Icons, playlist: &'a Playlist, lang: Lang) -> ListIt
 }
 
 /// `⬇  45.3% ━━━━━─────  2.1MiB/s  00:12   title · channel`.
-fn download_row(download: &Download, lang: Lang) -> ListItem<'static> {
+/// How long `video` is, from the list or, when it did not say, from yt-dlp.
+fn length_label(state: &State, video: &Video) -> String {
+    video.duration.or_else(|| state.sizes.get(&video.id).and_then(|s| s.duration)).map(clock).unwrap_or_default()
+}
+
+/// `"💾 Descarga ≈ 30 MB (720p)"`, or that it is being worked out.
+fn size_line(state: &State, video: &Video) -> Option<Line<'static>> {
+    let lang = state.lang();
+    let text = match state.sizes.get(&video.id) {
+        Some(size) if size.bytes.is_some() => format!("💾 {} {}", lang.pick("Descarga", "Download"), size.label()),
+        Some(_) => return None,
+        None if video.live == Live::No => format!("💾 {}", lang.pick("Calculando el peso…", "Working out the size…")),
+        None => return None,
+    };
+    Some(Line::from(text).fg(MUTED))
+}
+
+fn download_row(state: &State, download: &Download, lang: Lang) -> ListItem<'static> {
     const BAR: usize = 12;
     let mut spans = match &download.state {
         DownloadState::Running { permille, speed, eta } => {
@@ -1191,6 +1217,13 @@ fn download_row(download: &Download, lang: Lang) -> ListItem<'static> {
     };
     spans.push(Span::styled(download.video.title.clone(), FG));
     spans.push(Span::styled(format!(" · {}", download.video.channel), MAGENTA));
+    let size = match &download.state {
+        DownloadState::Done(path) => std::fs::metadata(path).ok().map(|m| crate::domain::bytes_label(m.len())),
+        _ => state.sizes.get(&download.video.id).map(Size::label).filter(|l| !l.is_empty()),
+    };
+    if let Some(size) = size {
+        spans.push(Span::styled(format!("  {size}"), YELLOW));
+    }
     match &download.state {
         DownloadState::Done(path) => spans.push(Span::styled(format!("  {}", path.display()), MUTED)),
         DownloadState::Failed(error) => spans.push(Span::styled(format!("  {error}"), RED)),
@@ -1281,6 +1314,7 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
             Confirm::Unsubscribe { .. } => key(lang.pick("s", "y"), "sí, desuscribirme", "yes, unsubscribe"),
             Confirm::Trash(_) => key(lang.pick("s", "y"), "sí, a la papelera", "yes, to the trash"),
             Confirm::Quit(_) => key(lang.pick("s", "y"), "sí, salir y cortarlas", "yes, quit and stop them"),
+            Confirm::DeletePlaylist { .. } => key(lang.pick("s", "y"), "sí, borrarla", "yes, delete it"),
         };
         vec![yes, key(lang.pick("otra tecla", "other key"), "no", "no")]
     } else if state.help {
@@ -1301,13 +1335,20 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
             key("Tab", "volver al video", "back to the video"),
             key("l", "ver después", "watch later"),
             key("c", "canal", "channel"),
-            key("espacio", "pausa", "pause"),
+            if state.active_tab().is_some_and(|t| t.ended) {
+                key("espacio", "volver a verlo", "play it again")
+            } else {
+                key("espacio", "pausa", "pause")
+            },
         ]
     } else if state.active_tab().is_some() {
         let mut keys = rows(keymap::IN_TAB);
         keys.insert(1, key("Ctrl+y + x", "cerrar la pestaña", "close the tab"));
         if state.related_shown().is_some() {
             keys.insert(0, key("Tab", "A continuación", "Up next"));
+        }
+        if state.active_tab().is_some_and(|t| t.ended) {
+            keys.insert(0, key("Enter", "volver a verlo", "play it again"));
         }
         keys.extend(rows(keymap::ON_VIDEO));
         keys
@@ -1352,7 +1393,11 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
             ],
             Some(Items::Channels(_)) => vec![key("Enter", "ver sus videos", "its videos"), subscribe, back],
             Some(Items::Profiles(_)) => vec![key("Enter", "usar esta sesión", "use this login"), back],
-            Some(Items::Playlists(_)) => vec![key("Enter", "ver sus videos", "its videos"), back],
+            Some(Items::Playlists(_)) => vec![
+                key("Enter", "ver sus videos", "its videos"),
+                key("x", "borrar la lista (pide confirmar)", "delete the playlist (asks first)"),
+                back,
+            ],
             Some(Items::Files(_, kind)) => vec![
                 match kind {
                     MediaKind::Music => key("Enter", "escuchar desde esta canción", "play from this song"),
@@ -1509,6 +1554,11 @@ fn draw_confirm(frame: &mut Frame, confirm: &Confirm, lang: Lang) {
             Span::raw(lang.pick("Hay ", "There are ")),
             Span::styled(n.to_string(), Style::new().fg(MAGENTA).bold()),
             Span::raw(lang.pick(" descargas en curso. ¿Salir igual?", " downloads running. Quit anyway?")),
+        ]),
+        Confirm::DeletePlaylist { title, .. } => Line::from(vec![
+            Span::raw(lang.pick("¿Borrar de YouTube la lista ", "Delete the playlist ")),
+            Span::styled(truncate(title, 24), Style::new().fg(MAGENTA).bold()),
+            Span::raw(lang.pick("?", " from YouTube?")),
         ]),
         Confirm::Trash(paths) => {
             let what = match paths.as_slice() {

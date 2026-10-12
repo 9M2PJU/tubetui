@@ -110,6 +110,50 @@ pub fn parse_progress(line: &str) -> Option<(u16, String, String)> {
     Some(((percent.clamp(0.0, 100.0) * 10.0).round() as u16, speed, eta))
 }
 
+/// What a video weighs at the chosen quality, as yt-dlp sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Size {
+    pub bytes: Option<u64>,
+    /// Height of the video part: 720 for 720p.
+    pub height: Option<u32>,
+    /// Seconds.
+    pub duration: Option<u32>,
+}
+
+impl Size {
+    /// `"≈ 28.5 MB (720p)"`; empty when yt-dlp did not know.
+    pub fn label(&self) -> String {
+        let Some(bytes) = self.bytes else { return String::new() };
+        match self.height {
+            Some(h) => format!("≈ {} ({h}p)", bytes_label(bytes)),
+            None => format!("≈ {}", bytes_label(bytes)),
+        }
+    }
+}
+
+/// `"29889635|213.5|720"` (`--print "%(filesize,filesize_approx)s|%(duration)s|%(height)s"`).
+pub fn parse_size(line: &str) -> Size {
+    let mut parts = line.trim().split('|').map(|p| p.trim().parse::<f64>().ok().filter(|n| *n > 0.0));
+    let mut next = || parts.next().flatten();
+    let bytes = next().map(|n| n as u64);
+    let duration = next().map(|n| n.round() as u32);
+    Size { bytes, height: next().map(|n| n as u32), duration }
+}
+
+/// `"850 KB"`, `"28.5 MB"`, `"1.2 GB"`.
+pub fn bytes_label(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b >= 1e9 {
+        format!("{:.1} GB", b / 1e9)
+    } else if b >= 1e7 {
+        format!("{:.0} MB", b / 1e6)
+    } else if b >= 1e6 {
+        format!("{:.1} MB", b / 1e6)
+    } else {
+        format!("{:.0} KB", b / 1e3)
+    }
+}
+
 /// Seconds worth resuming from: not the first half minute, not the end.
 pub fn resume_point(position: f64, duration: Option<f64>) -> Option<u32> {
     const MARGIN: f64 = 30.0;
@@ -241,6 +285,18 @@ mod tests {
     fn mix_url_plays_first_video_inside_the_list() {
         let mix = Video { id: "RDdQw4w9WgXcQ".into(), ..video("x") };
         assert_eq!(mix.url(), "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ");
+    }
+
+    #[test]
+    fn sizes_parse_and_read() {
+        let size = parse_size("29889635|213.4|720\n");
+        assert_eq!(size, Size { bytes: Some(29_889_635), height: Some(720), duration: Some(213) });
+        assert_eq!(size.label(), "≈ 30 MB (720p)");
+        assert_eq!(parse_size("NA|NA|NA"), Size::default());
+        assert_eq!(Size::default().label(), "");
+        assert_eq!(parse_size("4200000|60|NA").label(), "≈ 4.2 MB");
+        assert_eq!(bytes_label(850_000), "850 KB");
+        assert_eq!(bytes_label(1_234_000_000), "1.2 GB");
     }
 
     #[test]
