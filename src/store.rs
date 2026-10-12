@@ -1,10 +1,10 @@
-//! Local files: the "Ver después" list and the cache of my channel ids.
+//! Local files: the "Ver después" list, my history and the cache of my channel ids.
 
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::domain::Video;
+use crate::domain::{Download, DownloadState, HistoryEntry, Video};
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -16,6 +16,10 @@ pub struct Paths {
     pub cache: PathBuf,
     /// Videos watched in tubetui, one id per line, oldest first.
     pub watched: PathBuf,
+    /// `history.json`: what I opened and where I left it, newest first.
+    pub history: PathBuf,
+    /// `downloads.json`: finished downloads, newest first.
+    pub downloads: PathBuf,
 }
 
 impl Paths {
@@ -31,6 +35,8 @@ impl Paths {
             subs: cache.join("subs.txt"),
             cache: cache.into(),
             watched: data.join("watched.txt"),
+            history: data.join("history.json"),
+            downloads: data.join("downloads.json"),
         }
     }
 }
@@ -55,6 +61,33 @@ pub fn save_subs(path: &Path, subs: &HashSet<String>) -> io::Result<()> {
     let mut ids: Vec<&str> = subs.iter().map(String::as_str).collect();
     ids.sort_unstable();
     write_atomic(path, &(ids.join("\n") + "\n"))
+}
+
+/// My history; a damaged file is set aside (`history.json.bak`) rather than
+/// overwritten on the next save.
+pub fn load_history(path: &Path) -> Vec<HistoryEntry> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    serde_json::from_str(&text).unwrap_or_else(|_| {
+        let _ = std::fs::rename(path, path.with_extension("json.bak"));
+        Vec::new()
+    })
+}
+
+pub fn save_history(path: &Path, history: &[HistoryEntry]) -> io::Result<()> {
+    write_atomic(path, &serde_json::to_string(history).map_err(io::Error::other)?)
+}
+
+/// Finished downloads whose file is still there.
+pub fn load_downloads(path: &Path) -> Vec<Download> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let downloads: Vec<Download> = serde_json::from_str(&text).unwrap_or_default();
+    downloads.into_iter().filter(|d| matches!(&d.state, DownloadState::Done(file) if file.exists())).collect()
+}
+
+/// Keeps the finished ones only: the rest means nothing after a restart.
+pub fn save_downloads(path: &Path, downloads: &[Download]) -> io::Result<()> {
+    let done: Vec<&Download> = downloads.iter().filter(|d| matches!(d.state, DownloadState::Done(_))).collect();
+    write_atomic(path, &serde_json::to_string(&done).map_err(io::Error::other)?)
 }
 
 /// Ids kept in `watched.txt`; older ones are dropped beyond this.
@@ -92,6 +125,7 @@ pub fn parse_ytv_later(text: &str) -> Vec<Video> {
                 duration: field(3).as_deref().and_then(parse_duration),
                 published: None,
                 live: Default::default(),
+                short: false,
             })
         })
         .collect();
@@ -143,6 +177,35 @@ mod tests {
         add_watched(&path, "a").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "b\na\n", "no repeats, newest last");
         assert_eq!(load_watched(&path), HashSet::from(["a".to_string(), "b".to_string()]));
+    }
+
+    #[test]
+    fn history_round_trips_and_a_damaged_file_is_kept_aside() {
+        let path = temp_dir("history").join("data/history.json");
+        assert!(load_history(&path).is_empty());
+        let entry = HistoryEntry { video: video("a"), at: 5, position: Some(70) };
+        save_history(&path, std::slice::from_ref(&entry)).unwrap();
+        assert_eq!(load_history(&path), vec![entry]);
+        std::fs::write(&path, "[oops").unwrap();
+        assert!(load_history(&path).is_empty());
+        assert_eq!(std::fs::read_to_string(path.with_extension("json.bak")).unwrap(), "[oops");
+    }
+
+    #[test]
+    fn downloads_keep_the_finished_ones_still_on_disk() {
+        let dir = temp_dir("downloads");
+        let path = dir.join("data/downloads.json");
+        let file = dir.join("a.mp4");
+        std::fs::write(&file, "x").unwrap();
+        let download = |id, state| Download { id, video: video("a"), state };
+        let list = [
+            download(1, DownloadState::Done(file.clone())),
+            download(2, DownloadState::Done(dir.join("gone.mp4"))),
+            download(3, DownloadState::Failed("x".into())),
+            download(4, DownloadState::Running { permille: 5, speed: String::new(), eta: String::new() }),
+        ];
+        save_downloads(&path, &list).unwrap();
+        assert_eq!(load_downloads(&path), [download(1, DownloadState::Done(file))]);
     }
 
     #[test]

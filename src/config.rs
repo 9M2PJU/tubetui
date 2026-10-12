@@ -67,6 +67,8 @@ pub struct PlayerConfig {
     pub sub_lang: String,
     /// Keep listening when leaving the video tab (only the last video plays).
     pub background_audio: bool,
+    /// Skip sponsors, self promotion and "subscribe!" reminders (SponsorBlock).
+    pub sponsorblock: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -154,6 +156,10 @@ pub struct UiConfig {
     /// Inicio, Descubrir and Suscripciones leave out the videos I watched
     /// (`v` shows them for a while).
     pub hide_watched: bool,
+    /// Feeds, searches and channels leave out YouTube Shorts.
+    pub hide_shorts: bool,
+    /// While the app is open, tell when my channels publish something new.
+    pub notify_new: bool,
 }
 
 /// Short animations, each one can be turned off.
@@ -303,6 +309,7 @@ impl Default for PlayerConfig {
             language: Language::Subtitles,
             sub_lang: "es".into(),
             background_audio: true,
+            sponsorblock: true,
         }
     }
 }
@@ -318,6 +325,8 @@ impl Default for UiConfig {
             mouse: true,
             check_updates: true,
             hide_watched: true,
+            hide_shorts: true,
+            notify_new: true,
         }
     }
 }

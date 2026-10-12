@@ -12,17 +12,20 @@ use crate::config::{
     Config, EffectsConfig, Language, PlayerMode, codec_name, language_name, next_codec, next_language, next_quality,
 };
 use crate::doctor::{Check, Manager};
-use crate::domain::{TabId, Video};
+use crate::domain::{Download, DownloadState, HistoryEntry, TabId, Video, clock, resume_point};
 use crate::i18n::Lang;
 use crate::keymap::KeyContext;
 use crate::media::{LocalFile, MediaKind, parse_dirs};
+use crate::sponsorblock::Segment;
 use crate::update::Update;
-use crate::youtube::{Items, Rating, SearchPage, Source, Watch};
+use crate::youtube::{Comment, Items, Rating, SearchPage, Source, Watch};
 
 /// Lists that are filtered afterwards ask YouTube for more videos.
 pub const FILTERED_LIMIT: u32 = 200;
 /// The next page is asked for when the selection gets this close to the end.
 const PREFETCH_ROWS: usize = 5;
+/// Videos kept in "Historial".
+const HISTORY_MAX: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -30,6 +33,10 @@ pub enum Section {
     Descubrir,
     Suscripciones,
     VerDespues,
+    /// What I opened in tubetui, newest first; resumes where I left.
+    Historial,
+    /// My YouTube playlists.
+    MisListas,
     Canales,
     /// YouTube's picks from channels I don't follow.
     DescubrirCanales,
@@ -37,6 +44,8 @@ pub enum Section {
     BuscarCanales,
     MisVideos,
     MiMusica,
+    /// Running and finished downloads.
+    Descargas,
     Configuracion,
     AcercaDe,
     Salir,
@@ -61,17 +70,20 @@ impl Group {
 }
 
 impl Section {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 16] = [
         Self::Inicio,
         Self::Descubrir,
         Self::Suscripciones,
         Self::VerDespues,
+        Self::Historial,
+        Self::MisListas,
         Self::Canales,
         Self::DescubrirCanales,
         Self::BuscarVideos,
         Self::BuscarCanales,
         Self::MisVideos,
         Self::MiMusica,
+        Self::Descargas,
         Self::Configuracion,
         Self::AcercaDe,
         Self::Salir,
@@ -79,7 +91,7 @@ impl Section {
 
     pub fn group(self) -> Group {
         match self {
-            Self::MisVideos | Self::MiMusica => Group::Local,
+            Self::MisVideos | Self::MiMusica | Self::Descargas => Group::Local,
             Self::Configuracion | Self::AcercaDe | Self::Salir => Group::App,
             _ => Group::YouTube,
         }
@@ -91,12 +103,15 @@ impl Section {
             Self::Descubrir => ("Descubrir", "Discover"),
             Self::Suscripciones => ("Suscripciones", "Subscriptions"),
             Self::VerDespues => ("Ver después", "Watch later"),
+            Self::Historial => ("Historial", "History"),
+            Self::MisListas => ("Mis listas", "My playlists"),
             Self::Canales => ("Mis canales", "My channels"),
             Self::DescubrirCanales => ("Descubrir canales", "Discover channels"),
             Self::BuscarVideos => ("Buscar videos", "Search videos"),
             Self::BuscarCanales => ("Buscar canales", "Search channels"),
             Self::MisVideos => ("Mis videos", "My videos"),
             Self::MiMusica => ("Mi música", "My music"),
+            Self::Descargas => ("Descargas", "Downloads"),
             Self::Configuracion => ("Configuración", "Settings"),
             Self::AcercaDe => ("Acerca de", "About"),
             Self::Salir => ("Salir", "Quit"),
@@ -117,6 +132,7 @@ pub enum Setting {
     Quality,
     VideoMode,
     BackgroundAudio,
+    SponsorBlock,
     AppLang,
     Icons,
     Thumbnails,
@@ -130,12 +146,14 @@ pub enum Setting {
     DiscoverTopics,
     SystemCheck,
     HideWatched,
+    HideShorts,
+    NotifyNew,
     CheckUpdates,
     EditFile,
 }
 
 impl Setting {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 27] = [
         Self::Browser,
         Self::ImportCookies,
         Self::Refresh,
@@ -145,6 +163,7 @@ impl Setting {
         Self::Quality,
         Self::VideoMode,
         Self::BackgroundAudio,
+        Self::SponsorBlock,
         Self::AppLang,
         Self::Icons,
         Self::Thumbnails,
@@ -158,6 +177,8 @@ impl Setting {
         Self::DiscoverTopics,
         Self::SystemCheck,
         Self::HideWatched,
+        Self::HideShorts,
+        Self::NotifyNew,
         Self::CheckUpdates,
         Self::EditFile,
     ];
@@ -175,6 +196,7 @@ impl Setting {
             Self::Quality => ("Calidad máxima", "Maximum quality"),
             Self::VideoMode => ("Video", "Video"),
             Self::BackgroundAudio => ("Al salir de la pestaña del video", "When leaving the video tab"),
+            Self::SponsorBlock => ("Saltar patrocinios (SponsorBlock)", "Skip sponsors (SponsorBlock)"),
             Self::AppLang => ("Idioma de la app (Ctrl+y + l)", "App language (Ctrl+y + l)"),
             Self::Icons => ("Íconos", "Icons"),
             Self::Thumbnails => ("Portadas de los videos (kitty)", "Video thumbnails (kitty)"),
@@ -190,6 +212,8 @@ impl Setting {
             Self::HideWatched => {
                 ("Ocultar los vistos en Inicio (v los muestra)", "Hide watched in Home (v shows them)")
             }
+            Self::HideShorts => ("Ocultar los Shorts", "Hide Shorts"),
+            Self::NotifyNew => ("Avisar de videos nuevos de mis canales", "Tell me about new videos from my channels"),
             Self::CheckUpdates => ("Buscar versiones nuevas (una vez por día)", "Look for new versions (once a day)"),
             Self::EditFile => ("Editar config.toml", "Edit config.toml"),
         };
@@ -249,6 +273,10 @@ pub enum ListKind {
     Plain,
     /// "Ver después", kept in sync with `State::later`.
     Later,
+    /// "Historial", kept in sync with `State::history`.
+    History,
+    /// "Descargas", kept in sync with `State::downloads`.
+    Downloads,
     /// A channel's videos; `/` searches inside it.
     Channel(ChannelRef),
     /// "Mis canales": unsubscribing takes the channel out.
@@ -287,6 +315,8 @@ pub enum Confirm {
     },
     /// Local files to move to the trash.
     Trash(Vec<PathBuf>),
+    /// Quitting stops this many downloads.
+    Quit(usize),
 }
 
 /// A value written to `config.toml`.
@@ -349,6 +379,20 @@ pub enum Action {
         result: Result<(), String>,
     },
     Download,
+    /// How a download is going.
+    DownloadProgress {
+        id: u64,
+        permille: u16,
+        speed: String,
+        eta: String,
+    },
+    /// A download ended: the file, or why not.
+    Downloaded {
+        id: u64,
+        result: Result<PathBuf, String>,
+    },
+    /// Play the selected video as sound only; in its tab, switch between sound and video.
+    Listen,
     OpenChannel,
     Status(String),
     NextTab,
@@ -358,10 +402,28 @@ pub enum Action {
     CloseTab,
     /// The player went away on its own (window closed, video ended, failed to start).
     PlayerClosed(TabId, Option<String>),
+    /// The player of a YouTube video stopped here (seconds), to resume it later.
+    Stopped {
+        video: String,
+        position: Option<u32>,
+        duration: Option<u32>,
+    },
     TogglePause,
     Seek(i32),
     /// Jump to this second (a click on the progress bar).
     SeekTo(u32),
+    /// Previous / next chapter.
+    Chapter(i32),
+    /// The SponsorBlock segments of a tab's video arrived.
+    SegmentsLoaded(TabId, Vec<Segment>),
+    /// A tab's video reached this segment: jump over it.
+    SkipSegment(TabId, usize),
+    /// The newest videos of my channels, checked in the background.
+    SubsPolled(Result<Vec<Video>, String>),
+    /// The top comments of a tab's video arrived.
+    CommentsLoaded(TabId, Result<Vec<Comment>, String>),
+    /// Move through the comments of the active tab by this many.
+    ScrollComments(i32),
     Volume(i32),
     ToggleMute,
     CycleSubtitles,
@@ -419,6 +481,16 @@ pub enum Effect {
     SaveWatched(String),
     /// Move these files to the system trash.
     Trash(Vec<PathBuf>),
+    /// Fetch the top comments of a tab's video.
+    Comments {
+        tab: TabId,
+        token: String,
+    },
+    /// Fetch the SponsorBlock segments of a tab's video.
+    Segments {
+        tab: TabId,
+        video: String,
+    },
     /// Fetch the details and related videos of a tab's video.
     Watch {
         tab: TabId,
@@ -455,6 +527,7 @@ pub enum Effect {
     ImportCookies(String),
     EditConfig,
     SaveLater(Vec<Video>),
+    SaveHistory(Vec<HistoryEntry>),
     SaveSubs(HashSet<String>),
     /// Read my channels again with the current login (no browser).
     LoadSubs,
@@ -468,8 +541,18 @@ pub enum Effect {
         title: String,
         rating: Rating,
     },
-    Download(Video),
+    Download {
+        id: u64,
+        video: Video,
+    },
+    /// Stop a running download.
+    CancelDownload(u64),
+    /// A desktop notification (best effort).
+    Notify(String),
+    SaveDownloads(Vec<Download>),
     Open(TabId, Playback),
+    /// Restart a tab's player with a changed playback, at the second it was at.
+    Reopen(TabId, Playback),
     Close(TabId),
     Command(TabId, PlayerCommand),
 }
@@ -479,6 +562,7 @@ pub enum PlayerCommand {
     TogglePause,
     Seek(i32),
     SeekTo(u32),
+    Chapter(i32),
     Volume(i32),
     ToggleMute,
     CycleSubtitles,
@@ -508,6 +592,8 @@ pub struct Playback {
     pub queue: Vec<String>,
     /// Music: no video output, `.`/`,` move through the queue.
     pub audio_only: bool,
+    /// Second to start at (resuming).
+    pub start: Option<u32>,
 }
 
 impl Playback {
@@ -518,6 +604,7 @@ impl Playback {
             queue: vec![video.url()],
             video: Some(video),
             audio_only: false,
+            start: None,
         }
     }
 
@@ -534,6 +621,7 @@ impl Playback {
             video: None,
             queue,
             audio_only: kind == MediaKind::Music,
+            start: None,
         })
     }
 }
@@ -548,11 +636,27 @@ pub struct Tab {
     pub related: usize,
     /// The keys move in the related list instead of driving the player.
     pub on_related: bool,
+    /// SponsorBlock segments of its video, and those already skipped.
+    pub segments: Vec<Segment>,
+    pub skipped: HashSet<usize>,
+    /// Top comments of its video, once fetched; the first one shown.
+    pub comments: Option<Vec<Comment>>,
+    pub comments_from: usize,
 }
 
 impl Tab {
     fn new(id: TabId, playback: Playback) -> Self {
-        Self { id, playback, watch: None, related: 0, on_related: false }
+        Self {
+            id,
+            playback,
+            watch: None,
+            related: 0,
+            on_related: false,
+            segments: Vec::new(),
+            skipped: HashSet::new(),
+            comments: None,
+            comments_from: 0,
+        }
     }
 
     pub fn related_videos(&self) -> &[Video] {
@@ -597,6 +701,18 @@ pub struct State {
     pub loading: Option<String>,
     /// "Ver después", newest first.
     pub later: Vec<Video>,
+    /// "Historial", newest first.
+    pub history: Vec<HistoryEntry>,
+    /// "Descargas", newest first.
+    pub downloads: Vec<Download>,
+    /// Videos of my channels seen by the background check (`None` until the first one).
+    known_subs: Option<HashSet<String>>,
+    /// New videos of my channels since "Suscripciones" was last opened…
+    pub fresh: Vec<Video>,
+    /// … and those, marked in the list while it is open.
+    pub fresh_shown: HashSet<String>,
+    /// Unix time, kept current by the runtime (history dates).
+    pub clock: i64,
     /// Ids of my channels.
     pub subs: HashSet<String>,
     /// How I rated the videos I opened or voted on.
@@ -628,6 +744,7 @@ pub struct State {
     subs_rechecked: bool,
     next_tab: u64,
     next_request: u64,
+    next_download: u64,
 }
 
 impl State {
@@ -646,6 +763,12 @@ impl State {
             stack: Vec::new(),
             loading: None,
             later,
+            history: Vec::new(),
+            downloads: Vec::new(),
+            known_subs: None,
+            fresh: Vec::new(),
+            fresh_shown: HashSet::new(),
+            clock: 0,
             subs: HashSet::new(),
             ratings: HashMap::new(),
             confirm: None,
@@ -663,7 +786,19 @@ impl State {
             subs_rechecked: false,
             next_tab: 0,
             next_request: 0,
+            next_download: 0,
         }
+    }
+
+    /// The finished downloads of earlier sessions.
+    pub fn set_downloads(&mut self, downloads: Vec<Download>) {
+        self.next_download = downloads.iter().map(|d| d.id + 1).max().unwrap_or(0);
+        self.downloads = downloads;
+    }
+
+    /// Downloads still running.
+    pub fn downloading(&self) -> usize {
+        self.downloads.iter().filter(|d| matches!(d.state, DownloadState::Running { .. })).count()
     }
 
     /// Interface language.
@@ -695,9 +830,15 @@ impl State {
         self.active.checked_sub(1).and_then(|i| self.tabs.get_mut(i))
     }
 
-    /// The active tab shows its related videos (video in a window, list fetched).
+    /// A YouTube tab whose pane is free for the video's details and "Up next":
+    /// the video plays in its own window, or there is no picture at all.
+    pub fn details_shown(&self, tab: &Tab) -> bool {
+        tab.playback.video.is_some() && (self.video_window || tab.playback.audio_only)
+    }
+
+    /// The active tab shows its related videos (details shown, list fetched).
     pub fn related_shown(&self) -> Option<&Tab> {
-        self.active_tab().filter(|t| self.video_window && !t.playback.audio_only && !t.related_videos().is_empty())
+        self.active_tab().filter(|t| self.details_shown(t) && !t.related_videos().is_empty())
     }
 
     /// The related list of the active tab takes the keys.
@@ -707,6 +848,11 @@ impl State {
 
     pub fn listing(&self) -> Option<&Listing> {
         self.stack.last()
+    }
+
+    #[cfg(test)]
+    fn listing_mut(&mut self) -> &mut Listing {
+        self.stack.last_mut().expect("a list")
     }
 
     pub fn key_context(&self) -> KeyContext {
@@ -762,6 +908,10 @@ impl State {
                     self.tr("se pausa", "pauses").into()
                 }
             }
+            Setting::SponsorBlock => {
+                let (es, en) = on_off(player.sponsorblock);
+                self.tr(es, en).into()
+            }
             Setting::AppLang => lang.name().into(),
             Setting::Icons => self.config.ui.icons.as_str().into(),
             Setting::Thumbnails => {
@@ -786,6 +936,14 @@ impl State {
             },
             Setting::HideWatched => {
                 let (es, en) = on_off(self.config.ui.hide_watched);
+                self.tr(es, en).into()
+            }
+            Setting::HideShorts => {
+                let (es, en) = on_off(self.config.ui.hide_shorts);
+                self.tr(es, en).into()
+            }
+            Setting::NotifyNew => {
+                let (es, en) = on_off(self.config.ui.notify_new);
                 self.tr(es, en).into()
             }
             Setting::FxStartup | Setting::FxPages | Setting::FxDialogs => {
@@ -910,7 +1068,25 @@ impl State {
                     if let (Some(rating), Some(video)) = (watch.rating, &tab.playback.video) {
                         self.ratings.insert(video.id.clone(), rating);
                     }
+                    let token = watch.comments_token.clone();
                     tab.watch = Some(watch);
+                    if let Some(token) = token.filter(|_| tab.comments.is_none()) {
+                        return vec![Effect::Comments { tab: id, token }];
+                    }
+                }
+            }
+            Action::CommentsLoaded(id, result) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+                    // Failed: shown as none rather than loading forever.
+                    tab.comments = Some(result.unwrap_or_default());
+                }
+            }
+            Action::ScrollComments(delta) => {
+                if let Some(tab) = self.active_tab_mut()
+                    && let Some(comments) = &tab.comments
+                {
+                    let last = comments.len().saturating_sub(1);
+                    tab.comments_from = tab.comments_from.saturating_add_signed(delta as isize).min(last);
                 }
             }
             Action::SessionReady { subs, .. } => return self.session_ready(subs),
@@ -940,6 +1116,7 @@ impl State {
                     self.status = format!("🗑 {} {}…", self.tr("A la papelera:", "To the trash:"), paths.len());
                     return vec![Effect::Trash(paths)];
                 }
+                Some(Confirm::Quit(_)) => self.quit = true,
                 None => {}
             },
             Action::SystemChecked(manager, checks) => self.system_checked(manager, checks),
@@ -966,6 +1143,12 @@ impl State {
                 self.update = Some(update);
             }
             Action::ToggleMark => return self.toggle_mark(),
+            Action::Trash if self.listing().is_some_and(|l| l.kind == ListKind::History) && self.active == 0 => {
+                return self.forget_selected();
+            }
+            Action::Trash if self.listing().is_some_and(|l| l.kind == ListKind::Downloads) && self.active == 0 => {
+                return self.cancel_or_forget_download();
+            }
             Action::Trash => self.ask_trash(),
             Action::Trashed(result) => self.trashed(result),
             Action::SubscriptionDone { channel_id, name, result } => {
@@ -973,13 +1156,19 @@ impl State {
             }
             Action::Rate(rating) => return self.rate(rating),
             Action::Rated { video, title, rating, result } => self.rated(video, title, rating, result),
-            Action::Download => {
-                if let Some(video) = self.selected_video().cloned() {
-                    self.status = format!("⬇ {}: {}", self.tr("Descargando", "Downloading"), video.title);
-                    return vec![Effect::Download(video)];
+            Action::Download => return self.start_download(),
+            Action::DownloadProgress { id, permille, speed, eta } => {
+                if let Some(d) = self.downloads.iter_mut().find(|d| d.id == id)
+                    && matches!(d.state, DownloadState::Running { .. })
+                {
+                    d.state = DownloadState::Running { permille, speed, eta };
+                    self.sync_downloads();
                 }
             }
+            Action::Downloaded { id, result } => return self.downloaded(id, result),
+            Action::SubsPolled(result) => return self.subs_polled(result),
             Action::OpenChannel => return self.open_channel(),
+            Action::Listen => return self.listen(),
             Action::Status(text) => self.status = text,
             Action::NextTab => self.active = (self.active + 1) % (self.tabs.len() + 1),
             Action::PrevTab => self.active = self.active.checked_sub(1).unwrap_or(self.tabs.len()),
@@ -997,9 +1186,36 @@ impl State {
                     self.status = error;
                 }
             }
+            Action::Stopped { video, position, duration } => {
+                let Some(entry) = self.history.iter_mut().find(|e| e.video.id == video) else { return Vec::new() };
+                let point = position.and_then(|p| resume_point(p.into(), duration.map(f64::from)));
+                if entry.position == point {
+                    return Vec::new();
+                }
+                entry.position = point;
+                self.sync_history();
+                return vec![Effect::SaveHistory(self.history.clone())];
+            }
             Action::TogglePause => return self.command(PlayerCommand::TogglePause),
             Action::Seek(seconds) => return self.command(PlayerCommand::Seek(seconds)),
             Action::SeekTo(second) => return self.command(PlayerCommand::SeekTo(second)),
+            Action::Chapter(delta) => return self.command(PlayerCommand::Chapter(delta)),
+            Action::SegmentsLoaded(id, segments) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+                    tab.segments = segments;
+                }
+            }
+            Action::SkipSegment(id, index) => {
+                let lang = self.lang();
+                let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return Vec::new() };
+                let Some(segment) = tab.segments.get(index) else { return Vec::new() };
+                if !tab.skipped.insert(index) {
+                    return Vec::new();
+                }
+                let end = segment.end.div_ceil(1000) as u32;
+                self.status = format!("⏩ {}: {}", lang.pick("Salteado", "Skipped"), segment.label(lang));
+                return vec![Effect::Command(id, PlayerCommand::SeekTo(end))];
+            }
             Action::Volume(delta) => return self.command(PlayerCommand::Volume(delta)),
             Action::ToggleMute => return self.command(PlayerCommand::ToggleMute),
             Action::CycleSubtitles => return self.command(PlayerCommand::CycleSubtitles),
@@ -1078,6 +1294,9 @@ impl State {
                 return effects;
             }
             Action::ToggleUiLang => return self.toggle_ui_lang(),
+            Action::Quit if self.downloading() > 0 && !matches!(self.confirm, Some(Confirm::Quit(_))) => {
+                self.confirm = Some(Confirm::Quit(self.downloading()));
+            }
             Action::Quit => self.quit = true,
         }
         Vec::new()
@@ -1145,6 +1364,13 @@ impl State {
                 Some(c) => self.open_channel_list(c.name, c.url),
                 None => Vec::new(),
             },
+            Items::Playlists(playlists) => match playlists.get(selected).cloned() {
+                Some(p) => {
+                    let title = p.name(self.lang()).to_owned();
+                    self.load(Source::Playlist(p.id), title, Filter::None, true, ListKind::Plain)
+                }
+                None => Vec::new(),
+            },
             Items::Profiles(profiles) => match profiles.get(selected).cloned() {
                 Some(spec) => {
                     self.config.session.asked = true;
@@ -1169,6 +1395,17 @@ impl State {
                 }
                 None => Vec::new(),
             },
+            Items::Downloads(downloads) => match downloads.get(selected).map(|d| &d.state) {
+                Some(DownloadState::Done(path)) => {
+                    let file = LocalFile {
+                        name: path.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                        folder: path.parent().map_or_else(String::new, |p| p.display().to_string()),
+                        path: path.clone(),
+                    };
+                    Playback::local(&[file], 0, MediaKind::Video).map(|p| self.play(p)).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            },
             Items::Settings => match Setting::ALL.get(selected) {
                 Some(setting) => self.change_setting(*setting),
                 None => Vec::new(),
@@ -1192,11 +1429,29 @@ impl State {
             Section::Inicio => self.load_feed(Source::Recommended, title, Filter::Mine),
             Section::Descubrir => self.discover(),
             Section::DescubrirCanales => self.load_feed(Source::Recommended, title, Filter::NotMine),
-            Section::Suscripciones => self.load_feed(Source::Subscriptions, title, Filter::None),
+            Section::Suscripciones => {
+                self.fresh_shown = self.fresh.drain(..).map(|v| v.id).collect();
+                self.load_feed(Source::Subscriptions, title, Filter::None)
+            }
             Section::Canales => self.load(Source::MyChannels, title, Filter::None, false, ListKind::MyChannels),
+            Section::MisListas if !self.logged_in() => {
+                let hint = self
+                    .tr("Sin sesión: elegí un navegador en Configuración", "Not logged in: pick a browser in Settings");
+                self.status = hint.into();
+                Vec::new()
+            }
+            Section::MisListas => self.load(Source::MyPlaylists, title, Filter::None, false, ListKind::Plain),
             Section::VerDespues => {
                 let items = Items::Videos(self.later.clone());
                 self.show(Listing::new(title, items, ListKind::Later));
+                Vec::new()
+            }
+            Section::Historial => {
+                let items = Items::Videos(self.history.iter().map(|e| e.video.clone()).collect());
+                self.show(Listing::new(title, items, ListKind::History));
+                if self.history.is_empty() {
+                    self.status = self.tr("Todavía no viste nada en tubetui", "Nothing watched in tubetui yet").into();
+                }
                 Vec::new()
             }
             Section::BuscarVideos => {
@@ -1205,6 +1460,19 @@ impl State {
             }
             Section::BuscarCanales => {
                 self.start_prompt(Prompt::Channels, String::new());
+                Vec::new()
+            }
+            Section::Descargas => {
+                let items = Items::Downloads(self.downloads.clone());
+                self.show(Listing::new(title, items, ListKind::Downloads));
+                if self.downloads.is_empty() {
+                    self.status = self
+                        .tr(
+                            "Sin descargas: d descarga el video elegido",
+                            "No downloads: d downloads the selected video",
+                        )
+                        .into();
+                }
                 Vec::new()
             }
             Section::MisVideos => self.scan_media(title, MediaKind::Video),
@@ -1217,10 +1485,7 @@ impl State {
                 self.show(Listing::new(title, Items::About, ListKind::Plain));
                 Vec::new()
             }
-            Section::Salir => {
-                self.quit = true;
-                Vec::new()
-            }
+            Section::Salir => self.apply(Action::Quit),
         }
     }
 
@@ -1280,6 +1545,11 @@ impl State {
                 player.background_audio = !player.background_audio;
                 save("player", "background_audio", SettingValue::Bool(player.background_audio))
             }
+            Setting::SponsorBlock => {
+                player.sponsorblock = !player.sponsorblock;
+                self.status = self.tr("Se aplica a los próximos videos", "Applies to the next videos").into();
+                save("player", "sponsorblock", SettingValue::Bool(self.config.player.sponsorblock))
+            }
             Setting::AppLang => self.toggle_ui_lang(),
             Setting::Icons => {
                 self.config.ui.icons = self.config.ui.icons.next();
@@ -1302,6 +1572,15 @@ impl State {
                 self.show_watched = !self.config.ui.hide_watched;
                 self.refilter_watched();
                 save("ui", "hide_watched", SettingValue::Bool(self.config.ui.hide_watched))
+            }
+            Setting::NotifyNew => {
+                self.config.ui.notify_new = !self.config.ui.notify_new;
+                save("ui", "notify_new", SettingValue::Bool(self.config.ui.notify_new))
+            }
+            Setting::HideShorts => {
+                self.config.ui.hide_shorts = !self.config.ui.hide_shorts;
+                self.status = self.tr("Se aplica a las próximas listas", "Applies to the next lists").into();
+                save("ui", "hide_shorts", SettingValue::Bool(self.config.ui.hide_shorts))
             }
             Setting::CheckUpdates => {
                 self.config.ui.check_updates = !self.config.ui.check_updates;
@@ -1479,9 +1758,11 @@ impl State {
         listing.more = None;
         match result {
             Ok(page) => {
+                let hide_shorts = self.config.ui.hide_shorts;
                 if let Items::Videos(videos) = &mut listing.items {
                     let seen: HashSet<String> = videos.iter().map(|v| v.id.clone()).collect();
-                    videos.extend(page.videos.into_iter().filter(|v| !seen.contains(&v.id)));
+                    let unwanted = |v: &Video| seen.contains(&v.id) || (hide_shorts && v.short);
+                    videos.extend(page.videos.into_iter().filter(|v| !unwanted(v)));
                 }
                 listing.next = page.next;
                 self.status = format!("{} · {}", listing.title, listing.items.len());
@@ -1520,6 +1801,9 @@ impl State {
             return vec![Effect::LoadSubs];
         }
         if let Items::Videos(videos) = &mut items {
+            if self.config.ui.hide_shorts {
+                videos.retain(|v| !v.short);
+            }
             let mine = |v: &Video| v.channel_id.as_ref().is_some_and(|c| self.subs.contains(c));
             match pending.filter {
                 Filter::None => {}
@@ -1846,6 +2130,25 @@ impl State {
         vec![Effect::SaveSubs(self.subs.clone())]
     }
 
+    fn listen(&mut self) -> Vec<Effect> {
+        if !self.on_related()
+            && let Some(tab) = self.active_tab_mut().filter(|t| t.playback.video.is_some())
+        {
+            tab.playback.audio_only = !tab.playback.audio_only;
+            let (id, playback) = (tab.id, tab.playback.clone());
+            self.fullscreen = false;
+            self.status = if playback.audio_only {
+                self.tr("🎧 Solo audio · a vuelve al video", "🎧 Sound only · a brings the video back")
+            } else {
+                self.tr("Volviendo al video…", "Bringing the video back…")
+            }
+            .into();
+            return vec![Effect::Reopen(id, playback)];
+        }
+        let Some(video) = self.selected_video().cloned() else { return Vec::new() };
+        self.play(Playback { audio_only: true, ..Playback::youtube(video) })
+    }
+
     fn open_channel(&mut self) -> Vec<Effect> {
         match self.selected_channel() {
             Some((_, name, Some(url))) => {
@@ -1861,7 +2164,7 @@ impl State {
         self.load(Source::Channel(url), name, Filter::None, true, kind)
     }
 
-    fn play(&mut self, playback: Playback) -> Vec<Effect> {
+    fn play(&mut self, mut playback: Playback) -> Vec<Effect> {
         if let Some(i) = self.tabs.iter().position(|t| t.playback.queue.first() == playback.queue.first()) {
             self.active = i + 1;
             return Vec::new();
@@ -1876,6 +2179,14 @@ impl State {
         }
         let id = TabId(self.next_tab);
         self.next_tab += 1;
+        let mut history = Vec::new();
+        if let Some(video) = &playback.video {
+            playback.start = playback.start.or_else(|| self.resume_at(&video.id));
+            if let Some(start) = playback.start {
+                self.status = format!("⏯ {} {}", self.tr("Sigue desde", "Resuming at"), clock(start));
+            }
+            history = self.remember(video.clone(), playback.start);
+        }
         self.tabs.push(Tab::new(id, playback.clone()));
         self.active = self.tabs.len();
         let mut effects = vec![Effect::Open(id, playback.clone())];
@@ -1884,7 +2195,149 @@ impl State {
             effects.push(Effect::Watch { tab: id, video: video.id.clone() });
             effects.push(Effect::SaveWatched(video.id.clone()));
         }
+        effects.extend(history);
+        if let Some(video) = playback.video.as_ref().filter(|_| self.config.player.sponsorblock) {
+            effects.push(Effect::Segments { tab: id, video: video.id.clone() });
+        }
         effects
+    }
+
+    /// Where I left `id`, if it is worth resuming.
+    pub fn resume_at(&self, id: &str) -> Option<u32> {
+        self.history.iter().find(|e| e.video.id == id).and_then(|e| e.position)
+    }
+
+    /// Puts `video` first in the history.
+    fn remember(&mut self, video: Video, position: Option<u32>) -> Vec<Effect> {
+        self.history.retain(|e| e.video.id != video.id);
+        self.history.insert(0, HistoryEntry { video, at: self.clock, position });
+        self.history.truncate(HISTORY_MAX);
+        self.sync_history();
+        vec![Effect::SaveHistory(self.history.clone())]
+    }
+
+    /// Takes the selected video out of the history.
+    fn forget_selected(&mut self) -> Vec<Effect> {
+        let Some(video) = self.selected_video().cloned() else { return Vec::new() };
+        self.history.retain(|e| e.video.id != video.id);
+        self.sync_history();
+        self.status = format!("🗑 {}: {}", self.tr("Quitado del historial", "Removed from history"), video.title);
+        vec![Effect::SaveHistory(self.history.clone())]
+    }
+
+    /// Shown history lists follow `self.history`, the selection staying on its video.
+    fn sync_history(&mut self) {
+        let videos: Vec<Video> = self.history.iter().map(|e| e.video.clone()).collect();
+        for listing in self.stack.iter_mut().filter(|l| l.kind == ListKind::History) {
+            let current = match &listing.items {
+                Items::Videos(shown) => shown.get(listing.selected).map(|v| v.id.clone()),
+                _ => None,
+            };
+            listing.selected = current
+                .and_then(|id| videos.iter().position(|v| v.id == id))
+                .unwrap_or(listing.selected.min(videos.len().saturating_sub(1)));
+            listing.items = Items::Videos(videos.clone());
+        }
+    }
+
+    /// The first check only learns what is there; later ones tell what is new.
+    fn subs_polled(&mut self, result: Result<Vec<Video>, String>) -> Vec<Effect> {
+        let Ok(videos) = result else { return Vec::new() };
+        let videos: Vec<Video> = videos
+            .into_iter()
+            .filter(|v| v.live != crate::domain::Live::Upcoming && !(self.config.ui.hide_shorts && v.short))
+            .collect();
+        let Some(known) = &mut self.known_subs else {
+            self.known_subs = Some(videos.into_iter().map(|v| v.id).collect());
+            return Vec::new();
+        };
+        let new: Vec<Video> =
+            videos.into_iter().filter(|v| known.insert(v.id.clone()) && !self.watched.contains(&v.id)).collect();
+        if new.is_empty() {
+            return Vec::new();
+        }
+        let message = match new.as_slice() {
+            [one] => format!("🔔 {}: {}", one.channel, one.title),
+            many => format!(
+                "🔔 {} {}",
+                many.len(),
+                self.tr("videos nuevos de tus canales", "new videos from your channels")
+            ),
+        };
+        self.status = format!("{message} · {}", self.tr("mirá Suscripciones", "see Subscriptions"));
+        self.fresh.extend(new);
+        vec![Effect::Notify(message)]
+    }
+
+    fn start_download(&mut self) -> Vec<Effect> {
+        let Some(video) = self.selected_video().cloned() else { return Vec::new() };
+        let running = |d: &Download| d.video.id == video.id && matches!(d.state, DownloadState::Running { .. });
+        if self.downloads.iter().any(running) {
+            self.status = format!("⬇ {}: {}", self.tr("Ya se está descargando", "Already downloading"), video.title);
+            return Vec::new();
+        }
+        let id = self.next_download;
+        self.next_download += 1;
+        let state = DownloadState::Running { permille: 0, speed: String::new(), eta: String::new() };
+        self.downloads.insert(0, Download { id, video: video.clone(), state });
+        self.sync_downloads();
+        let see = self.tr("mirá Descargas", "see Downloads");
+        self.status = format!("⬇ {}: {} · {see}", self.tr("Descargando", "Downloading"), video.title);
+        vec![Effect::Download { id, video }]
+    }
+
+    fn downloaded(&mut self, id: u64, result: Result<PathBuf, String>) -> Vec<Effect> {
+        let lang = self.lang();
+        let Some(d) = self.downloads.iter_mut().find(|d| d.id == id) else { return Vec::new() };
+        if d.state == DownloadState::Cancelled {
+            return Vec::new();
+        }
+        self.status = match &result {
+            Ok(path) => format!(
+                "✅ {} {}: {}",
+                lang.pick("Descarga lista en", "Downloaded to"),
+                path.parent().map_or_else(String::new, |p| p.display().to_string()),
+                d.video.title
+            ),
+            Err(e) => format!("❌ {} {}: {e}", lang.pick("Falló la descarga de", "Download failed:"), d.video.title),
+        };
+        d.state = match result {
+            Ok(path) => DownloadState::Done(path),
+            Err(e) => DownloadState::Failed(e),
+        };
+        self.sync_downloads();
+        vec![Effect::SaveDownloads(self.downloads.clone())]
+    }
+
+    /// `x` in "Descargas": stops the selected download, or takes a finished
+    /// one off the list (the file stays).
+    fn cancel_or_forget_download(&mut self) -> Vec<Effect> {
+        let Some(Listing { items: Items::Downloads(shown), selected, .. }) = self.stack.last() else {
+            return Vec::new();
+        };
+        let Some(id) = shown.get(*selected).map(|d| d.id) else { return Vec::new() };
+        let Some(i) = self.downloads.iter().position(|d| d.id == id) else { return Vec::new() };
+        let title = self.downloads[i].video.title.clone();
+        let effects = if matches!(self.downloads[i].state, DownloadState::Running { .. }) {
+            self.downloads[i].state = DownloadState::Cancelled;
+            self.status = format!("⏹ {}: {title}", self.tr("Descarga cancelada", "Download cancelled"));
+            vec![Effect::CancelDownload(id)]
+        } else {
+            self.downloads.remove(i);
+            let note = self.tr("(el archivo queda)", "(the file stays)");
+            self.status = format!("🗑 {}: {title} {note}", self.tr("Quitado de la lista", "Taken off the list"));
+            vec![Effect::SaveDownloads(self.downloads.clone())]
+        };
+        self.sync_downloads();
+        effects
+    }
+
+    /// Shown download lists follow `self.downloads`.
+    fn sync_downloads(&mut self) {
+        for listing in self.stack.iter_mut().filter(|l| l.kind == ListKind::Downloads) {
+            listing.items = Items::Downloads(self.downloads.clone());
+            listing.selected = listing.selected.min(self.downloads.len().saturating_sub(1));
+        }
     }
 
     /// Removes a tab; the active one moves to its right neighbour, like browsers do.
@@ -2000,7 +2453,11 @@ mod tests {
         s.update(Action::GoTab(0));
         s.stack.last_mut().unwrap().selected = index;
         match s.update(Action::Enter).as_slice() {
-            [Effect::Open(id, _), Effect::Watch { tab, .. }, Effect::SaveWatched(_)] if tab == id => *id,
+            [Effect::Open(id, _), Effect::Watch { tab, .. }, Effect::SaveWatched(_), Effect::SaveHistory(_), ..]
+                if tab == id =>
+            {
+                *id
+            }
             other => panic!("expected Open and Watch, got {other:?}"),
         }
     }
@@ -2034,6 +2491,193 @@ mod tests {
         let id = load_id(&s.update(Action::Enter));
         s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("v")]))));
         s
+    }
+
+    #[test]
+    fn playing_remembers_the_video_and_resumes_where_it_stopped() {
+        let mut s = with_videos(&["a", "b"]);
+        s.clock = 100;
+        let tab = play(&mut s, 0);
+        assert_eq!(s.history.len(), 1);
+        assert_eq!((s.history[0].video.id.as_str(), s.history[0].at, s.history[0].position), ("a", 100, None));
+        let effects = s.update(Action::Stopped { video: "a".into(), position: Some(125), duration: Some(600) });
+        assert!(matches!(effects.as_slice(), [Effect::SaveHistory(h)] if h[0].position == Some(125)));
+        assert_eq!(s.resume_at("a"), Some(125));
+        s.update(Action::CloseTab);
+        assert!(s.tabs.iter().all(|t| t.id != tab));
+        s.stack.last_mut().unwrap().selected = 0;
+        s.update(Action::GoTab(0));
+        match s.update(Action::Enter).as_slice() {
+            [Effect::Open(_, playback), ..] => assert_eq!(playback.start, Some(125)),
+            other => panic!("{other:?}"),
+        }
+        assert!(s.status.contains("2:05"), "{}", s.status);
+        // Watched to the end: next time it starts over.
+        s.update(Action::Stopped { video: "a".into(), position: Some(590), duration: Some(600) });
+        assert_eq!(s.resume_at("a"), None);
+        assert!(s.update(Action::Stopped { video: "zz".into(), position: Some(90), duration: None }).is_empty());
+    }
+
+    #[test]
+    fn history_section_lists_newest_first_and_x_forgets() {
+        let mut s = with_videos(&["a", "b"]);
+        play(&mut s, 0);
+        play(&mut s, 1);
+        open(&mut s, Section::Historial);
+        let listing = s.listing().unwrap();
+        assert_eq!(listing.kind, ListKind::History);
+        assert_eq!(listing.items, Items::Videos(vec![video("b"), video("a")]));
+        let effects = s.update(Action::Trash);
+        assert!(matches!(effects.as_slice(), [Effect::SaveHistory(h)] if h.len() == 1 && h[0].video.id == "a"));
+        assert_eq!(s.listing().unwrap().items, Items::Videos(vec![video("a")]));
+        assert!(s.confirm.is_none(), "no question for the history");
+    }
+
+    #[test]
+    fn shorts_are_left_out_unless_wanted() {
+        let short = Video { short: true, ..video("s") };
+        let mut s = state();
+        let id = load_id(&open(&mut s, Section::Suscripciones));
+        s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a"), short.clone()]))));
+        assert_eq!(s.listing().unwrap().items, Items::Videos(vec![video("a")]));
+        assert_eq!(change(&mut s, Setting::HideShorts), vec![saved("ui", "hide_shorts", SettingValue::Bool(false))]);
+        let id = load_id(&open(&mut s, Section::Suscripciones));
+        s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a"), short.clone()]))));
+        assert_eq!(s.listing().unwrap().items, Items::Videos(vec![video("a"), short]));
+    }
+
+    #[test]
+    fn a_plays_sound_only_and_switches_back_in_the_tab() {
+        let mut s = with_videos(&["a"]);
+        match s.update(Action::Listen).as_slice() {
+            [Effect::Open(_, p), ..] => assert!(p.audio_only && p.video.is_some()),
+            other => panic!("{other:?}"),
+        }
+        let tab = s.active_tab().unwrap().clone();
+        assert!(s.details_shown(&tab), "no picture: the pane shows the details");
+        match s.update(Action::Listen).as_slice() {
+            [Effect::Reopen(id, p)] => assert!(*id == tab.id && !p.audio_only),
+            other => panic!("{other:?}"),
+        }
+        assert!(!s.active_tab().unwrap().playback.audio_only);
+        assert!(!s.details_shown(s.active_tab().unwrap()), "embedded video: the pane is the video");
+    }
+
+    #[test]
+    fn sponsor_segments_are_skipped_once() {
+        let mut s = with_videos(&["a"]);
+        let effects = s.update(Action::Enter);
+        let tab = s.active_tab().unwrap().id;
+        assert!(effects.contains(&Effect::Segments { tab, video: "a".into() }));
+        let sponsor = Segment { start: 10_000, end: 20_400, category: "sponsor".into() };
+        s.update(Action::SegmentsLoaded(tab, vec![sponsor]));
+        assert_eq!(s.update(Action::SkipSegment(tab, 0)), [Effect::Command(tab, PlayerCommand::SeekTo(21))]);
+        assert!(s.status.contains("patrocinio"), "{}", s.status);
+        assert!(s.update(Action::SkipSegment(tab, 0)).is_empty(), "once");
+        s.config.player.sponsorblock = false;
+        s.update(Action::GoTab(0));
+        s.stack[0].items = Items::Videos(vec![video("b")]);
+        assert!(!s.update(Action::Enter).iter().any(|e| matches!(e, Effect::Segments { .. })));
+    }
+
+    #[test]
+    fn comments_are_asked_for_once_details_arrive_and_scroll() {
+        let mut s = with_videos(&["a"]);
+        let tab = play(&mut s, 0);
+        let watch = Watch { comments_token: Some("T".into()), ..Watch::default() };
+        assert_eq!(s.update(Action::Watched(tab, Ok(watch))), [Effect::Comments { tab, token: "T".into() }]);
+        let comment = |n: &str| Comment { author: n.into(), text: "hi".into(), likes: None, published: None };
+        s.update(Action::CommentsLoaded(tab, Ok(vec![comment("a"), comment("b")])));
+        s.update(Action::ScrollComments(3));
+        assert_eq!(s.active_tab().unwrap().comments_from, 1, "stops at the last one");
+        s.update(Action::ScrollComments(-3));
+        assert_eq!(s.active_tab().unwrap().comments_from, 0);
+        s.update(Action::CommentsLoaded(tab, Err("offline".into())));
+        assert_eq!(s.active_tab().unwrap().comments, Some(Vec::new()), "failed: none, not loading forever");
+    }
+
+    #[test]
+    fn my_playlists_open_their_videos() {
+        let mut s = state();
+        assert!(open(&mut s, Section::MisListas).is_empty(), "needs a login");
+        s.config.session.browser = "brave".into();
+        let id = match open(&mut s, Section::MisListas).as_slice() {
+            [Effect::Load { id, source: Source::MyPlaylists, .. }] => *id,
+            other => panic!("{other:?}"),
+        };
+        let liked = crate::domain::Playlist { id: "LL".into(), title: "LL".into(), count: None };
+        s.update(Action::Loaded(id, Ok(Items::Playlists(vec![liked]))));
+        match s.update(Action::Enter).as_slice() {
+            [Effect::Load { source: Source::Playlist(list), .. }] => assert_eq!(list, "LL"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(s.loading.as_deref(), Some("👍 Videos que me gustan"));
+    }
+
+    #[test]
+    fn downloads_show_progress_finish_and_can_be_cancelled() {
+        let mut s = with_videos(&["a", "b"]);
+        assert_eq!(s.update(Action::Download), [Effect::Download { id: 0, video: video("a") }]);
+        assert!(s.update(Action::Download).is_empty(), "already downloading");
+        s.stack.last_mut().unwrap().selected = 1;
+        assert_eq!(s.update(Action::Download), [Effect::Download { id: 1, video: video("b") }]);
+        assert_eq!(s.downloading(), 2);
+        open(&mut s, Section::Descargas);
+        assert_eq!(s.listing().unwrap().kind, ListKind::Downloads);
+        s.update(Action::DownloadProgress { id: 0, permille: 453, speed: "1MiB/s".into(), eta: "00:09".into() });
+        let shown = |s: &State| match &s.listing().unwrap().items {
+            Items::Downloads(d) => d.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert!(matches!(shown(&s)[1].state, DownloadState::Running { permille: 453, .. }), "newest first");
+        // Cancel the selected one (b, the newest).
+        assert_eq!(s.update(Action::Trash), [Effect::CancelDownload(1)]);
+        assert!(s.update(Action::Downloaded { id: 1, result: Err("killed".into()) }).is_empty(), "stays cancelled");
+        assert_eq!(shown(&s)[0].state, DownloadState::Cancelled);
+        let file = PathBuf::from("/v/title a.mp4");
+        let effects = s.update(Action::Downloaded { id: 0, result: Ok(file.clone()) });
+        assert!(matches!(effects.as_slice(), [Effect::SaveDownloads(_)]));
+        assert!(s.status.contains("/v"), "{}", s.status);
+        s.listing_mut().selected = 1;
+        match s.update(Action::Enter).as_slice() {
+            [Effect::Open(_, p)] => assert_eq!(p.queue, ["/v/title a.mp4"]),
+            other => panic!("{other:?}"),
+        }
+        s.update(Action::GoTab(0));
+        assert!(matches!(s.update(Action::Trash).as_slice(), [Effect::SaveDownloads(d)] if d.len() == 1));
+        assert_eq!(s.downloading(), 0);
+    }
+
+    #[test]
+    fn quitting_with_downloads_running_asks_first() {
+        let mut s = with_videos(&["a"]);
+        s.update(Action::Download);
+        s.update(Action::Quit);
+        assert_eq!((s.quit, s.confirm.clone()), (false, Some(Confirm::Quit(1))));
+        s.update(Action::Confirm(false));
+        assert!(!s.quit);
+        open(&mut s, Section::Salir);
+        assert_eq!(s.confirm, Some(Confirm::Quit(1)), "the menu entry asks too");
+        s.update(Action::Confirm(true));
+        assert!(s.quit);
+    }
+
+    #[test]
+    fn new_videos_of_my_channels_are_announced_after_the_first_check() {
+        let mut s = state();
+        assert!(s.update(Action::SubsPolled(Ok(vec![video("a"), video("b")]))).is_empty(), "first: learns");
+        assert!(s.fresh.is_empty());
+        s.watched.insert("w".into());
+        let short = Video { short: true, ..video("s") };
+        let effects = s.update(Action::SubsPolled(Ok(vec![video("c"), video("a"), video("w"), short])));
+        assert_eq!(effects, [Effect::Notify("🔔 chan c: title c".into())]);
+        assert_eq!(s.fresh, [video("c")], "not the known, watched or Shorts");
+        assert!(s.update(Action::SubsPolled(Ok(vec![video("c")]))).is_empty(), "told once");
+        assert!(s.update(Action::SubsPolled(Err("offline".into()))).is_empty());
+        open(&mut s, Section::Suscripciones);
+        assert!(s.fresh.is_empty());
+        assert!(s.fresh_shown.contains("c"), "marked in the list");
+        assert_eq!(change(&mut s, Setting::NotifyNew), vec![saved("ui", "notify_new", SettingValue::Bool(false))]);
     }
 
     #[test]
@@ -2600,7 +3244,7 @@ mod tests {
     fn playing_marks_the_video_watched() {
         let mut s = with_videos(&["a"]);
         let effects = s.update(Action::Enter);
-        assert_eq!(effects.last(), Some(&Effect::SaveWatched("a".into())));
+        assert!(effects.contains(&Effect::SaveWatched("a".into())));
         assert!(s.watched.contains("a"));
         let mut logged = state();
         logged.config.session.browser = "brave".into();
@@ -2678,7 +3322,7 @@ mod tests {
     #[test]
     fn download_selected_video() {
         let mut s = with_videos(&["a"]);
-        assert_eq!(s.update(Action::Download), vec![Effect::Download(video("a"))]);
+        assert_eq!(s.update(Action::Download), vec![Effect::Download { id: 0, video: video("a") }]);
         s.focus = Focus::Menu;
         assert!(s.update(Action::Download).is_empty());
     }
@@ -2766,7 +3410,7 @@ mod tests {
         assert_eq!(s.selected_video().unwrap().id, "r2", "l / s / d / c act on it");
         let effects = s.update(Action::Enter);
         assert!(
-            matches!(effects.as_slice(), [Effect::Open(_, p), Effect::Watch { video, .. }, Effect::SaveWatched(_)]
+            matches!(effects.as_slice(), [Effect::Open(_, p), Effect::Watch { video, .. }, Effect::SaveWatched(_), Effect::SaveHistory(_), ..]
             if p.video.as_ref().unwrap().id == "r2" && video == "r2"),
             "{effects:?}"
         );

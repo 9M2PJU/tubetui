@@ -147,6 +147,19 @@ pub fn ytdl_format(config: &PlayerConfig, mode: Mode) -> String {
     choices.join("/")
 }
 
+/// yt-dlp format selector for listening only: the sound, in the dubbing
+/// language when that is the mode.
+pub fn audio_format(config: &PlayerConfig) -> String {
+    match config.language {
+        Language::Dubbed => format!("ba[language^={}]/ba/b", config.sub_lang),
+        Language::Subtitles | Language::Original => "ba/b".into(),
+    }
+}
+
+fn format_for(config: &PlayerConfig, mode: Mode, audio_only: bool) -> String {
+    if audio_only { audio_format(config) } else { ytdl_format(config, mode) }
+}
+
 /// Everything about one playback except where it is drawn.
 pub struct Launch<'a> {
     pub config: &'a PlayerConfig,
@@ -156,15 +169,17 @@ pub struct Launch<'a> {
     pub queue: &'a [String],
     /// Music: no video output at all.
     pub audio_only: bool,
+    /// Second to start at.
+    pub start: Option<u32>,
 }
 
 pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<String> {
-    let Launch { config, mode, cookies, queue, audio_only } = *launch;
+    let Launch { config, mode, cookies, queue, audio_only, start } = *launch;
     let lang = &config.sub_lang;
     let raw = raw_options(config, cookies);
     let mut args = vec![
         format!("--input-ipc-server={ipc}"),
-        format!("--ytdl-format={}", ytdl_format(config, mode)),
+        format!("--ytdl-format={}", format_for(config, mode, audio_only)),
         format!("--ytdl-raw-options={raw}"),
         // Subtitles are always fetched so `j` can turn them on later.
         format!("--slang={lang}"),
@@ -173,6 +188,9 @@ pub fn mpv_args(launch: &Launch, geometry: Option<Geometry>, ipc: &str) -> Vec<S
         "--really-quiet".into(),
         "--input-terminal=no".into(),
     ];
+    if let Some(start) = start {
+        args.push(format!("--start={start}"));
+    }
     // Embedded frames are scaled on the CPU. Copying hardware-decoded frames
     // back is slower than decoding them in software: measured on Intel, the
     // picture fell behind the sound (1.7 s after 20 s); in software it stays in sync.
@@ -332,6 +350,7 @@ fn raw_options(config: &PlayerConfig, cookies: Option<&std::path::Path>) -> Stri
 pub fn command_lines(
     config: &PlayerConfig,
     mode: Mode,
+    audio_only: bool,
     cookies: Option<&std::path::Path>,
     command: PlayerCommand,
 ) -> Vec<String> {
@@ -340,6 +359,7 @@ pub fn command_lines(
         PlayerCommand::TogglePause => line(json!({ "command": ["cycle", "pause"] })),
         PlayerCommand::Seek(seconds) => line(json!({ "command": ["seek", seconds, "relative"] })),
         PlayerCommand::SeekTo(second) => line(json!({ "command": ["seek", second, "absolute"] })),
+        PlayerCommand::Chapter(delta) => line(json!({ "command": ["add", "chapter", delta] })),
         PlayerCommand::Volume(delta) => line(json!({ "command": ["add", "volume", delta] })),
         PlayerCommand::ToggleMute => line(json!({ "command": ["cycle", "mute"] })),
         PlayerCommand::CycleSubtitles => line(json!({ "command": ["cycle", "sub"] })),
@@ -352,7 +372,7 @@ pub fn command_lines(
         | PlayerCommand::Codec(_) => {
             let sid = if config.language == Language::Subtitles { "auto" } else { "no" };
             vec![
-                set_property("ytdl-format", ytdl_format(config, mode).into()).to_string(),
+                set_property("ytdl-format", format_for(config, mode, audio_only).into()).to_string(),
                 set_property("ytdl-raw-options", raw_options(config, cookies).into()).to_string(),
                 set_property("slang", config.sub_lang.clone().into()).to_string(),
                 set_property("sid", sid.into()).to_string(),
@@ -380,11 +400,32 @@ pub struct Info {
     /// Up to which second the video is already downloaded.
     pub buffered: Option<f64>,
     pub paused: bool,
+    /// Where each chapter starts (seconds) and its title.
+    pub chapters: Vec<(f64, String)>,
+    /// The chapter playing, as an index of `chapters`.
+    pub chapter: Option<usize>,
+}
+
+impl Info {
+    /// Title of the chapter playing.
+    pub fn chapter_title(&self) -> Option<&str> {
+        self.chapters.get(self.chapter?).map(|(_, title)| title.as_str()).filter(|t| !t.is_empty())
+    }
 }
 
 /// Properties mpv reports to [`Info`] whenever they change.
-const OBSERVED: [&str; 8] =
-    ["volume", "mute", "height", "video-format", "time-pos", "duration", "pause", "demuxer-cache-time"];
+const OBSERVED: [&str; 10] = [
+    "volume",
+    "mute",
+    "height",
+    "video-format",
+    "time-pos",
+    "duration",
+    "pause",
+    "demuxer-cache-time",
+    "chapter-list",
+    "chapter",
+];
 
 impl Info {
     /// Takes a new value; whether what is shown changed (the position only
@@ -400,6 +441,12 @@ impl Info {
             "duration" => self.duration = data.as_f64(),
             "pause" => self.paused = data.as_bool().unwrap_or(false),
             "demuxer-cache-time" => self.buffered = data.as_f64(),
+            "chapter-list" => {
+                self.chapters = (data.as_array().into_iter().flatten())
+                    .filter_map(|c| Some((c["time"].as_f64()?, c["title"].as_str().unwrap_or_default().to_owned())))
+                    .collect();
+            }
+            "chapter" => self.chapter = data.as_i64().and_then(|i| usize::try_from(i).ok()),
             _ => {}
         }
         let second = |p: Option<f64>| p.map(|p| p as i64);
@@ -425,6 +472,8 @@ pub struct Player {
     ipc_path: String,
     ipc: Option<Box<dyn Write + Send>>,
     mode: Mode,
+    /// Sound only: reloads keep asking for audio formats.
+    audio_only: bool,
     config: PlayerConfig,
     cookies: Option<std::path::PathBuf>,
     /// Where the video is drawn; `None` while hidden or in window mode.
@@ -466,6 +515,7 @@ impl Player {
             ipc_path,
             ipc: None,
             mode,
+            audio_only: launch.audio_only,
             config,
             cookies,
             shown_at,
@@ -499,7 +549,7 @@ impl Player {
             PlayerCommand::Codec(codec) => self.config.prefer_codec = codec.into(),
             _ => {}
         }
-        for line in command_lines(&self.config, self.mode, self.cookies.as_deref(), command) {
+        for line in command_lines(&self.config, self.mode, self.audio_only, self.cookies.as_deref(), command) {
             self.write(&line);
         }
         if matches!(
@@ -760,7 +810,12 @@ mod tests {
         assert!(info.apply("time-pos", &json!(3.0)));
         assert!(!info.apply("time-pos", &json!(3.4)), "same second: nothing to redraw");
         assert!(info.apply("time-pos", &json!(4.1)));
-        assert!(!info.apply("chapter", &json!(1)));
+        assert!(!info.apply("estimated-frame-count", &json!(1)), "not observed");
+        assert!(info.apply("chapter-list", &json!([{"title": "Intro", "time": 0.0}, {"title": "Fin", "time": 200.0}])));
+        assert!(info.apply("chapter", &json!(1)));
+        assert_eq!(info.chapter_title(), Some("Fin"));
+        assert!(info.apply("chapter", &json!(-1)));
+        assert_eq!(info.chapter_title(), None, "before the first chapter");
         assert!(info.apply("demuxer-cache-time", &json!(60.2)));
         assert!(!info.apply("demuxer-cache-time", &json!(60.7)));
         assert_eq!(
@@ -774,6 +829,8 @@ mod tests {
                 duration: Some(300.5),
                 buffered: Some(60.7),
                 paused: false,
+                chapters: vec![(0.0, "Intro".into()), (200.0, "Fin".into())],
+                chapter: None,
             }
         );
         info.apply("height", &Value::Null);
@@ -807,7 +864,7 @@ mod tests {
     const QUEUE: &[String] = &[];
 
     fn launch(config: &PlayerConfig, mode: Mode) -> Launch<'_> {
-        Launch { config, mode, cookies: None, queue: QUEUE, audio_only: false }
+        Launch { config, mode, cookies: None, queue: QUEUE, audio_only: false, start: None }
     }
 
     #[test]
@@ -818,6 +875,14 @@ mod tests {
         assert_eq!(&args[args.len() - 3..], ["--", "/m/a.mp3", "-raro.mp3"]);
         assert!(args.contains(&"--vid=no".into()));
         assert!(!args.iter().any(|a| a.starts_with("--vo=")), "music needs no video output");
+    }
+
+    #[test]
+    fn resuming_starts_at_the_saved_second() {
+        let config = PlayerConfig::default();
+        let args = mpv_args(&Launch { start: Some(125), ..launch(&config, Mode::Window) }, None, "s");
+        assert!(args.contains(&"--start=125".into()));
+        assert!(!mpv_args(&launch(&config, Mode::Window), None, "s").iter().any(|a| a.starts_with("--start")));
     }
 
     #[test]
@@ -956,7 +1021,7 @@ mod tests {
     #[test]
     fn commands_serialize_to_mpv_ipc() {
         let config = PlayerConfig::default();
-        let one = |command| command_lines(&config, Mode::Embedded, None, command).join("\n");
+        let one = |command| command_lines(&config, Mode::Embedded, false, None, command).join("\n");
         assert_eq!(one(PlayerCommand::TogglePause), r#"{"command":["cycle","pause"]}"#);
         assert_eq!(one(PlayerCommand::Seek(-5)), r#"{"command":["seek",-5,"relative"]}"#);
         assert_eq!(one(PlayerCommand::Volume(5)), r#"{"command":["add","volume",5]}"#);
@@ -974,7 +1039,7 @@ mod tests {
             ..Default::default()
         };
         let cookies = std::path::Path::new("/c.txt");
-        let lines = command_lines(&config, Mode::Window, Some(cookies), PlayerCommand::SubLang("en"));
+        let lines = command_lines(&config, Mode::Window, false, Some(cookies), PlayerCommand::SubLang("en"));
         assert_eq!(
             lines,
             [
@@ -989,7 +1054,7 @@ mod tests {
             r#"{"command":["loadfile","https://youtu.be/x","replace",-1,"start=83.5"]}"#
         );
         let subs = PlayerConfig { language: Language::Subtitles, ..config };
-        let lines = command_lines(&subs, Mode::Embedded, None, PlayerCommand::Language(Language::Subtitles));
+        let lines = command_lines(&subs, Mode::Embedded, false, None, PlayerCommand::Language(Language::Subtitles));
         assert_eq!(lines[3], r#"{"command":["set_property","sid","auto"]}"#);
     }
 

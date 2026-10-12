@@ -23,6 +23,18 @@ Every video opens in its own tab.
   e.g. `rust, nba, jazz`, outside your channels and your history), **Suscripciones** (newest from your
   channels, live and upcoming first), **Mis canales**, **Descubrir canales**
   (YouTube's picks from channels you don't follow yet)
+- **Mis listas**: your YouTube playlists, plus *Liked videos* and *Watch
+  later*; `Enter` opens one
+- **Historial**: everything you watched, newest first, with the day you
+  watched it (`x` removes one)
+- **Resume where you left off**: closing a video remembers the second; opening
+  it again starts there, and lists show how far you got. Finished videos (or
+  ones you barely started) start from the beginning
+- **New videos notice**: every 15 minutes your subscriptions are checked;
+  new videos are announced in the status bar, counted in the menu
+  (*Suscripciones (3 nuevos)*), marked NUEVO in the list and, with
+  `notify-send`, as a desktop notification
+- **Shorts hidden** from every list (a setting turns them back on)
 - **Search** videos in all of YouTube (about a second, more results load as
   you scroll), only in your channels, or inside a channel (`Tab` switches the
   scope); search channels (with their description, whole in the side panel)
@@ -37,6 +49,9 @@ Every video opens in its own tab.
 - **Subscribe / unsubscribe** (`s`, unsubscribing asks first), **like /
   dislike** (`g` / `G`, again takes it back), **watch later** (`l`),
   **download** with subtitles (`d`), open the **channel** (`c`)
+- **Comments**: next to *Up next* when the video plays in its own window or
+  as audio only (in terminals 100 columns wide or more); `PgUp` / `PgDn`
+  scroll them
 
 **Playback**
 - Embedded video in kitty, an mpv window, or an **overlay** (X11): an mpv
@@ -48,10 +63,21 @@ Every video opens in its own tab.
   the same second)
 - **Fullscreen** (`f`): the video fills the terminal, and on X11 the terminal
   window goes fullscreen too
+- **Audio only** (`a`): play a video as sound only, like music; inside its
+  tab `a` switches between audio and video at the same second
+- **Chapters**: `[` / `]` jump to the previous / next one; they are marked
+  `┃` on the progress bar and the current one shows on top
+- **[SponsorBlock](https://sponsor.ajay.app)**: sponsors, self promotion and
+  "subscribe!" reminders are skipped by themselves (they show green on the
+  progress bar). Intros and outros are left alone
 
 **On your computer**
 - **Mis videos** and **Mi música** list the files in the folders you choose
   (several per kind); music plays from the chosen song to the end of the list
+- **Descargas**: what you download with `d`, with live progress, speed and
+  time left. `x` cancels one (or removes a finished one from the list, the
+  file stays), `Enter` plays the file. Quitting with downloads running asks
+  first
 
 **Account and settings**
 - Log in with any installed browser (Brave, Chrome, Chromium, Vivaldi, Edge,
@@ -118,13 +144,16 @@ a click on the video pauses (double click: fullscreen), a click on the
 progress bar jumps there. Hold Shift to select text.
 
 In lists: `↑↓` / `jk`, `Enter`, `Esc` to go back, `Tab` menu ↔ list,
-`l` watch later, `s` subscribe, `g` / `G` like / dislike, `d` download, `c` channel. In **My videos**
+`l` watch later, `s` subscribe, `g` / `G` like / dislike, `d` download, `c` channel, `a` play as
+audio only. In **History** `x` removes the video; in **Downloads** it cancels
+the download (or forgets a finished one). In **My videos**
 and **My music**: `space` marks files, `x` / `Del` moves the marked ones (or
 the selected one) to the system trash, after asking.
 While watching: `space` pause, `←→` seek, `↑↓` volume, `m` mute, `j`
 subtitles, `i` original / subtitles / dubbed, `o` language, `v` quality
 (360p–1440p), `b` codec (H.264 / VP9 / AV1 / any), `f` fullscreen, `.` `,`
-next / previous song. Quality, codec and language reload the video at the
+next / previous song, `[` `]` previous / next chapter, `a` audio only ⇄ video,
+`PgUp` `PgDn` scroll the comments. Quality, codec and language reload the video at the
 same second and are remembered. If embedded video looks behind the sound,
 the CPU is dropping frames: `v` down to 480p, or try the overlay.
 
@@ -166,6 +195,7 @@ prefer_codec = "avc1"    # H.264 decodes in hardware almost everywhere
 language = "subtitles"   # subtitles | original | dubbed
 sub_lang = "es"          # subtitles and dubbing language
 background_audio = true  # keep listening while browsing
+sponsorblock = true      # skip sponsors, self promotion and "subscribe!" reminders
 
 [media]
 video_dirs = ["~/Videos"]
@@ -177,6 +207,8 @@ lang = "en"              # en | es (unset: the system language)
 thumbnails = true        # thumbnail in the preview panel (kitty)
 mouse = true             # clicks and wheel; hold Shift to select text
 check_updates = true     # once a day, tell me about new versions and how to install them here
+hide_shorts = true       # leave Shorts out of every list
+notify_new = true        # check my subscriptions every 15 minutes and tell me about new videos
 
 [effects]                # animations
 startup = true

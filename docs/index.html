@@ -189,7 +189,7 @@
       <div class="features">
         <div class="feature"><div class="icon">🏠</div>
           <h3><span lang="es">Inicio y suscripciones</span><span lang="en">Home and subscriptions</span></h3>
-          <p><span lang="es">Tu feed, lo nuevo de tus canales, Descubrir (sin los canales que ya seguís) y Mis canales con su descripción.</span><span lang="en">Your feed, what's new on your channels, Discover (without the ones you follow) and My channels with their description.</span></p></div>
+          <p><span lang="es">Tu feed, lo nuevo de tus canales, Descubrir (sin los canales que ya seguís) y Mis canales con su descripción. Los Shorts quedan afuera.</span><span lang="en">Your feed, what's new on your channels, Discover (without the ones you follow) and My channels with their description. Shorts are left out.</span></p></div>
         <div class="feature"><div class="icon">🔎</div>
           <h3><span lang="es">Búsqueda en un segundo</span><span lang="en">Search in a second</span></h3>
           <p><span lang="es">20 resultados y 20 más al bajar, con vista previa y portada. En todo YouTube, en tus canales o dentro de uno.</span><span lang="en">20 results and 20 more as you scroll, with a preview and thumbnail. All of YouTube, your channels or inside one.</span></p></div>
@@ -201,7 +201,25 @@
           <p><span lang="es">Un video por pestaña, el audio sigue mientras buscás otra cosa. En ventana aparte, la pestaña muestra la ficha y "A continuación".</span><span lang="en">One video per tab, audio keeps playing while you browse. With a separate window, the tab shows the details and "Up next".</span></p></div>
         <div class="feature"><div class="icon">🕒</div>
           <h3><span lang="es">Ver después y descargas</span><span lang="en">Watch later and downloads</span></h3>
-          <p><span lang="es">Guardá videos con <kbd>l</kbd>, suscribite con <kbd>s</kbd>, descargá con subtítulos con <kbd>d</kbd>.</span><span lang="en">Save videos with <kbd>l</kbd>, subscribe with <kbd>s</kbd>, download with subtitles with <kbd>d</kbd>.</span></p></div>
+          <p><span lang="es">Guardá videos con <kbd>l</kbd>, suscribite con <kbd>s</kbd>, descargá con subtítulos con <kbd>d</kbd> y seguí el progreso en Descargas.</span><span lang="en">Save videos with <kbd>l</kbd>, subscribe with <kbd>s</kbd>, download with subtitles with <kbd>d</kbd> and follow the progress in Downloads.</span></p></div>
+        <div class="feature"><div class="icon">📜</div>
+          <h3><span lang="es">Historial y seguir donde lo dejaste</span><span lang="en">History and resume</span></h3>
+          <p><span lang="es">Todo lo que viste, con el día. Al reabrir un video arranca en el segundo donde lo cerraste.</span><span lang="en">Everything you watched, with the day. Opening a video again starts where you closed it.</span></p></div>
+        <div class="feature"><div class="icon">📚</div>
+          <h3><span lang="es">Mis listas</span><span lang="en">My playlists</span></h3>
+          <p><span lang="es">Tus playlists de YouTube, "Videos que me gustan" y "Ver más tarde", a un <kbd>Enter</kbd>.</span><span lang="en">Your YouTube playlists, "Liked videos" and "Watch later", one <kbd>Enter</kbd> away.</span></p></div>
+        <div class="feature"><div class="icon">⏩</div>
+          <h3><span lang="es">Capítulos y SponsorBlock</span><span lang="en">Chapters and SponsorBlock</span></h3>
+          <p><span lang="es">Saltá de capítulo con <kbd>[</kbd> <kbd>]</kbd>. Los patrocinios y pedidos de suscripción se saltean solos.</span><span lang="en">Jump chapters with <kbd>[</kbd> <kbd>]</kbd>. Sponsors and "subscribe!" reminders are skipped by themselves.</span></p></div>
+        <div class="feature"><div class="icon">🎧</div>
+          <h3><span lang="es">Solo audio</span><span lang="en">Audio only</span></h3>
+          <p><span lang="es">Con <kbd>a</kbd> escuchás un video como música, y volvés al video en el mismo segundo.</span><span lang="en">With <kbd>a</kbd> you listen to a video like music, and go back to the video at the same second.</span></p></div>
+        <div class="feature"><div class="icon">💭</div>
+          <h3><span lang="es">Comentarios</span><span lang="en">Comments</span></h3>
+          <p><span lang="es">Los comentarios del video al lado de "A continuación", con <kbd>PgUp</kbd> <kbd>PgDn</kbd>.</span><span lang="en">The video's comments next to "Up next", with <kbd>PgUp</kbd> <kbd>PgDn</kbd>.</span></p></div>
+        <div class="feature"><div class="icon">🔔</div>
+          <h3><span lang="es">Avisos de videos nuevos</span><span lang="en">New video notices</span></h3>
+          <p><span lang="es">Cada 15 minutos mira tus suscripciones y te avisa en la app y en el escritorio.</span><span lang="en">Every 15 minutes it checks your subscriptions and tells you, in the app and on the desktop.</span></p></div>
         <div class="feature"><div class="icon">💬</div>
           <h3><span lang="es">Subtítulos y doblaje</span><span lang="en">Subtitles and dubbing</span></h3>
           <p><span lang="es">Original, subtítulos o audio doblado, en el idioma que elijas, sin cortar el video.</span><span lang="en">Original, subtitles or dubbed audio, in the language you choose, without stopping the video.</span></p></div>
@@ -278,7 +296,9 @@ cargo install tubetui</code></pre>
             <tr><td><kbd>Enter</kbd></td><td><span lang="es">ver · abrir canal</span><span lang="en">play · open channel</span></td></tr>
             <tr><td><kbd>/</kbd></td><td><span lang="es">buscar</span><span lang="en">search</span></td></tr>
             <tr><td><kbd>l</kbd> <kbd>s</kbd> <kbd>d</kbd> <kbd>c</kbd></td><td><span lang="es">Ver después · suscribirse · descargar · canal</span><span lang="en">watch later · subscribe · download · channel</span></td></tr>
+            <tr><td><kbd>a</kbd></td><td><span lang="es">ver como solo audio</span><span lang="en">play as audio only</span></td></tr>
             <tr><td><kbd>espacio</kbd> <kbd>x</kbd></td><td><span lang="es">tus archivos: marcar · a la papelera</span><span lang="en">your files: mark · to the trash</span></td></tr>
+            <tr><td><kbd>x</kbd></td><td><span lang="es">Historial: quitar · Descargas: cancelar</span><span lang="en">History: remove · Downloads: cancel</span></td></tr>
             <tr><td><kbd>Esc</kbd></td><td><span lang="es">volver</span><span lang="en">back</span></td></tr>
           </table>
         </div>
@@ -290,6 +310,8 @@ cargo install tubetui</code></pre>
             <tr><td><kbd>v</kbd> <kbd>b</kbd></td><td><span lang="es">calidad · compresión</span><span lang="en">quality · codec</span></td></tr>
             <tr><td><kbd>j</kbd> <kbd>i</kbd> <kbd>o</kbd></td><td><span lang="es">subtítulos · original/doblado · idioma</span><span lang="en">subtitles · original/dubbed · language</span></td></tr>
             <tr><td><kbd>f</kbd> <kbd>Tab</kbd></td><td><span lang="es">pantalla completa · A continuación</span><span lang="en">fullscreen · Up next</span></td></tr>
+            <tr><td><kbd>[</kbd> <kbd>]</kbd> <kbd>a</kbd></td><td><span lang="es">capítulo anterior · siguiente · solo audio</span><span lang="en">previous · next chapter · audio only</span></td></tr>
+            <tr><td><kbd>PgUp</kbd> <kbd>PgDn</kbd></td><td><span lang="es">comentarios</span><span lang="en">comments</span></td></tr>
           </table>
         </div>
         <div>

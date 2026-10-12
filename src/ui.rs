@@ -9,13 +9,14 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Tabs};
 
-use crate::app::{Confirm, Focus, Group, Listing, Prompt, Section, Setting, State, Tab, language_label};
+use crate::app::{Confirm, Focus, Group, ListKind, Listing, Prompt, Section, Setting, State, Tab, language_label};
 use crate::config::{IconSet, donations};
 use crate::doctor::{Manager, Tool};
-use crate::domain::{Channel, Live, Video, clock, date_labels};
+use crate::domain::{Channel, Download, DownloadState, Live, Playlist, Video, clock, date_labels};
 use crate::i18n::Lang;
 use crate::media::{LocalFile, MediaKind};
 use crate::player::Info;
+use crate::sponsorblock::Segment;
 use crate::update::Install;
 #[cfg(test)]
 use crate::youtube::Watch;
@@ -51,14 +52,14 @@ const TEAL: Color = Color::Rgb(115, 218, 202);
 const PURPLE: Color = Color::Rgb(157, 124, 216);
 
 /// One colour per menu entry, in `Section::ALL` order.
-const SECTION_COLORS: [Color; 13] =
-    [BLUE, CYAN, RED, YELLOW, ORANGE, MAGENTA, GREEN, TEAL, PURPLE, MAGENTA, BLUE, PURPLE, MUTED];
+const SECTION_COLORS: [Color; 16] =
+    [BLUE, CYAN, RED, YELLOW, TEAL, GREEN, ORANGE, MAGENTA, GREEN, TEAL, PURPLE, MAGENTA, CYAN, BLUE, PURPLE, MUTED];
 
 pub struct Icons {
     /// In `Section::ALL` order.
-    pub sections: [&'static str; 13],
+    pub sections: [&'static str; 16],
     /// In `Setting::ALL` order.
-    pub settings: [&'static str; 24],
+    pub settings: [&'static str; 27],
     pub logo: &'static str,
     pub tab: &'static str,
     pub live: &'static str,
@@ -79,13 +80,17 @@ impl Icons {
     fn section(&self, section: Section) -> &'static str {
         self.sections[Section::ALL.iter().position(|s| *s == section).unwrap_or(0)]
     }
+
+    fn setting(&self, setting: Setting) -> &'static str {
+        self.settings[Setting::ALL.iter().position(|s| *s == setting).unwrap_or(0)]
+    }
 }
 
 const EMOJI: Icons = Icons {
-    sections: ["🏠", "🧭", "📺", "🕒", "⭐", "💡", "🔎", "📡", "📼", "🎵", "🔧", "💜", "🚪"],
+    sections: ["🏠", "🧭", "📺", "🕒", "📜", "📚", "⭐", "💡", "🔎", "📡", "📼", "🎵", "📥", "🔧", "💜", "🚪"],
     settings: [
-        "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "🗣", "😀", "🖼", "🖱", "✨", "🌊", "💥", "📼", "🎵", "📁",
-        "🏷", "🩺", "👁", "⬆", "📝",
+        "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "⏩", "🗣", "😀", "🖼", "🖱", "✨", "🌊", "💥", "📼", "🎵",
+        "📁", "🏷", "🩺", "👁", "🩳", "🔔", "⬆", "📝",
     ],
     logo: "▶️",
     tab: "🎬",
@@ -108,20 +113,23 @@ const NERD: Icons = Icons {
         "\u{f14e}",
         "\u{f05c6}",
         "\u{f017}",
+        "\u{f1da}",
+        "\u{f0cb}",
         "\u{f005}",
         "\u{f0eb}",
         "\u{f002}",
         "\u{f2ce}",
         "\u{f03d}",
         "\u{f001}",
+        "\u{f019}",
         "\u{f013}",
         "\u{f004}",
         "\u{f08b}",
     ],
     settings: [
         "\u{f007}", "\u{f15b}", "\u{f021}", "\u{f08b}", "\u{f1ab}", "\u{f075}", "\u{f1de}", "\u{f008}", "\u{f025}",
-        "\u{f0ac}", "\u{f118}", "\u{f03e}", "\u{f245}", "\u{f0d0}", "\u{f0e7}", "\u{f0a1}", "\u{f03d}", "\u{f001}",
-        "\u{f07b}", "\u{f02c}", "\u{f0f1}", "\u{f06e}", "\u{f01b}", "\u{f044}",
+        "\u{f051}", "\u{f0ac}", "\u{f118}", "\u{f03e}", "\u{f245}", "\u{f0d0}", "\u{f0e7}", "\u{f0a1}", "\u{f03d}",
+        "\u{f001}", "\u{f07b}", "\u{f02c}", "\u{f0f1}", "\u{f06e}", "\u{f10b}", "\u{f0f3}", "\u{f01b}", "\u{f044}",
     ],
     logo: "\u{f16a}",
     tab: "\u{f144}",
@@ -139,10 +147,10 @@ const NERD: Icons = Icons {
 };
 
 const UNICODE: Icons = Icons {
-    sections: ["⌂", "◎", "▣", "◷", "★", "✧", "⌕", "⌁", "▷", "♫", "⚙", "♥", "⏻"],
+    sections: ["⌂", "◎", "▣", "◷", "↺", "≣", "★", "✧", "⌕", "⌁", "▷", "♫", "⇩", "⚙", "♥", "⏻"],
     settings: [
-        "☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "#", "✚", "◉",
-        "↑", "✎",
+        "☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "»", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "#", "✚",
+        "◉", "▯", "♪", "↑", "✎",
     ],
     logo: "▶",
     tab: "▶",
@@ -270,8 +278,8 @@ pub fn spot(state: &State, playing: Option<&Info>, screen: Rect, x: u16, y: u16)
             let fraction = (f64::from(x - bar.x) + 0.5) / f64::from(bar.width);
             return Some(Spot::Progress((fraction * duration) as u32));
         }
-        if state.video_window {
-            // The video is elsewhere: here are its details and the related list.
+        if state.details_shown(tab) {
+            // The video is elsewhere (or not shown): here are its details and the related list.
             state.related_shown()?;
             let list = Block::bordered().inner(watch_layout(Block::bordered().inner(areas.content)).related);
             return list_row(list, tab.related, tab.related_videos().len(), at);
@@ -347,7 +355,9 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
                 Span::styled(playback.title.clone(), Style::new().fg(FG).bold()),
                 Span::styled(format!(" · {} ", playback.subtitle), MAGENTA),
             ]);
-            let body = if playback.audio_only {
+            let body = if state.details_shown(tab) {
+                Paragraph::default() // the details, drawn below
+            } else if playback.audio_only {
                 let songs = playback.queue.len();
                 Paragraph::new(vec![
                     Line::from(""),
@@ -372,20 +382,20 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
                     Line::from(bouncing_bar(30, elapsed)).fg(BLUE),
                 ])
                 .alignment(Alignment::Center)
-            } else if view.embedded || (state.video_window && playback.video.is_some()) {
-                Paragraph::default() // the video, or the details drawn below
+            } else if view.embedded {
+                Paragraph::default() // the video
             } else {
                 Paragraph::new(lang.pick("Se reproduce en una ventana de mpv", "Playing in an mpv window")).fg(MUTED)
             };
             let mut block = panel(title, BLUE);
             if let Some(info) = &view.playing {
                 block = block.title_top(Line::from(playing_label(info, icons)).fg(CYAN).right_aligned());
-                if let Some(progress) = progress_line(info, areas.content.width) {
+                if let Some(progress) = progress_line(info, &tab.segments, areas.content.width) {
                     block = block.title_bottom(progress);
                 }
             }
             frame.render_widget(body.block(block), areas.content);
-            if state.video_window && !view.embedded {
+            if state.details_shown(tab) {
                 draw_watch(frame, state, icons, view, tab, Block::bordered().inner(areas.content));
             }
         }
@@ -405,19 +415,30 @@ struct WatchLayout {
     thumbnail: Rect,
     details: Rect,
     related: Rect,
+    /// Beside "Up next", when there is room.
+    comments: Option<Rect>,
 }
 
 /// Columns of the thumbnail on a video tab.
 const WATCH_THUMBNAIL_WIDTH: u16 = 36;
+/// Narrower than this, a video tab shows no comments.
+const COMMENTS_MIN_WIDTH: u16 = 100;
 
 fn watch_layout(inner: Rect) -> WatchLayout {
     let width = WATCH_THUMBNAIL_WIDTH.min(inner.width / 3);
     let rows = (u32::from(width) * 9 / 32) as u16;
-    let [card, _, related] =
+    let [card, _, below] =
         Layout::vertical([Constraint::Length(rows.max(7)), Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
     let [thumbnail, _, details] =
         Layout::horizontal([Constraint::Length(width), Constraint::Length(2), Constraint::Fill(1)]).areas(card);
-    WatchLayout { thumbnail: Rect { height: rows.min(card.height), ..thumbnail }, details, related }
+    let (related, comments) = if below.width >= COMMENTS_MIN_WIDTH {
+        // "Up next" a little wider: its rows carry date, channel, title and length.
+        let [related, comments] = Layout::horizontal([Constraint::Fill(11), Constraint::Fill(9)]).areas(below);
+        (related, Some(comments))
+    } else {
+        (below, None)
+    };
+    WatchLayout { thumbnail: Rect { height: rows.min(card.height), ..thumbnail }, details, related, comments }
 }
 
 /// The video plays in its own window: the tab shows its details and what to watch next.
@@ -463,6 +484,10 @@ fn draw_watch(frame: &mut Frame, state: &State, icons: &Icons, view: &View, tab:
         lines.push(Line::from(format!("{} {}", icons.later, lang.pick("En Ver después", "In Watch later"))).fg(CYAN));
     }
     lines.extend(rating_line(state, icons, &video.id));
+    if tab.playback.audio_only {
+        let note = lang.pick("🎧 Solo audio · a vuelve al video", "🎧 Sound only · a brings the video back");
+        lines.push(Line::from(note).fg(TEAL));
+    }
     if let Some(elapsed) = view.opening {
         lines.push(Line::from(loading_text(lang.pick("el video", "the video"), elapsed, lang)).fg(YELLOW));
     }
@@ -483,6 +508,41 @@ fn draw_watch(frame: &mut Frame, state: &State, icons: &Icons, view: &View, tab:
         .highlight_style(highlight);
     let selected = (!related.is_empty()).then_some(tab.related);
     frame.render_stateful_widget(list, layout.related, &mut ListState::default().with_selected(selected));
+    if let Some(area) = layout.comments {
+        draw_comments(frame, tab, lang, area);
+    }
+}
+
+/// The video's top comments, from the one scrolled to (PgUp / PgDn).
+fn draw_comments(frame: &mut Frame, tab: &Tab, lang: Lang, area: Rect) {
+    let title = match &tab.comments {
+        None if tab.watch.is_none() || tab.watch.as_ref().is_some_and(|w| w.comments_token.is_some()) => {
+            format!(" {} ", lang.pick("Buscando comentarios…", "Looking for comments…"))
+        }
+        None => format!(" {} ", lang.pick("Comentarios desactivados", "Comments are off")),
+        Some(c) if c.is_empty() => format!(" {} ", lang.pick("Sin comentarios", "No comments")),
+        Some(c) => format!(
+            " {} {}/{} · PgUp PgDn ",
+            lang.pick("Comentarios", "Comments"),
+            (tab.comments_from + 1).min(c.len()),
+            c.len()
+        ),
+    };
+    let mut lines = Vec::new();
+    for comment in tab.comments.iter().flatten().skip(tab.comments_from) {
+        let mut head = vec![Span::styled(comment.author.clone(), Style::new().fg(MAGENTA).bold())];
+        if let Some(likes) = &comment.likes {
+            head.push(Span::styled(format!("  👍 {likes}"), MUTED));
+        }
+        if let Some(published) = &comment.published {
+            head.push(Span::styled(format!("  {published}"), MUTED));
+        }
+        lines.push(Line::from(head));
+        lines.extend(comment.text.lines().map(|l| Line::from(l.to_owned()).fg(FG)));
+        lines.push(Line::from(""));
+    }
+    let comments = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }).block(panel(title, MUTED));
+    frame.render_widget(comments, area);
 }
 
 fn tab_icon<'a>(icons: &'a Icons, tab: &Tab) -> &'a str {
@@ -492,6 +552,9 @@ fn tab_icon<'a>(icons: &'a Icons, tab: &Tab) -> &'a str {
 /// `" 🔊 85 %  720p  H.264 "`: what the video keys change, as it is now.
 fn playing_label(info: &Info, icons: &Icons) -> String {
     let mut parts = Vec::new();
+    if let Some(title) = info.chapter_title() {
+        parts.push(format!("§ {}", truncate(title, 32)));
+    }
     if let Some(volume) = info.volume {
         let icon = if info.muted { icons.muted } else { icons.volume };
         parts.push(format!("{icon} {volume:.0} %"));
@@ -522,25 +585,44 @@ pub fn progress_bar(info: &Info, content: Rect) -> Option<(Rect, f64)> {
     Some((Rect::new(content.x + 1 + before, content.bottom().saturating_sub(1), width, 1), duration))
 }
 
-/// ` ▶ 1:23 ━━━━━━━━━━━━──────── 4:56 `, the width of the tab's bottom border:
-/// played in red, downloaded in grey, the rest dim.
-fn progress_line(info: &Info, width: u16) -> Option<Line<'static>> {
+/// ` ▶ 1:23 ━━━━━━━━━━━━──┃───── 4:56 `, the width of the tab's bottom border:
+/// played in red, downloaded in grey, the rest dim; the parts SponsorBlock
+/// skips in green and where chapters start as `┃`.
+fn progress_line(info: &Info, segments: &[Segment], width: u16) -> Option<Line<'static>> {
     let (bar, duration) = progress_bar(info, Rect::new(0, 0, width, 1))?;
     let position = info.position.unwrap_or_default().clamp(0.0, duration);
     let cells = |seconds: f64| ((seconds.clamp(0.0, duration) / duration) * f64::from(bar.width)).round() as usize;
     let done = cells(position);
-    let loaded = cells(info.buffered.unwrap_or_default()).saturating_sub(done);
-    let rest = usize::from(bar.width) - done - loaded;
+    let loaded = cells(info.buffered.unwrap_or_default()).max(done);
+    let width = usize::from(bar.width);
+    // The seconds each cell spans.
+    let span = |i: usize| (i as f64 * duration / width as f64, (i + 1) as f64 * duration / width as f64);
+    let mut track: Vec<Span<'static>> = Vec::new();
+    for i in 0..width {
+        let (from, to) = span(i);
+        let mut symbol = if i < loaded { "━" } else { "─" };
+        let mut color = if i < done { RED } else { MUTED };
+        if segments.iter().any(|s| s.start_secs() < to && s.end_secs() > from) {
+            (symbol, color) = ("━", GREEN);
+        }
+        if info.chapters.iter().any(|(start, _)| *start > 0.0 && *start >= from && *start < to) {
+            symbol = "┃";
+        }
+        match track.last_mut() {
+            Some(last) if last.style.fg == Some(color) && last.content.starts_with(symbol) => {
+                last.content.to_mut().push_str(symbol);
+            }
+            _ => track.push(Span::styled(symbol.to_owned(), Style::new().fg(color))),
+        }
+    }
     let clock_width = clock(duration as u32).len();
     // One cell each: the emoji pause sign takes two in most terminals.
     let icon = if info.paused { "‖" } else { "▶" };
-    Some(Line::from(vec![
-        Span::styled(format!(" {icon} {:>clock_width$} ", clock(position as u32)), Style::new().fg(FG)),
-        Span::styled("━".repeat(done), Style::new().fg(RED)),
-        Span::styled("━".repeat(loaded), Style::new().fg(MUTED)),
-        Span::styled("─".repeat(rest), Style::new().fg(MUTED)),
-        Span::styled(format!(" {} ", clock(duration as u32)), Style::new().fg(FG)),
-    ]))
+    let mut spans =
+        vec![Span::styled(format!(" {icon} {:>clock_width$} ", clock(position as u32)), Style::new().fg(FG))];
+    spans.extend(track);
+    spans.push(Span::styled(format!(" {} ", clock(duration as u32)), Style::new().fg(FG)));
+    Some(Line::from(spans))
 }
 
 fn panel<'a>(title: impl Into<Line<'a>>, color: Color) -> Block<'a> {
@@ -569,6 +651,12 @@ fn sidebar_items(state: &State, icons: &Icons) -> Vec<(ListItem<'static>, Option
         let mut label = section.label(lang).to_owned();
         if *section == Section::VerDespues && !state.later.is_empty() {
             label.push_str(&format!(" ({})", state.later.len()));
+        }
+        if *section == Section::Suscripciones && !state.fresh.is_empty() {
+            label.push_str(&format!(" ({} {})", state.fresh.len(), lang.pick("nuevos", "new")));
+        }
+        if *section == Section::Descargas && state.downloading() > 0 {
+            label.push_str(&format!(" ({} ⬇)", state.downloading()));
         }
         if *section == Section::AcercaDe && state.update.is_some() {
             label.push_str(" ⬆");
@@ -666,7 +754,7 @@ pub fn thumbnail_area(state: &State, screen: Rect) -> Option<(String, Rect)> {
         return None;
     }
     if let Some(tab) = state.active_tab() {
-        let video = tab.playback.video.as_ref().filter(|_| state.video_window && !state.fullscreen)?;
+        let video = tab.playback.video.as_ref().filter(|_| state.details_shown(tab) && !state.fullscreen)?;
         let inner = Block::bordered().inner(areas(screen, state.sidebar).content);
         return Some((video.id.clone(), watch_layout(inner).thumbnail)).filter(|(_, cells)| cells.height > 0);
     }
@@ -698,18 +786,22 @@ fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, are
                 )),
                 Prompt::CookiesFile => Line::from(format!(
                     " {} {} ",
-                    icons.settings[1],
+                    icons.setting(Setting::ImportCookies),
                     lang.pick("Ruta del cookies.txt", "cookies.txt path")
                 )),
                 Prompt::DownloadDir => Line::from(format!(
                     " {} {} ",
-                    icons.settings[18],
+                    icons.setting(Setting::DownloadDir),
                     lang.pick("Carpeta de descargas", "Downloads folder")
                 )),
                 Prompt::MediaDirs(kind) => {
                     let (icon, what) = match kind {
-                        MediaKind::Video => (icons.settings[16], lang.pick("Carpetas de videos", "Video folders")),
-                        MediaKind::Music => (icons.settings[17], lang.pick("Carpetas de música", "Music folders")),
+                        MediaKind::Video => {
+                            (icons.setting(Setting::VideoDirs), lang.pick("Carpetas de videos", "Video folders"))
+                        }
+                        MediaKind::Music => {
+                            (icons.setting(Setting::MusicDirs), lang.pick("Carpetas de música", "Music folders"))
+                        }
                     };
                     let how = lang.pick(
                         "separadas por coma (vacío = la del sistema)",
@@ -719,7 +811,7 @@ fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, are
                 }
                 Prompt::Topics => Line::from(format!(
                     " {} {} ",
-                    icons.settings[19],
+                    icons.setting(Setting::DiscoverTopics),
                     lang.pick("Temas de Descubrir, separados por coma", "Discover topics, comma separated")
                 )),
             };
@@ -857,19 +949,24 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
         },
     };
     let items: Vec<ListItem> = match &listing.items {
-        Items::Videos(videos) => videos.iter().map(|v| video_row(state, icons, view, v)).collect(),
+        Items::Videos(videos) => {
+            let history = listing.kind == ListKind::History;
+            videos.iter().map(|v| video_row_dated(state, icons, view, v, history)).collect()
+        }
         Items::Channels(channels) => {
             // The description goes in the panel when there is one, other details in the row.
             let panel = split_preview(area).1.is_some();
             channels.iter().map(|c| channel_row(state, icons, c, panel)).collect()
         }
         Items::Profiles(profiles) => profiles.iter().map(|p| profile_row(state, icons, p)).collect(),
+        Items::Playlists(playlists) => playlists.iter().map(|p| playlist_row(icons, p, state.lang())).collect(),
         Items::Settings => {
             Setting::ALL.iter().enumerate().map(|(i, s)| setting_row(state, icons.settings[i], *s)).collect()
         }
         Items::Files(files, kind) => {
             files.iter().map(|f| file_row(icons, f, *kind, state.marked.contains(&f.path))).collect()
         }
+        Items::Downloads(downloads) => downloads.iter().map(|d| download_row(d, state.lang())).collect(),
         Items::About | Items::System => Vec::new(),
     };
     let focused = state.focus == Focus::List;
@@ -929,6 +1026,9 @@ fn draw_preview(frame: &mut Frame, state: &State, icons: &Icons, view: &View, vi
         }
         Live::No => {}
     }
+    if let Some(at) = state.resume_at(&v.id) {
+        lines.push(Line::from(format!("⏯ {} {}", lang.pick("Sigue desde", "Resumes at"), clock(at))).fg(YELLOW));
+    }
     if state.later.iter().any(|l| l.id == v.id) {
         lines.push(Line::from(format!("{} {}", icons.later, lang.pick("En Ver después", "In Watch later"))).fg(CYAN));
     }
@@ -977,8 +1077,15 @@ fn draw_channel_preview(frame: &mut Frame, state: &State, icons: &Icons, channel
 }
 
 fn video_row<'a>(state: &State, icons: &Icons, view: &View, v: &'a Video) -> ListItem<'a> {
+    video_row_dated(state, icons, view, v, false)
+}
+
+/// `watched_date`: the date column says when I watched it (Historial).
+fn video_row_dated<'a>(state: &State, icons: &Icons, view: &View, v: &'a Video, watched_date: bool) -> ListItem<'a> {
     let lang = state.lang();
-    let mut spans = match (v.live, v.published) {
+    let watched_at = watched_date.then(|| state.history.iter().find(|e| e.video.id == v.id).map(|e| e.at)).flatten();
+    let live = if watched_at.is_some() { Live::No } else { v.live };
+    let mut spans = match (live, watched_at.or(v.published)) {
         (Live::Now, _) => {
             let live = format!("{} {}", icons.live, lang.pick("en vivo", "live"));
             vec![Span::styled(pad_cells(&live, DATE_WIDTH), RED)]
@@ -994,6 +1101,9 @@ fn video_row<'a>(state: &State, icons: &Icons, view: &View, v: &'a Video) -> Lis
         (Live::No, None) => vec![Span::raw(" ".repeat(DATE_WIDTH))],
     };
     spans.push(Span::styled(format!(" {} ", pad(&v.channel, CHANNEL_WIDTH)), MAGENTA));
+    if state.fresh_shown.contains(&v.id) {
+        spans.push(Span::styled(format!("{} ", lang.pick("NUEVO", "NEW")), Style::new().fg(GREEN).bold()));
+    }
     if state.later.iter().any(|l| l.id == v.id) {
         spans.push(Span::raw(format!("{} ", icons.later)));
     }
@@ -1005,7 +1115,22 @@ fn video_row<'a>(state: &State, icons: &Icons, view: &View, v: &'a Video) -> Lis
         spans.push(Span::styled(v.title.as_str(), FG));
     }
     spans.push(Span::styled(format!("  {}", v.duration_label()), MUTED));
+    if let Some(at) = state.resume_at(&v.id) {
+        spans.extend(resume_bar(at, v.duration));
+    }
     ListItem::new(Line::from(spans))
+}
+
+/// How far I got: `  ━━━━─────` (or `  ⏯ 12:34` when the length is unknown).
+fn resume_bar(at: u32, duration: Option<u32>) -> Vec<Span<'static>> {
+    const CELLS: usize = 10;
+    match duration.filter(|d| *d > 0) {
+        Some(d) => {
+            let done = ((u64::from(at) * CELLS as u64 / u64::from(d)) as usize).clamp(1, CELLS);
+            vec![Span::raw("  "), Span::styled("━".repeat(done), RED), Span::styled("─".repeat(CELLS - done), MUTED)]
+        }
+        None => vec![Span::styled(format!("  ⏯ {}", clock(at)), YELLOW)],
+    }
 }
 
 /// Name, subscribers and @handle in columns; the description too unless
@@ -1026,6 +1151,50 @@ fn channel_row<'a>(state: &State, icons: &Icons, c: &'a Channel, panel: bool) ->
             format!("  {}", description.replace('\n', " ")),
             Style::new().fg(FG).add_modifier(Modifier::DIM),
         ));
+    }
+    ListItem::new(Line::from(spans))
+}
+
+fn playlist_row<'a>(icons: &Icons, playlist: &'a Playlist, lang: Lang) -> ListItem<'a> {
+    let mut spans = vec![
+        Span::raw(format!(" {} ", icons.section(Section::MisListas))),
+        Span::styled(pad_cells(&truncate(playlist.name(lang), 48), 50), FG),
+    ];
+    if let Some(count) = &playlist.count {
+        spans.push(Span::styled(count.as_str(), MUTED));
+    }
+    ListItem::new(Line::from(spans))
+}
+
+/// `⬇  45.3% ━━━━━─────  2.1MiB/s  00:12   title · channel`.
+fn download_row(download: &Download, lang: Lang) -> ListItem<'static> {
+    const BAR: usize = 12;
+    let mut spans = match &download.state {
+        DownloadState::Running { permille, speed, eta } => {
+            let done = usize::from(*permille) * BAR / 1000;
+            vec![
+                Span::styled(format!(" ⬇ {:>5.1}% ", f64::from(*permille) / 10.0), Style::new().fg(YELLOW).bold()),
+                Span::styled("━".repeat(done), RED),
+                Span::styled("─".repeat(BAR - done), MUTED),
+                Span::styled(format!(" {speed:>10} {eta:>8}  "), MUTED),
+            ]
+        }
+        DownloadState::Done(_) => {
+            vec![Span::styled(pad_cells(&format!(" ✓ {}", lang.pick("lista", "done")), 41), GREEN)]
+        }
+        DownloadState::Failed(_) => {
+            vec![Span::styled(pad_cells(&format!(" ✗ {}", lang.pick("falló", "failed")), 41), RED)]
+        }
+        DownloadState::Cancelled => {
+            vec![Span::styled(pad_cells(&format!(" ⏹ {}", lang.pick("cancelada", "cancelled")), 41), MUTED)]
+        }
+    };
+    spans.push(Span::styled(download.video.title.clone(), FG));
+    spans.push(Span::styled(format!(" · {}", download.video.channel), MAGENTA));
+    match &download.state {
+        DownloadState::Done(path) => spans.push(Span::styled(format!("  {}", path.display()), MUTED)),
+        DownloadState::Failed(error) => spans.push(Span::styled(format!("  {error}"), RED)),
+        _ => {}
     }
     ListItem::new(Line::from(spans))
 }
@@ -1111,6 +1280,7 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
         let yes = match confirm {
             Confirm::Unsubscribe { .. } => key(lang.pick("s", "y"), "sí, desuscribirme", "yes, unsubscribe"),
             Confirm::Trash(_) => key(lang.pick("s", "y"), "sí, a la papelera", "yes, to the trash"),
+            Confirm::Quit(_) => key(lang.pick("s", "y"), "sí, salir y cortarlas", "yes, quit and stop them"),
         };
         vec![yes, key(lang.pick("otra tecla", "other key"), "no", "no")]
     } else if state.help {
@@ -1154,6 +1324,7 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
                     key("v", "mostrar vistos", "show watched")
                 },
                 key("l", "ver después", "watch later"),
+                key("a", "solo audio", "sound only"),
                 subscribe.clone(),
                 key("g", "me gusta", "like"),
                 key("d", "descargar", "download"),
@@ -1161,9 +1332,17 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
                 key("/", "buscar", "search"),
                 back,
             ],
+            Some(Items::Videos(_)) if state.listing().is_some_and(|l| l.kind == ListKind::History) => vec![
+                key("Enter", "ver (sigue donde lo dejaste)", "play (resumes where you left)"),
+                key("x", "quitar del historial", "remove from history"),
+                key("l", "ver después", "watch later"),
+                key("c", "canal", "channel"),
+                back,
+            ],
             Some(Items::Videos(_)) => vec![
                 key("Enter", "ver", "play"),
                 key("l", "ver después", "watch later"),
+                key("a", "solo audio", "sound only"),
                 subscribe.clone(),
                 key("g", "me gusta", "like"),
                 key("d", "descargar", "download"),
@@ -1173,6 +1352,7 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
             ],
             Some(Items::Channels(_)) => vec![key("Enter", "ver sus videos", "its videos"), subscribe, back],
             Some(Items::Profiles(_)) => vec![key("Enter", "usar esta sesión", "use this login"), back],
+            Some(Items::Playlists(_)) => vec![key("Enter", "ver sus videos", "its videos"), back],
             Some(Items::Files(_, kind)) => vec![
                 match kind {
                     MediaKind::Music => key("Enter", "escuchar desde esta canción", "play from this song"),
@@ -1191,6 +1371,27 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
                 },
                 back,
             ],
+            Some(Items::Downloads(downloads)) => {
+                let selected = state.listing().and_then(|l| downloads.get(l.selected)).map(|d| &d.state);
+                let mut keys = Vec::new();
+                match selected {
+                    Some(DownloadState::Running { .. }) => {
+                        keys.push(key("x", "cancelar la descarga", "cancel the download"))
+                    }
+                    Some(DownloadState::Done(_)) => {
+                        keys.push(key("Enter", "ver", "play"));
+                        keys.push(key(
+                            "x",
+                            "quitar de la lista (el archivo queda)",
+                            "take off the list (the file stays)",
+                        ));
+                    }
+                    Some(_) => keys.push(key("x", "quitar de la lista", "take off the list")),
+                    None => {}
+                }
+                keys.push(back);
+                keys
+            }
             Some(Items::About) => vec![back],
             Some(Items::System) => vec![key("Enter", "revisar de nuevo", "check again"), back],
             _ => vec![key("Enter", "cambiar / abrir", "change / open"), back],
@@ -1303,6 +1504,11 @@ fn draw_confirm(frame: &mut Frame, confirm: &Confirm, lang: Lang) {
             Span::raw(lang.pick("¿Desuscribirte de ", "Unsubscribe from ")),
             Span::styled(name.as_str(), Style::new().fg(MAGENTA).bold()),
             Span::raw("?"),
+        ]),
+        Confirm::Quit(n) => Line::from(vec![
+            Span::raw(lang.pick("Hay ", "There are ")),
+            Span::styled(n.to_string(), Style::new().fg(MAGENTA).bold()),
+            Span::raw(lang.pick(" descargas en curso. ¿Salir igual?", " downloads running. Quit anyway?")),
         ]),
         Confirm::Trash(paths) => {
             let what = match paths.as_slice() {
@@ -1716,11 +1922,11 @@ mod tests {
         s.update(Action::Prefix);
         assert!(hint_keys(&s).contains(&"b".to_string()) && hint_keys(&s).contains(&"0-9".to_string()));
         let tab = with_tab();
-        assert!(hint_keys(&tab).contains(&"espacio".to_string()) && hint_keys(&tab).contains(&"m".to_string()));
+        assert!(hint_keys(&tab).contains(&"espacio".to_string()) && hint_keys(&tab).contains(&"[ ]".to_string()));
         let list = with_items(Items::Videos(vec![video("a")]));
         assert_eq!(
             hint_keys(&list),
-            ["Enter", "v", "l", "s", "g", "d", "c", "/", "Esc", "Ctrl+y + ?"],
+            ["Enter", "v", "l", "a", "s", "g", "d", "c", "/", "Esc", "Ctrl+y + ?"],
             "Inicio: a feed"
         );
         let mut search = state();
@@ -1922,15 +2128,36 @@ mod tests {
         assert_eq!(track.chars().count(), bar.width as usize, "{bottom}");
         let thick = track.chars().filter(|c| *c == '━').count();
         assert_eq!(thick, (f64::from(bar.width) / 2.0).round() as usize, "a quarter played, another downloaded");
-        let line = progress_line(&info, content.width).unwrap();
+        let line = progress_line(&info, &[], content.width).unwrap();
         let played = &line.spans[1];
         assert_eq!(played.style.fg, Some(RED));
         assert_eq!(played.content.chars().count(), (f64::from(bar.width) / 4.0).round() as usize);
         assert_eq!(line.spans[2].style.fg, Some(MUTED));
         assert_eq!(bar.y, content.bottom() - 1);
-        let paused = progress_line(&Info { paused: true, ..info.clone() }, 60).unwrap();
+        let paused = progress_line(&Info { paused: true, ..info.clone() }, &[], 60).unwrap();
         assert!(paused.to_string().starts_with(" ‖ 0:30 "));
-        assert!(progress_line(&Info { duration: None, ..info }, 60).is_none(), "live: no total");
+        assert!(progress_line(&Info { duration: None, ..info }, &[], 60).is_none(), "live: no total");
+    }
+
+    #[test]
+    fn progress_bar_marks_sponsors_and_chapters() {
+        let info = Info {
+            position: Some(0.0),
+            duration: Some(100.0),
+            chapters: vec![(0.0, "Intro".into()), (50.0, "Second half".into())],
+            chapter: Some(1),
+            ..Info::default()
+        };
+        let sponsor = Segment { start: 10_000, end: 20_000, category: "sponsor".into() };
+        let line = progress_line(&info, std::slice::from_ref(&sponsor), 40).unwrap();
+        let (bar, _) = progress_bar(&info, Rect::new(0, 0, 40, 1)).unwrap();
+        let track: String = line.spans[1..line.spans.len() - 1].iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(track.chars().count(), bar.width as usize);
+        let green: usize =
+            line.spans.iter().filter(|s| s.style.fg == Some(GREEN)).map(|s| s.content.chars().count()).sum();
+        assert!(green >= 2, "{line:?}");
+        assert_eq!(track.matches('┃').count(), 1, "only the chapter that starts after 0: {track}");
+        assert!(playing_label(&info, icons(IconSet::Unicode)).contains("§ Second half"));
     }
 
     /// The first cell whose row contains `text`, at the start of `text`.
@@ -1988,12 +2215,23 @@ mod tests {
             subscribers: Some("559K".into()),
             related: vec![video("r1"), video("r2")],
             rating: Some(Rating::Like),
+            comments_token: Some("T".into()),
         };
         s.update(Action::Watched(tab, Ok(watch)));
+        assert!(render_with(&s, &View { embedded: false, ..VIEW }).contains("Buscando comentarios"));
+        let comment = crate::youtube::Comment {
+            author: "@ana".into(),
+            text: "Qué temazo".into(),
+            likes: Some("12".into()),
+            published: Some("hace 1 año".into()),
+        };
+        s.update(Action::CommentsLoaded(tab, Ok(vec![comment])));
         let view = View { embedded: false, ..VIEW };
         let screen = render_with(&s, &view);
         for text in
             ["title a", "chan a · 559K suscriptores", "5 k vistas", "Te gusta", "A continuación · 2 · Tab", "title r2"]
+                .into_iter()
+                .chain(["Comentarios 1/1", "@ana  👍", "12  hace 1 año", "Qué temazo"])
         {
             assert!(screen.contains(text), "{text}\n{screen}");
         }

@@ -16,6 +16,7 @@ pub mod media;
 pub mod mouse;
 pub mod player;
 pub mod session;
+pub mod sponsorblock;
 pub mod store;
 pub mod thumbs;
 pub mod ui;

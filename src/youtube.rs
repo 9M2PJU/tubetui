@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::domain::{Channel, Live, Video};
+use crate::domain::{Channel, Live, Playlist, Video};
 use crate::session;
 
 const ORIGIN: &str = "https://www.youtube.com";
@@ -43,6 +43,10 @@ pub enum Source {
     /// New videos from my channels.
     Subscriptions,
     MyChannels,
+    /// My playlists (the lists themselves, not their videos).
+    MyPlaylists,
+    /// A playlist's videos, by playlist id.
+    Playlist(String),
     Search(String),
     ChannelSearch(String),
     /// A channel's videos, by channel URL.
@@ -59,7 +63,7 @@ pub enum Source {
 impl Source {
     /// Feeds that are empty, or refused, without a working login.
     pub fn needs_login(&self) -> bool {
-        matches!(self, Self::Recommended | Self::Subscriptions)
+        matches!(self, Self::Recommended | Self::Subscriptions | Self::MyPlaylists | Self::Playlist(_))
     }
 
     pub fn lists_channels(&self) -> bool {
@@ -77,6 +81,8 @@ impl Source {
             Self::Recommended => ":ytrec".into(),
             Self::Subscriptions => ":ytsubs".into(),
             Self::MyChannels => format!("{ORIGIN}/feed/channels"),
+            Self::MyPlaylists => String::new(), // read by `my_playlists`, not yt-dlp
+            Self::Playlist(id) => format!("{ORIGIN}/playlist?list={id}"),
             Self::Search(query) => format!("ytsearch{limit}:{query}"),
             // `sp=EgIQAg==` is the website's "channels only" filter.
             Self::ChannelSearch(query) => {
@@ -98,6 +104,7 @@ pub enum Items {
     Channels(Vec<Channel>),
     /// Browser profiles to log in with (`--cookies-from-browser` specs).
     Profiles(Vec<String>),
+    Playlists(Vec<Playlist>),
     /// The settings screen; rows come from `app::Setting::ALL`.
     Settings,
     /// The "About" page.
@@ -106,6 +113,8 @@ pub enum Items {
     System,
     /// Local media files.
     Files(Vec<crate::media::LocalFile>, crate::media::MediaKind),
+    /// "Descargas": running and finished downloads.
+    Downloads(Vec<crate::domain::Download>),
 }
 
 impl Items {
@@ -114,9 +123,11 @@ impl Items {
             Self::Videos(v) => v.len(),
             Self::Channels(c) => c.len(),
             Self::Profiles(p) => p.len(),
+            Self::Playlists(p) => p.len(),
             Self::Settings => crate::app::Setting::ALL.len(),
             Self::About | Self::System => 0,
             Self::Files(files, _) => files.len(),
+            Self::Downloads(downloads) => downloads.len(),
         }
     }
 
@@ -147,7 +158,11 @@ pub fn fetch_args(source: &Source, limit: u32, cookies: Option<&Path>) -> Vec<St
 pub fn looks_logged_out(result: &Result<Items, YoutubeError>) -> bool {
     match result {
         Ok(items) => items.is_empty(),
-        Err(e) => e.to_string().contains("Login details are needed"),
+        // yt-dlp asks for a login; YouTube's API answers 401.
+        Err(e) => {
+            let e = e.to_string();
+            e.contains("Login details are needed") || e.contains("status: 401")
+        }
     }
 }
 
@@ -158,6 +173,9 @@ pub fn fetch(source: &Source, limit: u32, cookies: Option<&Path>) -> Result<Item
     }
     if let Source::Discover(topics) = source {
         return discover(topics).map(Items::Videos);
+    }
+    if source == &Source::MyPlaylists {
+        return my_playlists(cookies.ok_or(YoutubeError::NoSession)?).map(Items::Playlists);
     }
     if cookies.is_none() && source == &Source::Subscriptions {
         return Err(YoutubeError::NoSession);
@@ -192,6 +210,54 @@ pub fn my_channels(cookies: &Path) -> Result<Vec<Channel>, YoutubeError> {
     }
     let mut seen = HashSet::new();
     Ok(pages.into_iter().flatten().filter(|c| seen.insert(c.id.clone())).collect())
+}
+
+/// My playlists: "Liked videos" and YouTube's "Watch later" first, then
+/// the ones I made or saved.
+pub fn my_playlists(cookies: &Path) -> Result<Vec<Playlist>, YoutubeError> {
+    let page = InnerTube::new(cookies)?.call("browse", json!({ "browseId": "FEplaylist_aggregation" }))?;
+    // Named by `Playlist::name`.
+    let fixed = ["LL", "WL"];
+    let mut playlists: Vec<Playlist> =
+        fixed.iter().map(|id| Playlist { id: (*id).into(), title: (*id).into(), count: None }).collect();
+    playlists.extend(collect_playlists(&page).into_iter().filter(|p| !fixed.contains(&p.id.as_str())));
+    Ok(playlists)
+}
+
+/// Playlists of a page, in YouTube's newer "lockup" format and the older grid.
+pub fn collect_playlists(page: &Value) -> Vec<Playlist> {
+    let mut playlists = Vec::new();
+    let mut seen = HashSet::new();
+    walk(page, &mut |map| {
+        let found = if let Some(lockup) = map.get("lockupViewModel")
+            && lockup["contentType"] == "LOCKUP_CONTENT_TYPE_PLAYLIST"
+        {
+            let mut count = None;
+            walk(&lockup["contentImage"], &mut |o| {
+                if let Some(text) = o.get("thumbnailBadgeViewModel").and_then(|b| b["text"].as_str())
+                    && count.is_none()
+                {
+                    count = Some(text.to_owned());
+                }
+            });
+            lockup["contentId"]
+                .as_str()
+                .zip(lockup["metadata"]["lockupMetadataViewModel"]["title"]["content"].as_str())
+                .map(|(id, title)| Playlist { id: id.to_owned(), title: title.to_owned(), count })
+        } else if let Some(grid) = map.get("gridPlaylistRenderer") {
+            grid["playlistId"].as_str().zip(text(&grid["title"])).map(|(id, title)| Playlist {
+                id: id.to_owned(),
+                title,
+                count: text(&grid["videoCountText"]).or_else(|| text(&grid["videoCountShortText"])),
+            })
+        } else {
+            None
+        };
+        if let Some(playlist) = found.filter(|p| seen.insert(p.id.clone())) {
+            playlists.push(playlist);
+        }
+    });
+    playlists
 }
 
 /// Ids of the videos in my YouTube watch history (its first page, the most
@@ -367,6 +433,9 @@ fn video_renderer(r: &Value, now: i64) -> Option<Video> {
         duration: text(&r["lengthText"]).and_then(|t| parse_clock(&t)),
         published: text(&r["publishedTimeText"]).and_then(|t| parse_age(&t, now)),
         live,
+        short: r["navigationEndpoint"]["commandMetadata"]["webCommandMetadata"]["url"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("/shorts/")),
     })
 }
 
@@ -384,6 +453,58 @@ pub struct Watch {
     pub related: Vec<Video>,
     /// How I rated it; `None` without a login.
     pub rating: Option<Rating>,
+    /// Asks YouTube for the comments (see [`comments`]).
+    pub comments_token: Option<String>,
+}
+
+/// A top comment of a video.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub author: String,
+    pub text: String,
+    /// As YouTube shortens it: `"1.2K"`.
+    pub likes: Option<String>,
+    /// `"hace 2 años"`, in the language asked for.
+    pub published: Option<String>,
+}
+
+/// The first page of a video's top comments, in `hl` (`"es"`, `"en"`).
+pub fn comments(token: &str, hl: &'static str) -> Result<Vec<Comment>, YoutubeError> {
+    let reply = InnerTube { hl, ..InnerTube::anonymous() }.call("next", json!({ "continuation": token }))?;
+    Ok(parse_comments(&reply))
+}
+
+/// Comments in YouTube's newer entity format and in the older renderer.
+pub fn parse_comments(reply: &Value) -> Vec<Comment> {
+    let mut comments = Vec::new();
+    walk(reply, &mut |map| {
+        if let Some(c) = map.get("commentEntityPayload") {
+            let body = c["properties"]["content"]["content"].as_str().unwrap_or_default();
+            if !body.is_empty() {
+                let some = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+                comments.push(Comment {
+                    author: c["author"]["displayName"].as_str().unwrap_or_default().to_owned(),
+                    text: body.to_owned(),
+                    likes: some(&c["toolbar"]["likeCountNotliked"]).filter(|l| l.trim() != "0"),
+                    published: some(&c["properties"]["publishedTime"]),
+                });
+            }
+        } else if let Some(c) = map.get("commentRenderer")
+            && let Some(body) = text(&c["contentText"]).filter(|t| !t.is_empty())
+        {
+            comments.push(Comment {
+                author: text_or_empty(&c["authorText"]),
+                text: body,
+                likes: text(&c["voteCount"]),
+                published: text(&c["publishedTimeText"]),
+            });
+        }
+    });
+    comments
+}
+
+fn text_or_empty(value: &Value) -> String {
+    text(value).unwrap_or_default()
 }
 
 /// My vote on a video.
@@ -461,6 +582,20 @@ pub fn parse_watch(reply: &Value, now: i64) -> Watch {
         {
             watch.rating = Some(Rating::from_status(status));
         }
+        // The comments section starts empty, with the token that fills it.
+        if watch.comments_token.is_none()
+            && object.get("sectionIdentifier").and_then(Value::as_str) == Some("comment-item-section")
+        {
+            walk(&object["contents"], &mut |o| {
+                if let Some(token) = o
+                    .get("continuationCommand")
+                    .and_then(|c| c["token"].as_str())
+                    .filter(|_| watch.comments_token.is_none())
+                {
+                    watch.comments_token = Some(token.to_owned());
+                }
+            });
+        }
         if let Some(owner) = object.get("videoOwnerRenderer") {
             watch.subscribers =
                 text(&owner["subscriberCountText"]).and_then(|t| t.split_whitespace().next().map(str::to_owned));
@@ -511,6 +646,7 @@ fn lockup_video(lockup: &Value, now: i64) -> Option<Video> {
         duration: badges.iter().find_map(|b| parse_clock(b)),
         published: rows.get(1).and_then(|r| r.iter().find_map(|part| parse_age(part, now))),
         live,
+        short: false, // Shorts come as `shortsLockupViewModel`, not read here
     })
 }
 
@@ -699,7 +835,7 @@ fn run_yt_dlp(args: &[String]) -> Result<String, YoutubeError> {
 }
 
 #[derive(Deserialize)]
-struct Playlist<T> {
+struct FlatList<T> {
     #[serde(default = "Vec::new")]
     entries: Vec<Option<T>>,
 }
@@ -716,6 +852,8 @@ struct VideoEntry {
     duration: Option<f64>,
     timestamp: Option<i64>,
     live_status: Option<String>,
+    /// `https://www.youtube.com/shorts/…` for Shorts.
+    url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -732,7 +870,7 @@ struct ChannelEntry {
 /// Parses `yt-dlp --flat-playlist -J` video lists. Entries without a title
 /// (private or deleted videos) are skipped.
 pub fn parse_videos(json: &str) -> Result<Vec<Video>, serde_json::Error> {
-    let playlist: Playlist<VideoEntry> = serde_json::from_str(json)?;
+    let playlist: FlatList<VideoEntry> = serde_json::from_str(json)?;
     Ok(playlist
         .entries
         .into_iter()
@@ -750,6 +888,7 @@ pub fn parse_videos(json: &str) -> Result<Vec<Video>, serde_json::Error> {
                     Some("is_upcoming") => Live::Upcoming,
                     _ => Live::No,
                 },
+                short: e.url.as_deref().is_some_and(|url| url.contains("/shorts/")),
                 id: e.id,
             })
         })
@@ -764,7 +903,7 @@ fn description(text: String) -> Option<String> {
 
 /// Parses yt-dlp channel lists (channel search).
 pub fn parse_channels(json: &str) -> Result<Vec<Channel>, serde_json::Error> {
-    let playlist: Playlist<ChannelEntry> = serde_json::from_str(json)?;
+    let playlist: FlatList<ChannelEntry> = serde_json::from_str(json)?;
     Ok(playlist
         .entries
         .into_iter()
@@ -790,8 +929,18 @@ pub fn compact(n: u64) -> String {
     }
 }
 
+/// Starts the progress lines yt-dlp prints, `tubetui 45.3%|1.12MiB/s|00:12`
+/// (read by `domain::parse_progress`).
+pub const PROGRESS_PREFIX: &str = "tubetui ";
+
 pub fn download_args(url: &str, format: &str, sub_lang: &str, dir: &Path, cookies: Option<&Path>) -> Vec<String> {
     let mut args: Vec<String> = vec!["-f".into(), format.into(), "--no-playlist".into()];
+    // Progress lines, then the final file, on stdout.
+    args.extend(["--newline", "--progress", "--progress-template"].map(String::from));
+    args.push(format!(
+        "download:{PROGRESS_PREFIX}%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s"
+    ));
+    args.extend(["--print", "after_move:filepath"].map(String::from));
     args.extend(["--write-subs", "--write-auto-subs", "--sub-langs"].map(String::from));
     args.push(sub_lang.into());
     args.extend(["-o".into(), dir.join("%(title)s.%(ext)s").display().to_string()]);
@@ -802,15 +951,55 @@ pub fn download_args(url: &str, format: &str, sub_lang: &str, dir: &Path, cookie
     args
 }
 
-/// Downloads with subtitles; blocking.
-pub fn download(args: &[String]) -> Result<(), YoutubeError> {
-    let output = Command::new("yt-dlp").args(args).output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(YoutubeError::Failed(stderr.lines().last().unwrap_or("sin detalle").to_owned()))
+/// Downloads with subtitles, calling `progress` on every progress line;
+/// blocking. The yt-dlp process waits in `slot` meanwhile, so another thread
+/// can kill it (cancel). Returns the downloaded file.
+pub fn download(
+    args: &[String],
+    slot: &std::sync::Mutex<Option<std::process::Child>>,
+    mut progress: impl FnMut(u16, String, String),
+) -> Result<std::path::PathBuf, YoutubeError> {
+    use std::io::{BufRead, BufReader, Read};
+    use std::process::Stdio;
+    let mut child =
+        Command::new("yt-dlp").args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(YoutubeError::Failed("yt-dlp sin salida".into()));
+    };
+    // Read apart, or a chatty yt-dlp would block on a full pipe.
+    let errors = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    if let Ok(mut slot) = slot.lock() {
+        *slot = Some(child);
     }
+    let mut file = None;
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        match line.strip_prefix(PROGRESS_PREFIX) {
+            Some(rest) => {
+                if let Some((permille, speed, eta)) = crate::domain::parse_progress(rest) {
+                    progress(permille, speed, eta);
+                }
+            }
+            None if !line.trim().is_empty() => file = Some(std::path::PathBuf::from(line.trim())),
+            None => {}
+        }
+    }
+    let status = slot.lock().ok().and_then(|mut s| s.take()).map(|mut child| child.wait()).transpose()?;
+    let stderr = errors.join().unwrap_or_default();
+    match file {
+        Some(file) if status.is_some_and(|s| s.success()) => Ok(file),
+        _ => Err(YoutubeError::Failed(failure_reason(&stderr))),
+    }
+}
+
+/// The last `ERROR:` yt-dlp printed (warnings come after it sometimes), or its last line.
+fn failure_reason(stderr: &str) -> String {
+    let lines = || stderr.lines().rev().map(str::trim).filter(|l| !l.is_empty());
+    let line = lines().find(|l| l.starts_with("ERROR:")).or_else(|| lines().next()).unwrap_or("sin detalle");
+    line.trim_start_matches("ERROR:").trim().to_owned()
 }
 
 fn percent_encode(text: &str) -> String {
@@ -854,9 +1043,10 @@ mod tests {
             {"id":"c","title":"C","live_status":"is_upcoming"},
             {"id":"d","title":null},
             null,
-            {"id":"e","title":"E","duration":59.6}]}"#;
+            {"id":"e","title":"E","duration":59.6,"url":"https://www.youtube.com/shorts/e"}]}"#;
         let videos = parse_videos(json).unwrap();
         assert_eq!(videos.len(), 4);
+        assert!(videos[3].short && !videos[0].short);
         assert_eq!(videos[0].published, Some(100));
         assert_eq!(videos[0].channel_url.as_deref(), Some("https://www.youtube.com/@a"));
         assert_eq!(videos[1].live, Live::Now);
@@ -1048,6 +1238,8 @@ mod tests {
         assert!(joined.contains("-f best"));
         assert!(joined.contains("--sub-langs es"));
         assert!(joined.contains("-o /v/%(title)s.%(ext)s"));
+        assert!(joined.contains("--print after_move:filepath"), "the final file, to play it");
+        assert!(joined.contains(&format!("--progress-template download:{PROGRESS_PREFIX}%(progress._percent_str)s|")));
     }
 
     /// Same shape as a real `next` reply (trimmed).
@@ -1076,7 +1268,10 @@ mod tests {
                             "toggleButtonViewModel": { "defaultButtonViewModel": { "buttonViewModel": {
                             "accessibilityText": "like this video along with 1,733 other people" } } } } } }] } } } },
                 { "videoSecondaryInfoRenderer": { "owner": { "videoOwnerRenderer": {
-                    "subscriberCountText": { "simpleText": "559K subscribers" } } } } }
+                    "subscriberCountText": { "simpleText": "559K subscribers" } } } } },
+                { "itemSectionRenderer": { "sectionIdentifier": "comment-item-section", "contents": [
+                    { "continuationItemRenderer": { "continuationEndpoint": {
+                        "continuationCommand": { "token": "COMMENTS" } } } }] } }
             ] } },
             "secondaryResults": { "secondaryResults": { "results": [
                 lockup("a", "LOCKUP_CONTENT_TYPE_VIDEO", json!([parts(&["Chan A"]), parts(&["8.2K", "2d ago"])]), "19:42"),
@@ -1106,6 +1301,7 @@ mod tests {
         assert_eq!(watch.published, Some(now - 3 * 3600));
         assert_eq!(watch.subscribers.as_deref(), Some("559K"));
         assert_eq!(watch.rating, Some(Rating::Like));
+        assert_eq!(watch.comments_token.as_deref(), Some("COMMENTS"));
         let ids: Vec<&str> = watch.related.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(ids, ["a", "b"], "no playlists, no repeats");
         let a = &watch.related[0];
@@ -1141,7 +1337,10 @@ mod tests {
         assert!(!looks_logged_out(&Ok(Items::Profiles(vec!["brave".into()]))));
         let refused = YoutubeError::Http("ERROR: [youtube:subscriptions] Login details are needed".into());
         assert!(looks_logged_out(&Err(refused)));
+        assert!(looks_logged_out(&Err(YoutubeError::Http("http status: 401".into()))), "the API refuses it");
+        assert!(!looks_logged_out(&Err(YoutubeError::Http("http status: 500".into()))));
         assert!(Source::Recommended.needs_login() && !Source::Search("x".into()).needs_login());
+        assert!(Source::MyPlaylists.needs_login());
     }
 
     #[test]
@@ -1150,6 +1349,72 @@ mod tests {
         assert_eq!(Rating::from_status("INDIFFERENT"), Rating::None);
         assert_eq!(Rating::Like.endpoint(), "like/like");
         assert_eq!(Rating::None.endpoint(), "like/removelike");
+    }
+
+    #[test]
+    fn parses_comments_in_both_formats() {
+        let reply = json!({ "frameworkUpdates": { "entityBatchUpdate": { "mutations": [
+            { "payload": { "commentEntityPayload": {
+                "properties": { "content": { "content": "Great\nsong" }, "publishedTime": "hace 6 años" },
+                "author": { "displayName": "@ana" },
+                "toolbar": { "likeCountNotliked": "568 K" } } } },
+            { "payload": { "commentEntityPayload": {
+                "properties": { "content": { "content": "meh" } }, "author": { "displayName": "@bo" },
+                "toolbar": { "likeCountNotliked": " 0 " } } } },
+            { "payload": { "commentEntityPayload": { "properties": { "content": { "content": "" } } } } },
+            { "commentRenderer": { "authorText": { "simpleText": "@old" },
+                "contentText": { "runs": [{ "text": "first " }, { "text": "comment" }] },
+                "publishedTimeText": { "runs": [{ "text": "1 year ago" }] }, "voteCount": { "simpleText": "12" } } }
+        ] } } });
+        assert_eq!(
+            parse_comments(&reply),
+            [
+                Comment {
+                    author: "@ana".into(),
+                    text: "Great\nsong".into(),
+                    likes: Some("568 K".into()),
+                    published: Some("hace 6 años".into())
+                },
+                Comment { author: "@bo".into(), text: "meh".into(), likes: None, published: None },
+                Comment {
+                    author: "@old".into(),
+                    text: "first comment".into(),
+                    likes: Some("12".into()),
+                    published: Some("1 year ago".into())
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn download_failures_name_the_error_not_a_warning() {
+        assert_eq!(failure_reason("ERROR: HTTP Error 403\nWARNING: no impersonate target\n"), "HTTP Error 403");
+        assert_eq!(failure_reason("something odd\n\n"), "something odd");
+        assert_eq!(failure_reason(""), "sin detalle");
+    }
+
+    #[test]
+    fn collects_playlists_in_both_formats() {
+        let page = json!({ "contents": [
+            { "lockupViewModel": {
+                "contentId": "PLnew", "contentType": "LOCKUP_CONTENT_TYPE_PLAYLIST",
+                "contentImage": { "collectionThumbnailViewModel": { "primaryThumbnail": { "thumbnailViewModel": {
+                    "overlays": [{ "thumbnailOverlayBadgeViewModel": { "thumbnailBadges": [
+                        { "thumbnailBadgeViewModel": { "text": "12 videos" } }] } }] } } } },
+                "metadata": { "lockupMetadataViewModel": { "title": { "content": "Jazz" } } } } },
+            { "lockupViewModel": { "contentId": "vid", "contentType": "LOCKUP_CONTENT_TYPE_VIDEO" } },
+            { "gridPlaylistRenderer": { "playlistId": "PLold", "title": { "runs": [{ "text": "Rust" }] },
+                "videoCountShortText": { "simpleText": "3" } } },
+            { "gridPlaylistRenderer": { "playlistId": "PLold", "title": { "simpleText": "Rust" } } }
+        ]});
+        assert_eq!(
+            collect_playlists(&page),
+            [
+                Playlist { id: "PLnew".into(), title: "Jazz".into(), count: Some("12 videos".into()) },
+                Playlist { id: "PLold".into(), title: "Rust".into(), count: Some("3".into()) },
+            ]
+        );
+        assert_eq!(Source::Playlist("PLx".into()).target(10), "https://www.youtube.com/playlist?list=PLx");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -45,6 +45,12 @@ const FRAME: Duration = Duration::from_millis(33);
 const OVERLAY_FOLLOW: Duration = Duration::from_millis(500);
 /// Two clicks on the same cell within this time are a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How often my channels are checked for new videos (`ui.notify_new`), and
+/// the first time, once the login was read.
+const SUBS_POLL: Duration = Duration::from_secs(15 * 60);
+const SUBS_FIRST_POLL: Duration = Duration::from_secs(60);
+/// A running download reports its progress at most this often (each report redraws).
+const DOWNLOAD_REPORT: Duration = Duration::from_millis(500);
 
 /// Started from a launcher (`kitty -e tubetui`), the window closes as soon as
 /// the app exits: keep a startup error on screen until Enter.
@@ -159,6 +165,12 @@ struct Runtime {
     window_fullscreen: bool,
     /// When the list being loaded was requested, for the loading indicator.
     loading_since: Option<Instant>,
+    /// The YouTube video of each player, to remember where it stopped.
+    videos: HashMap<TabId, String>,
+    /// When to check my channels for new videos next.
+    next_poll: Instant,
+    /// The yt-dlp process of each running download, to cancel it.
+    downloads: HashMap<u64, Arc<Mutex<Option<std::process::Child>>>>,
     /// Players of closed tabs, quitting in the background.
     closing: Vec<std::thread::JoinHandle<()>>,
     animations: Animations,
@@ -178,7 +190,15 @@ struct Runtime {
 
 impl Drop for Runtime {
     /// Every mpv must be gone before the final cleanup, or a late frame stays.
+    /// Running downloads stop with the app (quitting asked first).
     fn drop(&mut self) {
+        for slot in self.downloads.values() {
+            if let Ok(mut slot) = slot.lock()
+                && let Some(child) = slot.as_mut()
+            {
+                let _ = child.kill();
+            }
+        }
         for handle in self.closing.drain(..) {
             let _ = handle.join();
         }
@@ -190,6 +210,8 @@ impl Runtime {
         let mut state = State::new(config, later);
         state.update(Action::SubsLoaded(store::load_subs(&paths.subs)));
         state.update(Action::HistoryLoaded(store::load_watched(&paths.watched)));
+        state.history = store::load_history(&paths.history);
+        state.set_downloads(store::load_downloads(&paths.downloads));
         let (tx, rx) = mpsc::channel();
         let runtime = Self {
             config_path,
@@ -204,6 +226,9 @@ impl Runtime {
             clear_at: None,
             window_fullscreen: false,
             loading_since: None,
+            videos: HashMap::new(),
+            downloads: HashMap::new(),
+            next_poll: Instant::now() + SUBS_FIRST_POLL,
             closing: Vec::new(),
             animations: Animations::default(),
             thumbs: Thumbnails::default(),
@@ -371,6 +396,9 @@ impl Runtime {
                 }
             }
             pending.extend(self.rx.try_iter());
+            self.state.clock = now();
+            pending.extend(self.segments_to_skip());
+            self.poll_subs();
             self.retry_with_cookies(terminal.size()?.into());
             pending.extend(
                 (self.players.iter_mut())
@@ -380,6 +408,9 @@ impl Runtime {
                 dirty = true;
                 if let Action::SessionReady { cookies, subs } = &action {
                     self.cookies = cookies.clone().filter(|_| subs.is_ok());
+                }
+                if let Action::Downloaded { id, .. } = &action {
+                    self.downloads.remove(id);
                 }
                 for effect in self.state.update(action) {
                     let t = Instant::now();
@@ -404,7 +435,50 @@ impl Runtime {
         if self.window_fullscreen {
             player::set_window_fullscreen(false);
         }
+        // Where every open video was left, before the players go.
+        let stops: Vec<Action> = self.players.keys().filter_map(|id| self.stopped(*id)).collect();
+        for action in stops {
+            for effect in self.state.update(action) {
+                self.perform(effect, terminal)?;
+            }
+        }
         Ok(())
+    }
+
+    /// Checks my channels for new videos now and then, in the background.
+    fn poll_subs(&mut self) {
+        if Instant::now() < self.next_poll {
+            return;
+        }
+        self.next_poll = Instant::now() + SUBS_POLL;
+        let Some(cookies) = self.cookies.clone().filter(|_| self.state.config.ui.notify_new) else { return };
+        self.background(move || {
+            let result = match youtube::fetch(&youtube::Source::Subscriptions, 30, Some(&cookies)) {
+                Ok(Items::Videos(videos)) => Ok(videos),
+                Ok(_) => Ok(Vec::new()),
+                Err(e) => Err(e.to_string()),
+            };
+            Action::SubsPolled(result)
+        });
+    }
+
+    /// Videos playing a SponsorBlock segment not skipped yet.
+    fn segments_to_skip(&self) -> Vec<Action> {
+        (self.state.tabs.iter().filter(|t| !t.segments.is_empty()))
+            .filter_map(|tab| {
+                let position = self.players.get(&tab.id)?.info().position?;
+                let index = tubetui::sponsorblock::to_skip(&tab.segments, position, &tab.skipped)?;
+                Some(Action::SkipSegment(tab.id, index))
+            })
+            .collect()
+    }
+
+    /// Where the YouTube video of tab `id` is, to resume it later.
+    fn stopped(&self, id: TabId) -> Option<Action> {
+        let info = self.players.get(&id)?.info();
+        let video = self.videos.get(&id)?.clone();
+        let seconds = |s: Option<f64>| s.filter(|s| s.is_finite() && *s >= 0.0).map(|s| s as u32);
+        Some(Action::Stopped { video, position: seconds(info.position), duration: seconds(info.duration) })
     }
 
     fn perform(&mut self, effect: Effect, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
@@ -453,6 +527,18 @@ impl Runtime {
             Effect::Trash(paths) => {
                 self.background(move || {
                     Action::Trashed(trash::delete_all(&paths).map(|()| paths).map_err(|e| e.to_string()))
+                });
+            }
+            Effect::Comments { tab, token } => {
+                let hl = self.state.lang().as_str();
+                self.background(move || {
+                    Action::CommentsLoaded(tab, youtube::comments(&token, hl).map_err(|e| e.to_string()))
+                });
+            }
+            Effect::Segments { tab, video } => {
+                // Without them the video just plays whole.
+                self.background(move || {
+                    Action::SegmentsLoaded(tab, tubetui::sponsorblock::fetch(&video).unwrap_or_default())
                 });
             }
             Effect::Watch { tab, video } => {
@@ -505,6 +591,11 @@ impl Runtime {
                 self.send(Action::CookiesImported(import_cookies(&expand_home(&path), &dest, self.state.lang())));
             }
             Effect::EditConfig => self.edit_config(terminal)?,
+            Effect::SaveHistory(history) => {
+                if let Err(e) = store::save_history(&self.paths.history, &history) {
+                    dbg(format!("history.json: {e}"));
+                }
+            }
             Effect::SaveLater(videos) => {
                 if let Err(e) = store::save_later(&self.paths.later, &videos) {
                     let failed = self.tr("No se pudo guardar Ver después", "Could not save Watch later");
@@ -539,12 +630,14 @@ impl Runtime {
                     Action::SubscriptionDone { channel_id, name, result }
                 });
             }
-            Effect::Download(video) => {
+            Effect::Download { id, video } => {
                 let dir = self.download_dir();
                 let player = &self.state.config.player;
                 let (format, sub_lang) = (player::ytdl_format(player, Mode::Window), player.sub_lang.clone());
                 let cookies = self.cookies.clone();
-                let lang = self.state.lang();
+                let slot = Arc::new(Mutex::new(None));
+                self.downloads.insert(id, Arc::clone(&slot));
+                let tx = self.tx.clone();
                 self.background(move || {
                     let copy = cookies.and_then(|c| session::JarCopy::new(&c).ok());
                     let args = youtube::download_args(
@@ -554,22 +647,50 @@ impl Runtime {
                         &dir,
                         copy.as_ref().map(session::JarCopy::path),
                     );
-                    match youtube::download(&args) {
-                        Ok(()) => Action::Status(format!(
-                            "✅ {} {}: {}",
-                            lang.pick("Descarga lista en", "Downloaded to"),
-                            dir.display(),
-                            video.title
-                        )),
-                        Err(e) => Action::Status(format!(
-                            "❌ {} {}: {e}",
-                            lang.pick("Falló la descarga de", "Download failed:"),
-                            video.title
-                        )),
-                    }
+                    let mut reported: Option<Instant> = None;
+                    let result = youtube::download(&args, &slot, |permille, speed, eta| {
+                        if reported.is_none_or(|t| t.elapsed() >= DOWNLOAD_REPORT) || permille == 1000 {
+                            reported = Some(Instant::now());
+                            let _ = tx.send(Action::DownloadProgress { id, permille, speed, eta });
+                        }
+                    });
+                    Action::Downloaded { id, result: result.map_err(|e| e.to_string()) }
                 });
             }
+            Effect::CancelDownload(id) => {
+                if let Some(slot) = self.downloads.remove(&id)
+                    && let Ok(mut slot) = slot.lock()
+                    && let Some(child) = slot.as_mut()
+                {
+                    let _ = child.kill();
+                }
+            }
+            Effect::Notify(message) => {
+                if on_path("notify-send") {
+                    // Waited for on its own thread, so it leaves no zombie behind.
+                    std::thread::spawn(move || {
+                        let _ = std::process::Command::new("notify-send")
+                            .args(["--app-name=tubetui", "tubetui", &message])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                    });
+                }
+            }
+            Effect::SaveDownloads(downloads) => {
+                if let Err(e) = store::save_downloads(&self.paths.downloads, &downloads) {
+                    dbg(format!("downloads.json: {e}"));
+                }
+            }
             Effect::Open(id, playback) => self.open(id, &playback, false, terminal.size()?.into()),
+            Effect::Reopen(id, mut playback) => {
+                let Some(player) = self.players.get(&id) else { return Ok(()) };
+                let info = player.info();
+                playback.start = info.position.filter(|p| p.is_finite() && *p > 1.0).map(|p| p as u32);
+                let with_cookies = player.used_cookies();
+                self.stop(id);
+                self.open(id, &playback, with_cookies, terminal.size()?.into());
+            }
             Effect::Close(id) => self.stop(id),
             Effect::Command(id, command) => {
                 if let PlayerCommand::Fullscreen(on) = command
@@ -605,10 +726,14 @@ impl Runtime {
             cookies: player_jar.as_deref(),
             queue: &playback.queue,
             audio_only: playback.audio_only,
+            start: playback.start,
         };
         match Player::spawn(&launch, geometry) {
             Ok(p) => {
                 self.players.insert(id, p);
+                if let Some(video) = &playback.video {
+                    self.videos.insert(id, video.id.clone());
+                }
             }
             Err(e) => {
                 let failed = self.tr("No se pudo iniciar mpv", "Could not start mpv");
@@ -644,6 +769,10 @@ impl Runtime {
     /// Stops the player of `id` without waiting for mpv to exit: a frozen UI
     /// makes people press the close key again and lose another tab.
     fn stop(&mut self, id: TabId) {
+        if let Some(action) = self.stopped(id) {
+            self.send(action);
+        }
+        self.videos.remove(&id);
         let Some(mut player) = self.players.remove(&id) else { return };
         // No more frames; the last one would stay on top of everything.
         if player.hide(false) {

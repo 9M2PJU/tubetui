@@ -49,6 +49,7 @@ pub const ON_VIDEO: &[(&str, Text)] = &[
     ("g", Text::new("me gusta (otra vez: lo quita)", "like (again: take it back)")),
     ("G", Text::new("no me gusta (otra vez: lo quita)", "dislike (again: take it back)")),
     ("d", Text::new("descargar (con subtítulos)", "download (with subtitles)")),
+    ("a", Text::new("escuchar solo el audio / volver al video", "sound only / back to the video")),
     ("c", Text::new("ver los videos del canal", "the channel's videos")),
 ];
 
@@ -67,7 +68,10 @@ pub const IN_LISTS: &[(&str, Text)] = &[
     ("/", Text::new("buscar (dentro de un canal: en ese canal)", "search (inside a channel: in that channel)")),
     ("v", Text::new("mostrar / ocultar los ya vistos (Inicio…)", "show / hide watched videos (Home…)")),
     ("espacio", Text::new("marcar varios (Mis videos, Mi música)", "mark several (My videos, My music)")),
-    ("x  Supr", Text::new("a la papelera: marcados o el elegido, pide s", "to the trash: marked or selected, asks y")),
+    (
+        "x  Supr",
+        Text::new("a la papelera (pide s) · Historial: quitarlo", "to the trash (asks y) · History: remove it"),
+    ),
 ];
 
 pub const WITH_MOUSE: &[(&str, Text)] = &[
@@ -91,13 +95,14 @@ pub const IN_TAB: &[(&str, Text)] = &[
     ("b", Text::new("compresión: H.264 → VP9 → AV1 → cualquiera", "codec: H.264 → VP9 → AV1 → any")),
     ("f  Esc", Text::new("pantalla completa / salir", "fullscreen / leave")),
     ("← →", Text::new("retroceder / avanzar 5 s", "back / forward 5 s")),
-    ("↑ ↓", Text::new("subir / bajar volumen", "volume up / down")),
-    ("m", Text::new("silenciar", "mute")),
+    ("[ ]", Text::new("capítulo anterior / siguiente", "previous / next chapter")),
+    ("↑ ↓  m", Text::new("subir / bajar volumen · silenciar", "volume up / down · mute")),
     ("j", Text::new("subtítulos sí / no", "subtitles on / off")),
     ("i", Text::new("modo: subtítulos → original → doblado", "mode: subtitles → original → dubbed")),
     ("o", Text::new("otro idioma (es → en → pt …)", "another language (es → en → pt …)")),
     (". ,", Text::new("música: siguiente / anterior", "music: next / previous")),
     ("Tab", Text::new("videos relacionados (en ventana)", "related videos (in a window)")),
+    ("PgUp PgDn", Text::new("recorrer los comentarios (en ventana)", "scroll the comments (in a window)")),
 ];
 
 /// `(keys, description)` rows of a table, in `lang`.
@@ -146,6 +151,7 @@ pub fn map(key: KeyEvent, ctx: KeyContext) -> Option<Action> {
         KeyCode::Char('g') => return Some(Action::Rate(Rating::Like)),
         KeyCode::Char('G') => return Some(Action::Rate(Rating::Dislike)),
         KeyCode::Char('d') => return Some(Action::Download),
+        KeyCode::Char('a') => return Some(Action::Listen),
         KeyCode::Char('c') => return Some(Action::OpenChannel),
         _ => {}
     }
@@ -192,6 +198,10 @@ fn player(code: KeyCode) -> Option<Action> {
         KeyCode::Char('b') => Some(Action::CycleCodec),
         KeyCode::Char('.') => Some(Action::NextTrack),
         KeyCode::Char('f') => Some(Action::ToggleFullscreen),
+        KeyCode::PageDown => Some(Action::ScrollComments(3)),
+        KeyCode::PageUp => Some(Action::ScrollComments(-3)),
+        KeyCode::Char('[') => Some(Action::Chapter(-1)),
+        KeyCode::Char(']') => Some(Action::Chapter(1)),
         KeyCode::Tab => Some(Action::ToggleFocus),
         KeyCode::Esc => Some(Action::Back),
         KeyCode::Char(',') => Some(Action::PrevTrack),
@@ -337,6 +347,7 @@ mod tests {
             assert_eq!(map(char('g'), ctx), Some(Action::Rate(Rating::Like)));
             assert_eq!(map(char('G'), ctx), Some(Action::Rate(Rating::Dislike)));
             assert_eq!(map(char('d'), ctx), Some(Action::Download));
+            assert_eq!(map(char('a'), ctx), Some(Action::Listen));
             assert_eq!(map(char('c'), ctx), Some(Action::OpenChannel));
         }
     }
@@ -361,6 +372,8 @@ mod tests {
         assert_eq!(map(char('f'), TAB), Some(Action::ToggleFullscreen));
         assert_eq!(map(key(KeyCode::Esc), TAB), Some(Action::Back));
         assert_eq!(map(char(','), TAB), Some(Action::PrevTrack));
+        assert_eq!(map(char('['), TAB), Some(Action::Chapter(-1)));
+        assert_eq!(map(char(']'), TAB), Some(Action::Chapter(1)));
         assert_eq!(map(key(KeyCode::Enter), TAB), None);
     }
 

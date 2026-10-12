@@ -33,6 +33,9 @@ pub struct Video {
     pub published: Option<i64>,
     #[serde(default)]
     pub live: Live,
+    /// A YouTube Short (vertical, under three minutes).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub short: bool,
 }
 
 impl Video {
@@ -59,6 +62,63 @@ impl Video {
             (Live::No, Some(ts)) => ts,
             (Live::No, None) => i64::MIN,
         }
+    }
+}
+
+/// A video I opened in tubetui, for "Historial" and to resume it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub video: Video,
+    /// Unix time I last opened it.
+    pub at: i64,
+    /// Where I left it, in seconds; `None` when finished or barely started.
+    #[serde(default)]
+    pub position: Option<u32>,
+}
+
+/// A video downloaded (or being downloaded) with `d`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Download {
+    pub id: u64,
+    pub video: Video,
+    pub state: DownloadState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadState {
+    /// Tenths of a percent of the part being downloaded (video, then audio),
+    /// and yt-dlp's speed and time left.
+    Running {
+        permille: u16,
+        speed: String,
+        eta: String,
+    },
+    Done(std::path::PathBuf),
+    Failed(String),
+    Cancelled,
+}
+
+/// `"  45.3%| 1.12MiB/s|00:12"` (our `--progress-template`) → (453, "1.12MiB/s", "00:12").
+pub fn parse_progress(line: &str) -> Option<(u16, String, String)> {
+    let mut parts = line.split('|').map(str::trim);
+    let percent: f64 = parts.next()?.trim_end_matches('%').trim().parse().ok()?;
+    let field =
+        |s: Option<&str>| s.filter(|s| !s.is_empty() && *s != "NA" && !s.contains("Unknown")).unwrap_or("").to_owned();
+    let speed = field(parts.next());
+    let eta = field(parts.next());
+    Some(((percent.clamp(0.0, 100.0) * 10.0).round() as u16, speed, eta))
+}
+
+/// Seconds worth resuming from: not the first half minute, not the end.
+pub fn resume_point(position: f64, duration: Option<f64>) -> Option<u32> {
+    const MARGIN: f64 = 30.0;
+    if !position.is_finite() || position < MARGIN {
+        return None;
+    }
+    match duration {
+        Some(d) if d - position < MARGIN || position / d > 0.95 => None,
+        _ => Some(position as u32),
     }
 }
 
@@ -117,6 +177,26 @@ pub struct Channel {
     pub description: Option<String>,
 }
 
+/// One of my YouTube playlists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Playlist {
+    pub id: String,
+    pub title: String,
+    /// As YouTube says it: `"12 videos"`.
+    pub count: Option<String>,
+}
+
+impl Playlist {
+    /// Its title; YouTube's own lists in the interface language.
+    pub fn name(&self, lang: Lang) -> &str {
+        match self.id.as_str() {
+            "LL" => lang.pick("👍 Videos que me gustan", "👍 Liked videos"),
+            "WL" => lang.pick("🕒 Ver más tarde (YouTube)", "🕒 Watch later (YouTube)"),
+            _ => &self.title,
+        }
+    }
+}
+
 /// Stable identity of an open tab; survives reordering and closing others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(pub u64);
@@ -132,6 +212,7 @@ pub(crate) fn video(id: &str) -> Video {
         duration: Some(60),
         published: None,
         live: Live::No,
+        short: false,
     }
 }
 
@@ -195,6 +276,24 @@ mod tests {
         assert_eq!(en(951_782_400, 951_782_400), ("02/29/00".into(), "today".into()));
         assert_eq!(en(ts, ts + 95 * DAY).1, "3mo");
         assert_eq!(en(ts, ts + 800 * DAY).1, "2y");
+    }
+
+    #[test]
+    fn resume_points_skip_the_start_and_the_end() {
+        assert_eq!(resume_point(10.0, Some(600.0)), None, "barely started");
+        assert_eq!(resume_point(125.7, Some(600.0)), Some(125));
+        assert_eq!(resume_point(580.0, Some(600.0)), None, "the last half minute");
+        assert_eq!(resume_point(5800.0, Some(6000.0)), None, "past 95 %");
+        assert_eq!(resume_point(90.0, None), Some(90), "unknown length");
+        assert_eq!(resume_point(f64::NAN, None), None);
+    }
+
+    #[test]
+    fn reads_download_progress_lines() {
+        assert_eq!(parse_progress("  45.3%| 1.12MiB/s|00:12"), Some((453, "1.12MiB/s".into(), "00:12".into())));
+        assert_eq!(parse_progress("100.0%|3.11MiB/s|NA"), Some((1000, "3.11MiB/s".into(), String::new())));
+        assert_eq!(parse_progress("  0.0%|Unknown B/s|Unknown"), Some((0, String::new(), String::new())));
+        assert_eq!(parse_progress("/home/me/Videos/x.mp4"), None);
     }
 
     #[test]
