@@ -168,8 +168,9 @@ mod tests {
         animations.observe(&state, screen);
         assert!(animations.running(), "startup animates");
         let mut animations = Animations::default();
+        state.menu = crate::app::Section::ALL.iter().position(|s| *s == crate::app::Section::Suscripciones).unwrap();
         let id = match state.update(Action::Enter).as_slice() {
-            [crate::app::Effect::Load { id, .. }] => *id, // Inicio loads
+            [crate::app::Effect::Load { id, .. }] => *id, // Suscripciones loads
             other => panic!("{other:?}"),
         };
         state.update(Action::Loaded(id, Ok(crate::youtube::Items::Videos(vec![crate::domain::video("a")]))));

@@ -612,7 +612,7 @@ fn draw_sidebar(frame: &mut Frame, state: &State, icons: &Icons, area: Rect) {
 }
 
 fn tab_titles(state: &State, icons: &Icons) -> Vec<String> {
-    let home = Section::Inicio.label(state.lang());
+    let home = state.lang().pick("Inicio", "Home");
     std::iter::once(format!("{} {home}", icons.section(Section::Inicio)))
         .chain(
             state
@@ -1099,17 +1099,26 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
     let lang = state.lang();
     let rows = |table| keymap::rows(table, lang);
     let key = |k: &str, es, en| (k.to_string(), lang.pick(es, en));
-    let all_keys = key("C-y ?", "todos los atajos", "every shortcut");
+    // Global commands are two keys: Ctrl+y, let go, then the letter.
+    let all_keys = key("Ctrl+y + ?", "todos los atajos", "every shortcut");
+    // `s` asks before unsubscribing; it says so when it will.
+    let subscribe = if state.selected_channel().is_some_and(|(id, ..)| state.subs.contains(&id)) {
+        key("s", "desuscribirse (pide confirmar)", "unsubscribe (asks first)")
+    } else {
+        key("s", "suscribirse", "subscribe")
+    };
     let mut hints = if let Some(confirm) = &state.confirm {
         let yes = match confirm {
-            Confirm::Unsubscribe { .. } => key("s", "sí, desuscribirme", "yes, unsubscribe"),
-            Confirm::Trash(_) => key("s", "sí, a la papelera", "yes, to the trash"),
+            Confirm::Unsubscribe { .. } => key(lang.pick("s", "y"), "sí, desuscribirme", "yes, unsubscribe"),
+            Confirm::Trash(_) => key(lang.pick("s", "y"), "sí, a la papelera", "yes, to the trash"),
         };
         vec![yes, key(lang.pick("otra tecla", "other key"), "no", "no")]
     } else if state.help {
         vec![key(lang.pick("cualquier tecla", "any key"), "cerrar la ayuda", "close the help")]
     } else if state.prefix {
-        return keymap::prefix_rows(lang);
+        let mut keys = vec![key("Ctrl+y +", "ahora la tecla:", "now the key:")];
+        keys.extend(keymap::prefix_rows(lang));
+        return keys;
     } else if let Some(prompt) = &state.prompt {
         match prompt {
             Prompt::Videos { .. } => rows(keymap::IN_SEARCH),
@@ -1126,6 +1135,7 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
         ]
     } else if state.active_tab().is_some() {
         let mut keys = rows(keymap::IN_TAB);
+        keys.insert(1, key("Ctrl+y + x", "cerrar la pestaña", "close the tab"));
         if state.related_shown().is_some() {
             keys.insert(0, key("Tab", "A continuación", "Up next"));
         }
@@ -1144,7 +1154,7 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
                     key("v", "mostrar vistos", "show watched")
                 },
                 key("l", "ver después", "watch later"),
-                key("s", "suscribirse", "subscribe"),
+                subscribe.clone(),
                 key("g", "me gusta", "like"),
                 key("d", "descargar", "download"),
                 key("c", "canal", "channel"),
@@ -1154,26 +1164,31 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
             Some(Items::Videos(_)) => vec![
                 key("Enter", "ver", "play"),
                 key("l", "ver después", "watch later"),
-                key("s", "suscribirse", "subscribe"),
+                subscribe.clone(),
                 key("g", "me gusta", "like"),
                 key("d", "descargar", "download"),
                 key("c", "canal", "channel"),
                 key("/", "buscar", "search"),
                 back,
             ],
-            Some(Items::Channels(_)) => vec![
-                key("Enter", "ver sus videos", "its videos"),
-                key("s", "suscribirse / desuscribirse", "subscribe / unsubscribe"),
-                back,
-            ],
+            Some(Items::Channels(_)) => vec![key("Enter", "ver sus videos", "its videos"), subscribe, back],
             Some(Items::Profiles(_)) => vec![key("Enter", "usar esta sesión", "use this login"), back],
             Some(Items::Files(_, kind)) => vec![
                 match kind {
                     MediaKind::Music => key("Enter", "escuchar desde esta canción", "play from this song"),
                     MediaKind::Video => key("Enter", "ver", "play"),
                 },
-                key(lang.pick("espacio", "space"), "marcar", "mark"),
-                key("x", "a la papelera", "to the trash"),
+                // Several files: mark them first, then `x` sends them all.
+                if state.marked_files().is_empty() {
+                    key(lang.pick("espacio", "space"), "marcar varios", "mark several")
+                } else {
+                    key(lang.pick("espacio", "space"), "marcar / desmarcar", "mark / unmark")
+                },
+                if state.marked_files().is_empty() {
+                    key("x", "este a la papelera (pide confirmar)", "this one to the trash (asks first)")
+                } else {
+                    key("x", "los marcados a la papelera (pide confirmar)", "the marked ones to the trash (asks first)")
+                },
                 back,
             ],
             Some(Items::About) => vec![back],
@@ -1185,7 +1200,7 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
     hints
 }
 
-/// As many hints as fit in the line, whole; the last one (`C-y ?`, every
+/// As many hints as fit in the line, whole; the last one (`Ctrl+y + ?`, every
 /// shortcut) is always kept.
 fn draw_hints(frame: &mut Frame, hints: &[(String, &str)], area: Rect) {
     let hint = |(key, description): &(String, &str)| {
@@ -1515,9 +1530,10 @@ mod tests {
         State::new(config, Vec::new())
     }
 
-    /// Opens "Inicio" from the menu and fills it with `items`.
+    /// Opens "Suscripciones" from the menu and fills it with `items`.
     fn with_items(items: Items) -> State {
         let mut s = state();
+        s.menu = Section::ALL.iter().position(|x| *x == Section::Suscripciones).unwrap();
         let id = match s.update(Action::Enter).as_slice() {
             [Effect::Load { id, .. }] => *id,
             other => panic!("{other:?}"),
@@ -1599,7 +1615,7 @@ mod tests {
         assert!(screen.contains("chan a"));
         assert!(screen.contains("◷ title a"));
         assert!(screen.contains("1:00"));
-        assert!(screen.contains("Inicio · 2"));
+        assert!(screen.contains("Suscripciones · 2"));
     }
 
     #[test]
@@ -1696,23 +1712,47 @@ mod tests {
     #[test]
     fn hints_follow_the_context() {
         let mut s = state();
-        assert_eq!(hint_keys(&s), ["↑ ↓", "Enter", "Tab", "/", "C-y ?"]);
+        assert_eq!(hint_keys(&s), ["↑ ↓", "Enter", "Tab", "/", "Ctrl+y + ?"]);
         s.update(Action::Prefix);
         assert!(hint_keys(&s).contains(&"b".to_string()) && hint_keys(&s).contains(&"0-9".to_string()));
         let tab = with_tab();
         assert!(hint_keys(&tab).contains(&"espacio".to_string()) && hint_keys(&tab).contains(&"m".to_string()));
         let list = with_items(Items::Videos(vec![video("a")]));
-        assert_eq!(hint_keys(&list), ["Enter", "v", "l", "s", "g", "d", "c", "/", "Esc", "C-y ?"], "Inicio: a feed");
+        assert_eq!(
+            hint_keys(&list),
+            ["Enter", "v", "l", "s", "g", "d", "c", "/", "Esc", "Ctrl+y + ?"],
+            "Inicio: a feed"
+        );
         let mut search = state();
         search.update(Action::FocusSearch);
         assert!(hint_keys(&search).contains(&"Tab".to_string()));
     }
 
     #[test]
+    fn hints_explain_two_step_keys() {
+        let hint = |s: &State, k: &str| hints(s).into_iter().find(|(key, _)| key == k).map(|(_, d)| d);
+        let mut s = state();
+        s.update(Action::Prefix);
+        assert_eq!(hints(&s)[0].0, "Ctrl+y +", "says the key comes next");
+        let mut list = with_items(Items::Videos(vec![video("a")]));
+        assert_eq!(hint(&list, "s"), Some("suscribirse"));
+        list.subs.insert("UCa".into());
+        assert_eq!(hint(&list, "s"), Some("desuscribirse (pide confirmar)"));
+        let file = |n: &str| LocalFile { path: format!("/m/{n}.mp3").into(), name: n.into(), folder: "D".into() };
+        let mut files = with_items(Items::Files(vec![file("a"), file("b")], MediaKind::Music));
+        assert_eq!(hint(&files, "espacio"), Some("marcar varios"));
+        assert_eq!(hint(&files, "x"), Some("este a la papelera (pide confirmar)"));
+        files.update(Action::ToggleMark);
+        assert_eq!(hint(&files, "x"), Some("los marcados a la papelera (pide confirmar)"));
+        files.update(Action::Trash);
+        assert_eq!(hint(&files, "s"), Some("sí, a la papelera"));
+    }
+
+    #[test]
     fn hint_bar_shows_keys_with_descriptions() {
         let screen = render(&with_items(Items::Videos(vec![video("a")])));
         assert!(screen.contains("l ver después"), "{screen}");
-        assert!(screen.contains("C-y ? todos los atajos"));
+        assert!(screen.contains("Ctrl+y + ? todos los atajos"));
     }
 
     #[test]
@@ -1767,10 +1807,11 @@ mod tests {
     #[test]
     fn loading_shows_spinner_seconds_and_a_moving_bar() {
         let mut s = state();
-        s.update(Action::Enter); // Inicio starts loading
+        s.menu = Section::ALL.iter().position(|x| *x == Section::Suscripciones).unwrap();
+        s.update(Action::Enter); // Suscripciones starts loading
         let view = View { loading: Some(Duration::from_millis(3_250)), ..VIEW };
         let screen = render_with(&s, &view);
-        assert!(screen.contains("Cargando Inicio… 3 s"), "{screen}");
+        assert!(screen.contains("Cargando Suscripciones… 3 s"), "{screen}");
         assert!(screen.contains("█"));
         let later = View { loading: Some(Duration::from_millis(3_550)), ..VIEW };
         let (now, then) = (view.loading.unwrap(), later.loading.unwrap());
@@ -1798,7 +1839,7 @@ mod tests {
         for text in ["Home", "Watch later", "ON THIS COMPUTER", "Settings", "About", "TABS", "every shortcut"] {
             assert!(screen.contains(text), "{text} missing\n{screen}");
         }
-        assert!(!screen.contains("Suscripciones"), "{screen}");
+        assert!(!screen.contains("Ver después"), "{screen}");
         s.update(Action::ToggleHelp);
         assert!(render(&s).contains("Keyboard shortcuts"));
     }
@@ -1819,7 +1860,7 @@ mod tests {
         let hints = hints(&with_tab());
         terminal.draw(|f| draw_hints(f, &hints, f.area())).unwrap();
         let line: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(line.contains("C-y ? todos los atajos"), "{line}");
+        assert!(line.contains("Ctrl+y + ? todos los atajos"), "{line}");
         assert!(line.contains("espacio pausa"), "{line}");
         assert!(!line.contains("silenciar"), "does not fit, left out whole: {line}");
     }
@@ -1992,13 +2033,14 @@ mod tests {
     fn feeds_say_how_many_watched_videos_they_hide() {
         let mut s = state();
         s.watched.insert("b".into());
+        s.menu = Section::ALL.iter().position(|x| *x == Section::Suscripciones).unwrap();
         let id = match s.update(Action::Enter).as_slice() {
             [Effect::Load { id, .. }, ..] => *id,
             other => panic!("{other:?}"),
         };
         s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a"), video("b")]))));
         let screen = render(&s);
-        assert!(screen.contains("Inicio · 1 · ◉ 1 vistos ocultos"), "{screen}");
+        assert!(screen.contains("Suscripciones · 1 · ◉ 1 vistos ocultos"), "{screen}");
         assert!(hints(&s).iter().any(|(k, d)| k == "v" && *d == "mostrar vistos"));
         s.update(Action::ToggleWatched);
         let screen = render(&s);

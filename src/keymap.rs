@@ -45,7 +45,7 @@ pub const PREFIX: &[(char, Action, Text)] = &[
 /// Keys that act on the selected video, in lists and in video tabs.
 pub const ON_VIDEO: &[(&str, Text)] = &[
     ("l", Text::new("agregar / quitar de Ver después", "add to / remove from Watch later")),
-    ("s", Text::new("suscribirse / desuscribirse del canal", "subscribe / unsubscribe")),
+    ("s", Text::new("suscribirse / desuscribirse (pide confirmar)", "subscribe / unsubscribe (asks first)")),
     ("g", Text::new("me gusta (otra vez: lo quita)", "like (again: take it back)")),
     ("G", Text::new("no me gusta (otra vez: lo quita)", "dislike (again: take it back)")),
     ("d", Text::new("descargar (con subtítulos)", "download (with subtitles)")),
@@ -66,8 +66,8 @@ pub const IN_LISTS: &[(&str, Text)] = &[
     ("Tab", Text::new("ir al menú", "go to the menu")),
     ("/", Text::new("buscar (dentro de un canal: en ese canal)", "search (inside a channel: in that channel)")),
     ("v", Text::new("mostrar / ocultar los ya vistos (Inicio…)", "show / hide watched videos (Home…)")),
-    ("espacio", Text::new("marcar archivo (Mis videos, Mi música)", "mark a file (My videos, My music)")),
-    ("x  Supr", Text::new("marcados o el elegido: a la papelera", "marked or selected: to the trash")),
+    ("espacio", Text::new("marcar varios (Mis videos, Mi música)", "mark several (My videos, My music)")),
+    ("x  Supr", Text::new("a la papelera: marcados o el elegido, pide s", "to the trash: marked or selected, asks y")),
 ];
 
 pub const WITH_MOUSE: &[(&str, Text)] = &[

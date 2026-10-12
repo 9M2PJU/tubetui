@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use crate::i18n::Lang;
@@ -204,33 +206,85 @@ pub fn cookies_path(cache_dir: &Path, spec: &str) -> PathBuf {
     cache_dir.join(format!("cookies-{safe}.txt"))
 }
 
+/// `jar` with `tag` before its extension, in the same folder.
+fn sibling(jar: &Path, tag: &str) -> PathBuf {
+    let stem = jar.file_stem().unwrap_or_default().to_string_lossy();
+    jar.with_file_name(format!("{stem}.{tag}.txt"))
+}
+
+/// A private copy of the login for one yt-dlp run. yt-dlp rewrites its
+/// `--cookies` file when it ends, and on the shared one whoever read it at
+/// that moment got half a login. Removed when dropped.
+pub struct JarCopy(PathBuf);
+
+impl JarCopy {
+    pub fn new(jar: &Path) -> std::io::Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let copy = sibling(jar, &format!("run-{}-{n}", std::process::id()));
+        std::fs::copy(jar, &copy)?;
+        Ok(Self(copy))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for JarCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// mpv's copy of the login, renewed at every start: its yt-dlp rewrites it
+/// while playing. The shared jar if the copy can't be made.
+pub fn player_jar(jar: &Path) -> PathBuf {
+    let (copy, partial) = (sibling(jar, "mpv"), sibling(jar, &format!("mpv-{}", std::process::id())));
+    match std::fs::copy(jar, &partial).and_then(|_| std::fs::rename(&partial, &copy)) {
+        Ok(()) => copy,
+        Err(_) => {
+            let _ = std::fs::remove_file(&partial);
+            jar.to_path_buf()
+        }
+    }
+}
+
 /// Exports the browser's cookies to `path` unless a fresh export exists.
+/// One export at a time, and `path` only ever changes whole: other threads
+/// read it meanwhile.
 pub fn refresh_cookies(spec: &str, path: &Path, force: bool, lang: Lang) -> Result<(), String> {
+    static EXPORT: Mutex<()> = Mutex::new(());
+    let _one_at_a_time = EXPORT.lock().unwrap_or_else(PoisonError::into_inner);
     if !force && is_fresh(path, COOKIES_MAX_AGE) {
         return Ok(());
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    // yt-dlp also loads an existing jar, and its stale login would win over the browser's.
-    let _ = std::fs::remove_file(path);
+    // A new file: yt-dlp also loads an existing jar, and its stale login
+    // would win over the browser's.
+    let fresh = sibling(path, "new");
+    let _ = std::fs::remove_file(&fresh);
     // Any authenticated request makes yt-dlp write the jar; `-I 0` downloads nothing.
     let output = Command::new("yt-dlp")
         .args(["-q", "--skip-download", "--flat-playlist", "-I", "0", "--cookies-from-browser", spec, "--cookies"])
-        .arg(path)
+        .arg(&fresh)
         .arg(":ytsubs")
         .output()
         .map_err(|e| format!("{}: {e}", lang.pick("no se pudo ejecutar yt-dlp", "couldn't run yt-dlp")))?;
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let jar = std::fs::read_to_string(path).ok();
+    let jar = std::fs::read_to_string(&fresh).ok();
     let error = cookie_error(spec, &stderr, lang)
         .or_else(|| jar.as_deref().is_some_and(|text| !has_login(text)).then(|| no_login(spec, lang)));
+    if error.is_none() && jar.is_some() {
+        return std::fs::rename(&fresh, path).map_err(|e| e.to_string());
+    }
+    // No login read: dropping the old one too reads the browser again next time.
+    let _ = std::fs::remove_file(&fresh);
+    let _ = std::fs::remove_file(path);
     if let Some(error) = error {
-        // The jar holds no login; dropping it reads the browser again next time.
-        let _ = std::fs::remove_file(path);
         Err(error)
-    } else if jar.is_some() {
-        Ok(())
     } else {
         let detail = stderr.lines().last().unwrap_or(lang.pick("sin detalle", "no details"));
         Err(format!("{} {spec}: {detail}", lang.pick("no se pudo leer la sesión de", "couldn't read the login of")))
@@ -480,5 +534,20 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         assert!(is_fresh(&path, Duration::from_secs(60)));
         assert!(!is_fresh(&path, Duration::ZERO));
+    }
+
+    #[test]
+    fn yt_dlp_gets_its_own_copy_of_the_login() {
+        let jar = temp_dir("jar").join("cookies-brave.txt");
+        std::fs::write(&jar, "login").unwrap();
+        let copy = JarCopy::new(&jar).unwrap();
+        let (a, b) = (copy.path().to_path_buf(), JarCopy::new(&jar).unwrap().path().to_path_buf());
+        assert_ne!(a, b, "one per run");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "login");
+        drop(copy);
+        assert!(!a.exists() && !b.exists(), "removed after the run");
+        let mpv = player_jar(&jar);
+        assert_ne!(mpv, jar);
+        assert_eq!(std::fs::read_to_string(&mpv).unwrap(), "login");
     }
 }

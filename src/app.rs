@@ -87,7 +87,7 @@ impl Section {
 
     pub fn label(self, lang: Lang) -> &'static str {
         let (es, en) = match self {
-            Self::Inicio => ("Inicio", "Home"),
+            Self::Inicio => ("Mis recomendados", "My recommendations"),
             Self::Descubrir => ("Descubrir", "Discover"),
             Self::Suscripciones => ("Suscripciones", "Subscriptions"),
             Self::VerDespues => ("Ver después", "Watch later"),
@@ -175,7 +175,7 @@ impl Setting {
             Self::Quality => ("Calidad máxima", "Maximum quality"),
             Self::VideoMode => ("Video", "Video"),
             Self::BackgroundAudio => ("Al salir de la pestaña del video", "When leaving the video tab"),
-            Self::AppLang => ("Idioma de la app (C-y l)", "App language (C-y l)"),
+            Self::AppLang => ("Idioma de la app (Ctrl+y + l)", "App language (Ctrl+y + l)"),
             Self::Icons => ("Íconos", "Icons"),
             Self::Thumbnails => ("Portadas de los videos (kitty)", "Video thumbnails (kitty)"),
             Self::Mouse => ("Mouse (para copiar texto: Shift)", "Mouse (to copy text: Shift)"),
@@ -456,6 +456,8 @@ pub enum Effect {
     EditConfig,
     SaveLater(Vec<Video>),
     SaveSubs(HashSet<String>),
+    /// Read my channels again with the current login (no browser).
+    LoadSubs,
     Subscribe {
         channel_id: String,
         name: String,
@@ -619,6 +621,11 @@ pub struct State {
     /// details and related videos (set by the runtime).
     pub video_window: bool,
     pending: Option<Pending>,
+    /// A feed of my channels that came out empty while my channels may be an
+    /// old copy: shown again once they are read again.
+    recheck: Option<(Pending, Items, Option<String>)>,
+    /// My channels were read again once already.
+    subs_rechecked: bool,
     next_tab: u64,
     next_request: u64,
 }
@@ -652,6 +659,8 @@ impl State {
             quit: false,
             video_window: false,
             pending: None,
+            recheck: None,
+            subs_rechecked: false,
             next_tab: 0,
             next_request: 0,
         }
@@ -892,8 +901,8 @@ impl State {
             Action::Backspace => {
                 self.query.pop();
             }
-            Action::Loaded(id, result) => self.loaded(id, result, None),
-            Action::Page(id, result) => self.page(id, result),
+            Action::Loaded(id, result) => return self.loaded(id, result, None),
+            Action::Page(id, result) => return self.page(id, result),
             Action::SubsLoaded(subs) => self.subs = subs,
             Action::Watched(id, result) => {
                 // Without details the tab just stays as it is.
@@ -1173,7 +1182,14 @@ impl State {
     fn open_section(&mut self, section: Section) -> Vec<Effect> {
         let title = section.label(self.lang()).to_owned();
         match section {
-            Section::Inicio => self.load_feed(Source::Recommended, title, Filter::None),
+            // YouTube's home feed, only my channels; "Descubrir canales" has the rest.
+            Section::Inicio if !self.logged_in() => {
+                let hint = self
+                    .tr("Sin sesión: elegí un navegador en Configuración", "Not logged in: pick a browser in Settings");
+                self.status = hint.into();
+                Vec::new()
+            }
+            Section::Inicio => self.load_feed(Source::Recommended, title, Filter::Mine),
             Section::Descubrir => self.discover(),
             Section::DescubrirCanales => self.load_feed(Source::Recommended, title, Filter::NotMine),
             Section::Suscripciones => self.load_feed(Source::Subscriptions, title, Filter::None),
@@ -1454,12 +1470,12 @@ impl State {
     }
 
     /// A search page: the first one of a new list, or the next one of a shown list.
-    fn page(&mut self, id: u64, result: Result<SearchPage, String>) {
+    fn page(&mut self, id: u64, result: Result<SearchPage, String>) -> Vec<Effect> {
         if self.pending.as_ref().is_some_and(|p| p.id == id) {
             let next = result.as_ref().ok().and_then(|p| p.next.clone());
             return self.loaded(id, result.map(|p| Items::Videos(p.videos)), next);
         }
-        let Some(listing) = self.stack.iter_mut().find(|l| l.more == Some(id)) else { return };
+        let Some(listing) = self.stack.iter_mut().find(|l| l.more == Some(id)) else { return Vec::new() };
         listing.more = None;
         match result {
             Ok(page) => {
@@ -1472,20 +1488,37 @@ impl State {
             }
             Err(error) => self.status = error,
         }
+        Vec::new()
     }
 
-    fn loaded(&mut self, id: u64, result: Result<Items, String>, next: Option<String>) {
+    fn loaded(&mut self, id: u64, result: Result<Items, String>, next: Option<String>) -> Vec<Effect> {
         let Some(pending) = self.pending.take_if(|p| p.id == id) else {
-            return; // superseded by a newer request
+            return Vec::new(); // superseded by a newer request
         };
         self.loading = None;
         let mut items = match result {
             Ok(items) => items,
             Err(error) => {
                 self.status = error;
-                return;
+                return Vec::new();
             }
         };
+        // None of my channels in a whole feed: my channels are likely an old
+        // copy of a stale login. Read them again once and filter again.
+        if pending.filter == Filter::Mine
+            && pending.kind == ListKind::Feed
+            && !items.is_empty()
+            && !self.subs_rechecked
+            && self.logged_in()
+            && let Items::Videos(videos) = &items
+            && !videos.iter().any(|v| v.channel_id.as_ref().is_some_and(|c| self.subs.contains(c)))
+        {
+            self.subs_rechecked = true;
+            self.loading = Some(pending.title.clone());
+            self.status = self.tr("Releyendo tus canales…", "Reading your channels again…").into();
+            self.recheck = Some((pending, items, next));
+            return vec![Effect::LoadSubs];
+        }
         if let Items::Videos(videos) = &mut items {
             let mine = |v: &Video| v.channel_id.as_ref().is_some_and(|c| self.subs.contains(c));
             match pending.filter {
@@ -1532,6 +1565,7 @@ impl State {
         } else {
             self.show(listing);
         }
+        Vec::new()
     }
 
     fn show_system(&mut self) {
@@ -1609,10 +1643,25 @@ impl State {
                     self.tr("Sin sesión", "Not logged in").into()
                 };
                 self.subs = subs;
-                vec![Effect::SaveSubs(self.subs.clone())]
+                let mut effects = vec![Effect::SaveSubs(self.subs.clone())];
+                // The feed waiting for them, unless something else is loading now.
+                if let Some((pending, items, next)) = self.recheck.take()
+                    && self.pending.is_none()
+                    && self.loading.as_ref() == Some(&pending.title)
+                {
+                    let id = pending.id;
+                    self.pending = Some(pending);
+                    effects.extend(self.loaded(id, Ok(items), next));
+                }
+                effects
             }
             Err(error) => {
                 self.status = error;
+                if let Some((pending, ..)) = self.recheck.take()
+                    && self.loading.as_ref() == Some(&pending.title)
+                {
+                    self.loading = None;
+                }
                 Vec::new()
             }
         }
@@ -1635,7 +1684,7 @@ impl State {
     }
 
     /// `(id, name, url)` of the channel the user is pointing at.
-    fn selected_channel(&self) -> Option<(String, String, Option<String>)> {
+    pub(crate) fn selected_channel(&self) -> Option<(String, String, Option<String>)> {
         if let Some(v) = self.selected_video() {
             return v.channel_id.clone().map(|id| (id, v.channel.clone(), v.channel_url.clone()));
         }
@@ -1700,7 +1749,7 @@ impl State {
     }
 
     /// The marked files of the shown list, in its order.
-    fn marked_files(&self) -> Vec<PathBuf> {
+    pub(crate) fn marked_files(&self) -> Vec<PathBuf> {
         match self.stack.last() {
             Some(Listing { items: Items::Files(files, _), .. }) if self.active == 0 => {
                 files.iter().filter(|f| self.marked.contains(&f.path)).map(|f| f.path.clone()).collect()
@@ -1820,7 +1869,7 @@ impl State {
         if self.tabs.len() >= self.config.ui.max_tabs {
             let (max, close) = (
                 self.tr("Máximo de", "At most"),
-                self.tr("pestañas: cerrá una con C-y x", "tabs: close one with C-y x"),
+                self.tr("pestañas: cerrá una con Ctrl+y + x", "tabs: close one with Ctrl+y + x"),
             );
             self.status = format!("{max} {} {close}", self.config.ui.max_tabs);
             return Vec::new();
@@ -1941,7 +1990,7 @@ mod tests {
 
     fn with_videos(ids: &[&str]) -> State {
         let mut s = state();
-        let id = load_id(&open(&mut s, Section::Inicio));
+        let id = load_id(&open(&mut s, Section::Suscripciones));
         s.update(Action::Loaded(id, Ok(Items::Videos(ids.iter().map(|i| video(i)).collect()))));
         s
     }
@@ -2020,7 +2069,7 @@ mod tests {
         assert_eq!(s.lang(), Lang::Es, "Spanish until the runtime picks the system's");
         assert_eq!(s.update(Action::ToggleUiLang), vec![saved("ui", "lang", text("en"))]);
         assert_eq!((s.lang(), s.status.as_str()), (Lang::En, "Language: English"));
-        assert_eq!(Section::Inicio.label(s.lang()), "Home");
+        assert_eq!(Section::Inicio.label(s.lang()), "My recommendations");
         assert_eq!(s.update(Action::ToggleUiLang), vec![saved("ui", "lang", text("es"))]);
         assert_eq!(change(&mut s, Setting::AppLang), vec![saved("ui", "lang", text("en"))]);
         assert_eq!(change(&mut s, Setting::FxPages), vec![saved("effects", "pages", SettingValue::Bool(false))]);
@@ -2069,7 +2118,6 @@ mod tests {
     #[test]
     fn feed_sections_load_their_source() {
         let cases = [
-            (Section::Inicio, Source::Recommended, 60),
             (Section::DescubrirCanales, Source::Recommended, FILTERED_LIMIT),
             (Section::Suscripciones, Source::Subscriptions, 60),
             (Section::Canales, Source::MyChannels, 60),
@@ -2098,7 +2146,7 @@ mod tests {
     #[test]
     fn stale_results_are_ignored() {
         let mut s = state();
-        let first = load_id(&open(&mut s, Section::Inicio));
+        let first = load_id(&open(&mut s, Section::DescubrirCanales));
         let second = load_id(&open(&mut s, Section::Suscripciones));
         s.update(Action::Loaded(first, Ok(Items::Videos(vec![video("old")]))));
         assert!(s.stack.is_empty());
@@ -2112,7 +2160,7 @@ mod tests {
         let id = load_id(&open(&mut s, Section::Suscripciones));
         s.update(Action::Loaded(id, Err("sin sesión".into())));
         assert_eq!(s.status, "sin sesión");
-        assert_eq!(s.listing().unwrap().title, "Inicio");
+        assert_eq!(s.listing().unwrap().title, "Suscripciones");
     }
 
     #[test]
@@ -2123,6 +2171,46 @@ mod tests {
         let mix = Video { channel_id: None, ..video("RDmix") };
         s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a"), video("b"), mix]))));
         assert_eq!(s.listing().unwrap().items, Items::Videos(vec![video("b")]));
+    }
+
+    #[test]
+    fn my_recommendations_keep_only_my_channels() {
+        let mut s = state();
+        assert!(open(&mut s, Section::Inicio).is_empty());
+        assert!(s.status.contains("Sin sesión"), "{}", s.status);
+        s.config.session.browser = "brave".into();
+        s.update(Action::SubsLoaded(HashSet::from(["UCa".to_string()])));
+        let id = match open(&mut s, Section::Inicio).as_slice() {
+            [Effect::Load { id, source: Source::Recommended, .. }, ..] => *id,
+            other => panic!("{other:?}"),
+        };
+        s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a"), video("b")]))));
+        assert_eq!(s.listing().unwrap().items, Items::Videos(vec![video("a")]));
+        assert_eq!(s.listing().unwrap().title, "Mis recomendados");
+    }
+
+    #[test]
+    fn my_recommendations_read_my_channels_again_when_none_match() {
+        let mut s = state();
+        s.config.session.browser = "brave".into();
+        s.update(Action::SubsLoaded(HashSet::from(["UCold".to_string()])));
+        let id = match open(&mut s, Section::Inicio).as_slice() {
+            [Effect::Load { id, .. }, ..] => *id,
+            other => panic!("{other:?}"),
+        };
+        let feed = Items::Videos(vec![video("a"), video("b")]);
+        assert_eq!(s.update(Action::Loaded(id, Ok(feed))), [Effect::LoadSubs], "an old copy of my channels");
+        assert!(s.status.contains("Releyendo"), "{}", s.status);
+        let subs = HashSet::from(["UCb".to_string()]);
+        s.update(Action::SessionReady { cookies: None, subs: Ok(subs) });
+        assert_eq!(s.listing().unwrap().items, Items::Videos(vec![video("b")]));
+        // Only once: still none of mine shows an empty list.
+        let id = match open(&mut s, Section::Inicio).as_slice() {
+            [Effect::Load { id, .. }, ..] => *id,
+            other => panic!("{other:?}"),
+        };
+        assert!(s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a")])))).is_empty());
+        assert!(s.listing().unwrap().items.is_empty());
     }
 
     #[test]
@@ -2343,7 +2431,7 @@ mod tests {
     fn max_tabs_is_enforced() {
         let config = Config { ui: UiConfig { max_tabs: 1, ..Default::default() }, ..Default::default() };
         let mut s = State::new(config, vec![]);
-        let id = load_id(&open(&mut s, Section::Inicio));
+        let id = load_id(&open(&mut s, Section::Suscripciones));
         s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a"), video("b")]))));
         play(&mut s, 0);
         s.update(Action::GoTab(0));
@@ -2488,7 +2576,7 @@ mod tests {
     fn feeds_hide_watched_videos_and_v_shows_them() {
         let mut s = state();
         s.watched.insert("b".into());
-        let id = load_id(&open(&mut s, Section::Inicio));
+        let id = load_id(&open(&mut s, Section::Suscripciones));
         s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a"), video("b"), video("c")]))));
         let ids = |s: &State| match &s.listing().unwrap().items {
             Items::Videos(v) => v.iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
@@ -2581,7 +2669,7 @@ mod tests {
     #[test]
     fn video_without_channel_cannot_subscribe() {
         let mut s = state();
-        let id = load_id(&open(&mut s, Section::Inicio));
+        let id = load_id(&open(&mut s, Section::Suscripciones));
         s.update(Action::Loaded(id, Ok(Items::Videos(vec![Video { channel_id: None, ..video("a") }]))));
         assert!(s.update(Action::ToggleSubscription).is_empty());
         assert_eq!(s.status, "Este video no tiene canal");

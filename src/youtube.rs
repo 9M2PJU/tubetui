@@ -6,6 +6,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
+
+use crate::session::JarCopy;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -160,7 +162,8 @@ pub fn fetch(source: &Source, limit: u32, cookies: Option<&Path>) -> Result<Item
     if cookies.is_none() && source == &Source::Subscriptions {
         return Err(YoutubeError::NoSession);
     }
-    let json = run_yt_dlp(&fetch_args(source, limit, cookies))?;
+    let copy = cookies.map(JarCopy::new).transpose()?;
+    let json = run_yt_dlp(&fetch_args(source, limit, copy.as_ref().map(JarCopy::path)))?;
     if source.lists_channels() {
         Ok(Items::Channels(parse_channels(&json)?))
     } else {

@@ -511,6 +511,18 @@ impl Runtime {
                     self.send(Action::Status(format!("{failed}: {e}")));
                 }
             }
+            Effect::LoadSubs => {
+                let cookies = self.cookies.clone();
+                self.background(move || match cookies {
+                    Some(cookies) => {
+                        let subs = youtube::subscribed_channels(&cookies).map_err(|e| e.to_string());
+                        Action::SessionReady { cookies: Some(cookies), subs }
+                    }
+                    None => {
+                        Action::SessionReady { cookies: None, subs: Err(youtube::YoutubeError::NoSession.to_string()) }
+                    }
+                });
+            }
             Effect::SaveSubs(subs) => {
                 // Cache only; a failure just means reading them again next time.
                 let _ = store::save_subs(&self.paths.subs, &subs);
@@ -530,26 +542,31 @@ impl Runtime {
             Effect::Download(video) => {
                 let dir = self.download_dir();
                 let player = &self.state.config.player;
-                let args = youtube::download_args(
-                    &video.url(),
-                    &player::ytdl_format(player, Mode::Window),
-                    &player.sub_lang,
-                    &dir,
-                    self.cookies.as_deref(),
-                );
+                let (format, sub_lang) = (player::ytdl_format(player, Mode::Window), player.sub_lang.clone());
+                let cookies = self.cookies.clone();
                 let lang = self.state.lang();
-                self.background(move || match youtube::download(&args) {
-                    Ok(()) => Action::Status(format!(
-                        "✅ {} {}: {}",
-                        lang.pick("Descarga lista en", "Downloaded to"),
-                        dir.display(),
-                        video.title
-                    )),
-                    Err(e) => Action::Status(format!(
-                        "❌ {} {}: {e}",
-                        lang.pick("Falló la descarga de", "Download failed:"),
-                        video.title
-                    )),
+                self.background(move || {
+                    let copy = cookies.and_then(|c| session::JarCopy::new(&c).ok());
+                    let args = youtube::download_args(
+                        &video.url(),
+                        &format,
+                        &sub_lang,
+                        &dir,
+                        copy.as_ref().map(session::JarCopy::path),
+                    );
+                    match youtube::download(&args) {
+                        Ok(()) => Action::Status(format!(
+                            "✅ {} {}: {}",
+                            lang.pick("Descarga lista en", "Downloaded to"),
+                            dir.display(),
+                            video.title
+                        )),
+                        Err(e) => Action::Status(format!(
+                            "❌ {} {}: {e}",
+                            lang.pick("Falló la descarga de", "Download failed:"),
+                            video.title
+                        )),
+                    }
                 });
             }
             Effect::Open(id, playback) => self.open(id, &playback, false, terminal.size()?.into()),
@@ -581,10 +598,11 @@ impl Runtime {
                 None => g,
             }
         });
+        let player_jar = self.cookies.as_deref().filter(|_| with_cookies).map(session::player_jar);
         let launch = Launch {
             config: &self.state.config.player,
             mode: self.mode(),
-            cookies: self.cookies.as_deref().filter(|_| with_cookies),
+            cookies: player_jar.as_deref(),
             queue: &playback.queue,
             audio_only: playback.audio_only,
         };
