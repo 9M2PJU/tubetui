@@ -174,7 +174,10 @@ pub fn update_yt_dlp(path: &str, manager: Manager) -> String {
         "pipx upgrade yt-dlp".into()
     } else {
         match manager {
-            Manager::Apt => "sudo apt install pipx && pipx install yt-dlp".into(),
+            // The distro's copy stays first on PATH unless it goes.
+            Manager::Apt => {
+                "sudo apt remove yt-dlp && sudo apt install pipx && pipx install yt-dlp && pipx ensurepath".into()
+            }
             Manager::Pacman => "sudo pacman -Syu yt-dlp".into(),
             Manager::Dnf => "sudo dnf upgrade yt-dlp".into(),
             Manager::Zypper => "sudo zypper update yt-dlp".into(),
@@ -379,6 +382,10 @@ mod tests {
         assert!(yt_dlp_age_days("2024.04.09", (2026, 10, 10)) > YT_DLP_MAX_AGE_DAYS);
         assert_eq!(update_yt_dlp("/home/u/.local/bin/yt-dlp", Manager::Apt), "pipx upgrade yt-dlp");
         assert_eq!(update_yt_dlp("/usr/bin/yt-dlp", Manager::Pacman), "sudo pacman -Syu yt-dlp");
+        assert_eq!(
+            update_yt_dlp("/usr/bin/yt-dlp", Manager::Apt),
+            "sudo apt remove yt-dlp && sudo apt install pipx && pipx install yt-dlp && pipx ensurepath"
+        );
     }
 
     #[test]

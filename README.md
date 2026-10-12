@@ -122,11 +122,28 @@ Ready-made packages for every release are on the
 - **Other Linux**: `tubetui-x86_64-linux.tar.gz`
 - **macOS (Apple Silicon)**: `tubetui-aarch64-macos.tar.gz`
 
-Or from source, anywhere Rust runs:
+Or from source on Linux / macOS with the installer, which checks the C
+compiler, Rust (1.88 or newer), mpv and yt-dlp first and prints the commands
+for whatever is missing:
+
+```sh
+curl -sSf https://raw.githubusercontent.com/polblancoo/tubetui/main/install.sh | sh
+```
+
+or by hand, anywhere Rust 1.88+ runs:
 
 ```sh
 cargo install tubetui
 ```
+
+> `feature edition2024 is required` means your Rust is too old — distro
+> packages often are (Ubuntu 22.04 ships 1.75). Install a current one with
+> [rustup](https://rustup.rs):
+>
+> ```sh
+> curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+> . "$HOME/.cargo/env"
+> ```
 
 ## Keys
 
