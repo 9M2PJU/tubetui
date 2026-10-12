@@ -19,7 +19,7 @@ use crate::player::Info;
 use crate::update::Install;
 #[cfg(test)]
 use crate::youtube::Watch;
-use crate::youtube::{Items, compact};
+use crate::youtube::{Items, Rating, compact};
 use crate::{keymap, session};
 
 pub const SIDEBAR_WIDTH: u16 = 26;
@@ -65,6 +65,8 @@ pub struct Icons {
     pub upcoming: &'static str,
     pub later: &'static str,
     pub subscribed: &'static str,
+    pub liked: &'static str,
+    pub disliked: &'static str,
     pub user: &'static str,
     pub language: &'static str,
     pub volume: &'static str,
@@ -85,6 +87,8 @@ const EMOJI: Icons = Icons {
     upcoming: "⏳",
     later: "🕒",
     subscribed: "✓",
+    liked: "👍",
+    disliked: "👎",
     user: "👤",
     language: "🌐",
     volume: "🔊",
@@ -118,6 +122,8 @@ const NERD: Icons = Icons {
     upcoming: "\u{f252}",
     later: "\u{f017}",
     subscribed: "\u{f00c}",
+    liked: "\u{f164}",
+    disliked: "\u{f165}",
     user: "\u{f007}",
     language: "\u{f1ab}",
     volume: "\u{f028}",
@@ -137,6 +143,8 @@ const UNICODE: Icons = Icons {
     upcoming: "…",
     later: "◷",
     subscribed: "✓",
+    liked: "▲",
+    disliked: "▼",
     user: "☺",
     language: "⇄",
     volume: "♪",
@@ -447,6 +455,7 @@ fn draw_watch(frame: &mut Frame, state: &State, icons: &Icons, view: &View, tab:
     if state.later.iter().any(|l| l.id == video.id) {
         lines.push(Line::from(format!("{} {}", icons.later, lang.pick("En Ver después", "In Watch later"))).fg(CYAN));
     }
+    lines.extend(rating_line(state, icons, &video.id));
     if let Some(elapsed) = view.opening {
         lines.push(Line::from(loading_text(lang.pick("el video", "the video"), elapsed, lang)).fg(YELLOW));
     }
@@ -908,7 +917,20 @@ fn draw_preview(frame: &mut Frame, state: &State, icons: &Icons, view: &View, vi
     if v.channel_id.as_ref().is_some_and(|c| state.subs.contains(c)) {
         lines.push(Line::from(format!("{} {}", icons.subscribed, lang.pick("Suscripto", "Subscribed"))).fg(GREEN));
     }
+    lines.extend(rating_line(state, icons, &v.id));
     frame.render_widget(Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }), text_area);
+}
+
+/// "Te gusta" / "No te gusta" when I voted on the video.
+fn rating_line(state: &State, icons: &Icons, id: &str) -> Option<Line<'static>> {
+    let lang = state.lang();
+    match state.ratings.get(id)? {
+        Rating::Like => Some(Line::from(format!("{} {}", icons.liked, lang.pick("Te gusta", "Liked"))).fg(GREEN)),
+        Rating::Dislike => {
+            Some(Line::from(format!("{} {}", icons.disliked, lang.pick("No te gusta", "Disliked"))).fg(RED))
+        }
+        Rating::None => None,
+    }
 }
 
 /// The selected channel: name, subscribers and its whole description.
@@ -1105,6 +1127,7 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
                 },
                 key("l", "ver después", "watch later"),
                 key("s", "suscribirse", "subscribe"),
+                key("g", "me gusta", "like"),
                 key("d", "descargar", "download"),
                 key("c", "canal", "channel"),
                 key("/", "buscar", "search"),
@@ -1114,6 +1137,7 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
                 key("Enter", "ver", "play"),
                 key("l", "ver después", "watch later"),
                 key("s", "suscribirse", "subscribe"),
+                key("g", "me gusta", "like"),
                 key("d", "descargar", "download"),
                 key("c", "canal", "channel"),
                 key("/", "buscar", "search"),
@@ -1660,7 +1684,7 @@ mod tests {
         let tab = with_tab();
         assert!(hint_keys(&tab).contains(&"espacio".to_string()) && hint_keys(&tab).contains(&"m".to_string()));
         let list = with_items(Items::Videos(vec![video("a")]));
-        assert_eq!(hint_keys(&list), ["Enter", "v", "l", "s", "d", "c", "/", "Esc", "C-y ?"], "Inicio: a feed");
+        assert_eq!(hint_keys(&list), ["Enter", "v", "l", "s", "g", "d", "c", "/", "Esc", "C-y ?"], "Inicio: a feed");
         let mut search = state();
         search.update(Action::FocusSearch);
         assert!(hint_keys(&search).contains(&"Tab".to_string()));
@@ -1904,11 +1928,13 @@ mod tests {
             published: None,
             subscribers: Some("559K".into()),
             related: vec![video("r1"), video("r2")],
+            rating: Some(Rating::Like),
         };
         s.update(Action::Watched(tab, Ok(watch)));
         let view = View { embedded: false, ..VIEW };
         let screen = render_with(&s, &view);
-        for text in ["title a", "chan a · 559K suscriptores", "5 k vistas", "A continuación · 2 · Tab", "title r2"]
+        for text in
+            ["title a", "chan a · 559K suscriptores", "5 k vistas", "Te gusta", "A continuación · 2 · Tab", "title r2"]
         {
             assert!(screen.contains(text), "{text}\n{screen}");
         }

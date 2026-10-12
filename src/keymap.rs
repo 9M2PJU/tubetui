@@ -7,6 +7,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::app::Action;
 use crate::i18n::{Lang, Text};
+use crate::youtube::Rating;
 
 /// The slice of state that decides how a key is read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -45,6 +46,8 @@ pub const PREFIX: &[(char, Action, Text)] = &[
 pub const ON_VIDEO: &[(&str, Text)] = &[
     ("l", Text::new("agregar / quitar de Ver después", "add to / remove from Watch later")),
     ("s", Text::new("suscribirse / desuscribirse del canal", "subscribe / unsubscribe")),
+    ("g", Text::new("me gusta (otra vez: lo quita)", "like (again: take it back)")),
+    ("G", Text::new("no me gusta (otra vez: lo quita)", "dislike (again: take it back)")),
     ("d", Text::new("descargar (con subtítulos)", "download (with subtitles)")),
     ("c", Text::new("ver los videos del canal", "the channel's videos")),
 ];
@@ -140,6 +143,8 @@ pub fn map(key: KeyEvent, ctx: KeyContext) -> Option<Action> {
     match key.code {
         KeyCode::Char('l') => return Some(Action::ToggleLater),
         KeyCode::Char('s') => return Some(Action::ToggleSubscription),
+        KeyCode::Char('g') => return Some(Action::Rate(Rating::Like)),
+        KeyCode::Char('G') => return Some(Action::Rate(Rating::Dislike)),
         KeyCode::Char('d') => return Some(Action::Download),
         KeyCode::Char('c') => return Some(Action::OpenChannel),
         _ => {}
@@ -329,6 +334,8 @@ mod tests {
         for ctx in [LISTS, TAB] {
             assert_eq!(map(char('l'), ctx), Some(Action::ToggleLater));
             assert_eq!(map(char('s'), ctx), Some(Action::ToggleSubscription));
+            assert_eq!(map(char('g'), ctx), Some(Action::Rate(Rating::Like)));
+            assert_eq!(map(char('G'), ctx), Some(Action::Rate(Rating::Dislike)));
             assert_eq!(map(char('d'), ctx), Some(Action::Download));
             assert_eq!(map(char('c'), ctx), Some(Action::OpenChannel));
         }

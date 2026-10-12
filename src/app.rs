@@ -5,7 +5,7 @@
 //! each backed by its own player. The live configuration lives here too, so
 //! the settings screen is just state changes plus `SaveSetting` effects.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::config::{
@@ -17,7 +17,7 @@ use crate::i18n::Lang;
 use crate::keymap::KeyContext;
 use crate::media::{LocalFile, MediaKind, parse_dirs};
 use crate::update::Update;
-use crate::youtube::{Items, SearchPage, Source, Watch};
+use crate::youtube::{Items, Rating, SearchPage, Source, Watch};
 
 /// Lists that are filtered afterwards ask YouTube for more videos.
 pub const FILTERED_LIMIT: u32 = 200;
@@ -331,6 +331,14 @@ pub enum Action {
         name: String,
         result: Result<bool, String>,
     },
+    /// Like or dislike the selected video; the same again takes it back.
+    Rate(Rating),
+    Rated {
+        video: String,
+        title: String,
+        rating: Rating,
+        result: Result<(), String>,
+    },
     Download,
     OpenChannel,
     Status(String),
@@ -443,6 +451,11 @@ pub enum Effect {
         channel_id: String,
         name: String,
         subscribe: bool,
+    },
+    Rate {
+        video: String,
+        title: String,
+        rating: Rating,
     },
     Download(Video),
     Open(TabId, Playback),
@@ -575,6 +588,8 @@ pub struct State {
     pub later: Vec<Video>,
     /// Ids of my channels.
     pub subs: HashSet<String>,
+    /// How I rated the videos I opened or voted on.
+    pub ratings: HashMap<String, Rating>,
     pub confirm: Option<Confirm>,
     /// Local files marked (space) for the next delete.
     pub marked: HashSet<PathBuf>,
@@ -616,6 +631,7 @@ impl State {
             loading: None,
             later,
             subs: HashSet::new(),
+            ratings: HashMap::new(),
             confirm: None,
             marked: HashSet::new(),
             update: None,
@@ -869,6 +885,9 @@ impl State {
             Action::Watched(id, result) => {
                 // Without details the tab just stays as it is.
                 if let (Some(tab), Ok(watch)) = (self.tabs.iter_mut().find(|t| t.id == id), result) {
+                    if let (Some(rating), Some(video)) = (watch.rating, &tab.playback.video) {
+                        self.ratings.insert(video.id.clone(), rating);
+                    }
                     tab.watch = Some(watch);
                 }
             }
@@ -930,6 +949,8 @@ impl State {
             Action::SubscriptionDone { channel_id, name, result } => {
                 return self.subscription_done(channel_id, name, result);
             }
+            Action::Rate(rating) => return self.rate(rating),
+            Action::Rated { video, title, rating, result } => self.rated(video, title, rating, result),
             Action::Download => {
                 if let Some(video) = self.selected_video().cloned() {
                     self.status = format!("⬇ {}: {}", self.tr("Descargando", "Downloading"), video.title);
@@ -1674,6 +1695,34 @@ impl State {
             self.tr("(se recuperan desde la papelera del sistema)", "(recover them from the system trash)"),
         );
         self.status = format!("🗑 {} {sent} {recover}", paths.len());
+    }
+
+    fn rate(&mut self, rating: Rating) -> Vec<Effect> {
+        let Some(video) = self.selected_video() else { return Vec::new() };
+        if !self.logged_in() {
+            let hint =
+                self.tr("Sin sesión: elegí un navegador en Configuración", "Not logged in: pick a browser in Settings");
+            self.status = hint.into();
+            return Vec::new();
+        }
+        let (id, title) = (video.id.clone(), video.title.clone());
+        let current = self.ratings.get(&id).copied().unwrap_or_default();
+        let rating = if current == rating { Rating::None } else { rating };
+        vec![Effect::Rate { video: id, title, rating }]
+    }
+
+    fn rated(&mut self, video: String, title: String, rating: Rating, result: Result<(), String>) {
+        if let Err(error) = result {
+            self.status = format!("❌ {} {title}: {error}", self.tr("No se pudo votar", "Could not vote on"));
+            return;
+        }
+        let done = match rating {
+            Rating::Like => self.tr("👍 Te gusta", "👍 Liked"),
+            Rating::Dislike => self.tr("👎 No te gusta", "👎 Disliked"),
+            Rating::None => self.tr("Voto quitado", "Vote taken back"),
+        };
+        self.status = format!("{done}: {title}");
+        self.ratings.insert(video, rating);
     }
 
     fn subscription_done(&mut self, channel_id: String, name: String, result: Result<bool, String>) -> Vec<Effect> {
@@ -2776,6 +2825,25 @@ mod tests {
         assert_eq!(s.session_label(), "cookies.txt importado");
         s.update(Action::CookiesImported(Err("no tiene sesión".into())));
         assert_eq!(s.status, "no tiene sesión");
+    }
+
+    #[test]
+    fn like_toggles_and_needs_a_login() {
+        let mut s = with_videos(&["a"]);
+        assert!(s.update(Action::Rate(Rating::Like)).is_empty());
+        assert!(s.status.contains("Sin sesión"), "{}", s.status);
+        s.config.session.browser = "brave".into();
+        let rate = |rating| Effect::Rate { video: "a".into(), title: "title a".into(), rating };
+        assert_eq!(s.update(Action::Rate(Rating::Like)), [rate(Rating::Like)]);
+        let done = |rating, result| Action::Rated { video: "a".into(), title: "title a".into(), rating, result };
+        s.update(done(Rating::Like, Ok(())));
+        assert_eq!(s.ratings["a"], Rating::Like);
+        assert!(s.status.contains("Te gusta: title a"), "{}", s.status);
+        assert_eq!(s.update(Action::Rate(Rating::Like)), [rate(Rating::None)], "again takes it back");
+        assert_eq!(s.update(Action::Rate(Rating::Dislike)), [rate(Rating::Dislike)]);
+        s.update(done(Rating::None, Err("HTTP 401".into())));
+        assert_eq!(s.ratings["a"], Rating::Like, "a failed vote changes nothing");
+        assert!(s.status.contains("HTTP 401"), "{}", s.status);
     }
 
     #[test]

@@ -279,12 +279,56 @@ pub struct Watch {
     pub subscribers: Option<String>,
     /// "Up next".
     pub related: Vec<Video>,
+    /// How I rated it; `None` without a login.
+    pub rating: Option<Rating>,
 }
 
-/// The watch page of `id`: details and related videos (anonymous, about a second).
-pub fn watch(id: &str) -> Result<Watch, YoutubeError> {
-    let reply = InnerTube::anonymous().call("next", json!({ "videoId": id }))?;
-    Ok(parse_watch(&reply, unix_now()))
+/// My vote on a video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Rating {
+    #[default]
+    None,
+    Like,
+    Dislike,
+}
+
+impl Rating {
+    /// YouTube's `likeStatus`: `LIKE`, `DISLIKE`, `INDIFFERENT`.
+    fn from_status(status: &str) -> Self {
+        match status {
+            "LIKE" => Self::Like,
+            "DISLIKE" => Self::Dislike,
+            _ => Self::None,
+        }
+    }
+
+    fn endpoint(self) -> &'static str {
+        match self {
+            Self::None => "like/removelike",
+            Self::Like => "like/like",
+            Self::Dislike => "like/dislike",
+        }
+    }
+}
+
+/// The watch page of `id`: details and related videos (about a second).
+/// With a login it also says how I rated the video.
+pub fn watch(id: &str, cookies: Option<&Path>) -> Result<Watch, YoutubeError> {
+    // English, like anonymous calls, so the dates and counts can be read.
+    let signed = cookies.and_then(|c| InnerTube::new(c).ok()).map(|client| InnerTube { hl: "en", ..client });
+    let logged_in = signed.is_some();
+    let reply = signed.unwrap_or_else(InnerTube::anonymous).call("next", json!({ "videoId": id }))?;
+    let mut watch = parse_watch(&reply, unix_now());
+    if !logged_in {
+        watch.rating = None;
+    }
+    Ok(watch)
+}
+
+/// Likes, dislikes or takes my vote back from a video.
+pub fn rate(cookies: &Path, video_id: &str, rating: Rating) -> Result<(), YoutubeError> {
+    InnerTube::new(cookies)?.call(rating.endpoint(), json!({ "target": { "videoId": video_id } }))?;
+    Ok(())
 }
 
 pub fn parse_watch(reply: &Value, now: i64) -> Watch {
@@ -308,6 +352,11 @@ pub fn parse_watch(reply: &Value, now: i64) -> Watch {
                 }
             });
             watch.likes = likes;
+        }
+        if watch.rating.is_none()
+            && let Some(status) = object.get("likeStatusEntity").and_then(|e| e["likeStatus"].as_str())
+        {
+            watch.rating = Some(Rating::from_status(status));
         }
         if let Some(owner) = object.get("videoOwnerRenderer") {
             watch.subscribers =
@@ -917,7 +966,9 @@ mod tests {
                         "viewCount": { "simpleText": "5,771 views" }, "originalViewCount": "0" } },
                     "relativeDateText": { "simpleText": "3 hours ago" },
                     "videoActions": { "menuRenderer": { "topLevelButtons": [{ "segmentedLikeDislikeButtonViewModel": {
-                        "likeButtonViewModel": { "toggleButtonViewModel": { "defaultButtonViewModel": { "buttonViewModel": {
+                        "likeButtonViewModel": {
+                            "likeStatusEntity": { "likeStatus": "LIKE" },
+                            "toggleButtonViewModel": { "defaultButtonViewModel": { "buttonViewModel": {
                             "accessibilityText": "like this video along with 1,733 other people" } } } } } }] } } } },
                 { "videoSecondaryInfoRenderer": { "owner": { "videoOwnerRenderer": {
                     "subscriberCountText": { "simpleText": "559K subscribers" } } } } }
@@ -949,6 +1000,7 @@ mod tests {
         assert_eq!(watch.likes, Some(1733));
         assert_eq!(watch.published, Some(now - 3 * 3600));
         assert_eq!(watch.subscribers.as_deref(), Some("559K"));
+        assert_eq!(watch.rating, Some(Rating::Like));
         let ids: Vec<&str> = watch.related.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(ids, ["a", "b"], "no playlists, no repeats");
         let a = &watch.related[0];
@@ -958,6 +1010,14 @@ mod tests {
         assert_eq!((a.duration, a.published, a.live), (Some(19 * 60 + 42), Some(now - 2 * 86_400), Live::No));
         assert_eq!((watch.related[1].duration, watch.related[1].live), (None, Live::Now));
         assert_eq!(first_number("no digits"), None);
+    }
+
+    #[test]
+    fn ratings_map_to_youtube() {
+        assert_eq!(Rating::from_status("DISLIKE"), Rating::Dislike);
+        assert_eq!(Rating::from_status("INDIFFERENT"), Rating::None);
+        assert_eq!(Rating::Like.endpoint(), "like/like");
+        assert_eq!(Rating::None.endpoint(), "like/removelike");
     }
 
     #[test]

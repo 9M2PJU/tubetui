@@ -32,8 +32,9 @@ Every video opens in its own tab.
   volume, resolution and codec on top
 - **Mouse**: click to select, double click to open, wheel to scroll (on the
   video: volume), click the video to pause, the progress bar to jump
-- **Subscribe / unsubscribe** (`s`, unsubscribing asks first), **watch later**
-  (`l`), **download** with subtitles (`d`), open the **channel** (`c`)
+- **Subscribe / unsubscribe** (`s`, unsubscribing asks first), **like /
+  dislike** (`g` / `G`, again takes it back), **watch later** (`l`),
+  **download** with subtitles (`d`), open the **channel** (`c`)
 
 **Playback**
 - Embedded video in kitty, an mpv window, or an **overlay** (X11): an mpv
@@ -115,7 +116,7 @@ a click on the video pauses (double click: fullscreen), a click on the
 progress bar jumps there. Hold Shift to select text.
 
 In lists: `↑↓` / `jk`, `Enter`, `Esc` to go back, `Tab` menu ↔ list,
-`l` watch later, `s` subscribe, `d` download, `c` channel. In **My videos**
+`l` watch later, `s` subscribe, `g` / `G` like / dislike, `d` download, `c` channel. In **My videos**
 and **My music**: `space` marks files, `x` / `Del` moves the marked ones (or
 the selected one) to the system trash, after asking.
 While watching: `space` pause, `←→` seek, `↑↓` volume, `m` mute, `j`

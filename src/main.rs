@@ -432,7 +432,20 @@ impl Runtime {
                 });
             }
             Effect::Watch { tab, video } => {
-                self.background(move || Action::Watched(tab, youtube::watch(&video).map_err(|e| e.to_string())));
+                let cookies = self.cookies.clone();
+                self.background(move || {
+                    Action::Watched(tab, youtube::watch(&video, cookies.as_deref()).map_err(|e| e.to_string()))
+                });
+            }
+            Effect::Rate { video, title, rating } => {
+                let cookies = self.cookies.clone();
+                self.background(move || {
+                    let result = match cookies {
+                        Some(cookies) => youtube::rate(&cookies, &video, rating).map_err(|e| e.to_string()),
+                        None => Err(youtube::YoutubeError::NoSession.to_string()),
+                    };
+                    Action::Rated { video, title, rating, result }
+                });
             }
             Effect::ScanBrowsers { id } => {
                 let home = directories::BaseDirs::new().map(|d| d.home_dir().to_owned()).unwrap_or_default();
