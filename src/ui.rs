@@ -61,12 +61,14 @@ pub struct Icons {
     /// In `Section::ALL` order.
     pub sections: [&'static str; 17],
     /// In `Setting::ALL` order.
-    pub settings: [&'static str; 27],
+    pub settings: [&'static str; 28],
     pub logo: &'static str,
     pub tab: &'static str,
     pub live: &'static str,
     pub upcoming: &'static str,
     pub later: &'static str,
+    /// A channel I watch a lot.
+    pub favorite: &'static str,
     pub subscribed: &'static str,
     pub liked: &'static str,
     pub disliked: &'static str,
@@ -92,13 +94,14 @@ const EMOJI: Icons = Icons {
     sections: ["🏠", "🎯", "🧭", "📺", "🕒", "📜", "📚", "⭐", "💡", "🔎", "📡", "📼", "🎵", "📥", "🔧", "💜", "🚪"],
     settings: [
         "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "⏩", "🗣", "😀", "🖼", "🖱", "✨", "🌊", "💥", "📼", "🎵",
-        "📁", "🏷", "🩺", "👁", "🩳", "🔔", "⬆", "📝",
+        "📁", "🏷", "🩺", "👁", "🩳", "🔔", "⭐", "⬆", "📝",
     ],
     logo: "▶️",
     tab: "🎬",
     live: "🔴",
     upcoming: "⏳",
     later: "🕒",
+    favorite: "⭐",
     subscribed: "✓",
     liked: "👍",
     disliked: "👎",
@@ -132,13 +135,15 @@ const NERD: Icons = Icons {
     settings: [
         "\u{f007}", "\u{f15b}", "\u{f021}", "\u{f08b}", "\u{f1ab}", "\u{f075}", "\u{f1de}", "\u{f008}", "\u{f025}",
         "\u{f051}", "\u{f0ac}", "\u{f118}", "\u{f03e}", "\u{f245}", "\u{f0d0}", "\u{f0e7}", "\u{f0a1}", "\u{f03d}",
-        "\u{f001}", "\u{f07b}", "\u{f02c}", "\u{f0f1}", "\u{f06e}", "\u{f10b}", "\u{f0f3}", "\u{f01b}", "\u{f044}",
+        "\u{f001}", "\u{f07b}", "\u{f02c}", "\u{f0f1}", "\u{f06e}", "\u{f10b}", "\u{f0f3}", "\u{f005}", "\u{f01b}",
+        "\u{f044}",
     ],
     logo: "\u{f16a}",
     tab: "\u{f144}",
     live: "\u{f111}",
     upcoming: "\u{f252}",
     later: "\u{f017}",
+    favorite: "\u{f005}",
     subscribed: "\u{f00c}",
     liked: "\u{f164}",
     disliked: "\u{f165}",
@@ -153,13 +158,14 @@ const UNICODE: Icons = Icons {
     sections: ["⌂", "◈", "◎", "▣", "◷", "↺", "≣", "★", "✧", "⌕", "⌁", "▷", "♫", "⇩", "⚙", "♥", "⏻"],
     settings: [
         "☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "»", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "#", "✚",
-        "◉", "▯", "♪", "↑", "✎",
+        "◉", "▯", "♪", "★", "↑", "✎",
     ],
     logo: "▶",
     tab: "▶",
     live: "●",
     upcoming: "…",
     later: "◷",
+    favorite: "★",
     subscribed: "✓",
     liked: "▲",
     disliked: "▼",
@@ -1113,6 +1119,9 @@ fn video_row_dated<'a>(state: &State, icons: &Icons, view: &View, v: &'a Video, 
     if state.fresh_shown.contains(&v.id) {
         spans.push(Span::styled(format!("{} ", lang.pick("NUEVO", "NEW")), Style::new().fg(GREEN).bold()));
     }
+    if state.is_favorite(v) {
+        spans.push(Span::raw(format!("{} ", icons.favorite)));
+    }
     if state.later.iter().any(|l| l.id == v.id) {
         spans.push(Span::raw(format!("{} ", icons.later)));
     }
@@ -1152,6 +1161,12 @@ fn channel_row<'a>(state: &State, icons: &Icons, c: &'a Channel, panel: bool) ->
         Span::styled(column(&c.name, CHANNEL_NAME_WIDTH), MAGENTA),
         Span::styled(column(c.followers.as_deref().unwrap_or(""), FOLLOWERS_WIDTH), MUTED),
     ];
+    if let Some(n) = state.channel_views.get(&c.id).filter(|_| state.config.ui.favorites_first) {
+        let star = if state.favorites.contains(&c.id) { icons.favorite } else { " " };
+        let word = if *n == 1 { state.lang().pick("visto", "watched") } else { state.lang().pick("vistos", "watched") };
+        let seen = format!("{star} {n} {word}");
+        spans.push(Span::styled(pad_cells(&seen, 14), YELLOW));
+    }
     if let Some(handle) = &c.handle {
         spans.push(Span::styled(handle.as_str(), CYAN));
     }

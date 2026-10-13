@@ -160,6 +160,8 @@ pub struct UiConfig {
     pub hide_shorts: bool,
     /// While the app is open, tell when my channels publish something new.
     pub notify_new: bool,
+    /// The channels I watch most go first in Suscripciones and Mis canales.
+    pub favorites_first: bool,
 }
 
 /// Short animations, each one can be turned off.
@@ -327,6 +329,7 @@ impl Default for UiConfig {
             hide_watched: true,
             hide_shorts: true,
             notify_new: true,
+            favorites_first: true,
         }
     }
 }

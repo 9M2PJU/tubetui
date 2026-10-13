@@ -37,6 +37,11 @@ Every video opens in its own tab.
   (*Suscripciones (3 nuevos)*), marked NUEVO in the list and, with
   `notify-send`, as a desktop notification
 - **Shorts hidden** from every list (a setting turns them back on)
+- **Your favorite channels first**: the channels you watch most (3 videos or
+  more in the last 30 days, up to 10) are marked ⭐. Their videos from the last
+  week go first in *Suscripciones* (after live ones), they top *Mis canales*
+  with how many of their videos you watched, and new video notices name them
+  first
 - **Search** videos in all of YouTube (about a second, more results load as
   you scroll), only in your channels, or inside a channel (`Tab` switches the
   scope); search channels (with their description, whole in the side panel)
@@ -232,6 +237,7 @@ mouse = true             # clicks and wheel; hold Shift to select text
 check_updates = true     # once a day, tell me about new versions and how to install them here
 hide_shorts = true       # leave Shorts out of every list
 notify_new = true        # check my subscriptions every 15 minutes and tell me about new videos
+favorites_first = true   # my most watched channels first in Suscripciones and Mis canales
 
 [effects]                # animations
 startup = true

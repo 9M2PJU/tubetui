@@ -154,6 +154,28 @@ pub fn bytes_label(bytes: u64) -> String {
     }
 }
 
+/// How many videos of each channel I opened since `since` (unix time), by channel id.
+pub fn channel_views(history: &[HistoryEntry], since: i64) -> std::collections::HashMap<String, usize> {
+    let mut views = std::collections::HashMap::new();
+    for entry in history.iter().filter(|e| e.at >= since) {
+        if let Some(channel) = &entry.video.channel_id {
+            *views.entry(channel.clone()).or_default() += 1;
+        }
+    }
+    views
+}
+
+/// The channels I watch most: at least `min` videos, the `max` with most.
+pub fn favorite_channels(
+    views: &std::collections::HashMap<String, usize>,
+    min: usize,
+    max: usize,
+) -> std::collections::HashSet<String> {
+    let mut ranked: Vec<(&String, &usize)> = views.iter().filter(|(_, n)| **n >= min).collect();
+    ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    ranked.into_iter().take(max).map(|(id, _)| id.clone()).collect()
+}
+
 /// Seconds worth resuming from: not the first half minute, not the end.
 pub fn resume_point(position: f64, duration: Option<f64>) -> Option<u32> {
     const MARGIN: f64 = 30.0;

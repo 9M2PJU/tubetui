@@ -28,6 +28,13 @@ const PREFETCH_ROWS: usize = 5;
 const HISTORY_MAX: usize = 1000;
 /// How many of the last watched videos "Según lo que vi" draws from.
 const UP_NEXT_FROM: usize = 10;
+/// A favorite channel: one I opened at least this many videos of in the last
+/// days, among the ones I watch most.
+const FAVORITE_DAYS: i64 = 30;
+const FAVORITE_MIN: usize = 3;
+const FAVORITES_MAX: usize = 10;
+/// Videos of my favorite channels go first in Suscripciones while this recent.
+const FAVORITE_FRESH_DAYS: i64 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -154,12 +161,13 @@ pub enum Setting {
     HideWatched,
     HideShorts,
     NotifyNew,
+    FavoritesFirst,
     CheckUpdates,
     EditFile,
 }
 
 impl Setting {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::Browser,
         Self::ImportCookies,
         Self::Refresh,
@@ -185,6 +193,7 @@ impl Setting {
         Self::HideWatched,
         Self::HideShorts,
         Self::NotifyNew,
+        Self::FavoritesFirst,
         Self::CheckUpdates,
         Self::EditFile,
     ];
@@ -220,6 +229,7 @@ impl Setting {
             }
             Self::HideShorts => ("Ocultar los Shorts", "Hide Shorts"),
             Self::NotifyNew => ("Avisar de videos nuevos de mis canales", "Tell me about new videos from my channels"),
+            Self::FavoritesFirst => ("Primero mis canales más vistos", "My most watched channels first"),
             Self::CheckUpdates => ("Buscar versiones nuevas (una vez por día)", "Look for new versions (once a day)"),
             Self::EditFile => ("Editar config.toml", "Edit config.toml"),
         };
@@ -706,6 +716,8 @@ struct Pending {
     filter: Filter,
     push: bool,
     kind: ListKind,
+    /// My favorite channels go first (Suscripciones, Mis canales).
+    favorites_first: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -739,6 +751,9 @@ pub struct State {
     pub fresh_shown: HashSet<String>,
     /// Weight and length of the videos looked at, by id.
     pub sizes: HashMap<String, Size>,
+    /// Videos I opened of each channel lately, and the channels I watch most.
+    pub channel_views: HashMap<String, usize>,
+    pub favorites: HashSet<String>,
     /// Unix time, kept current by the runtime (history dates).
     pub clock: i64,
     /// Ids of my channels.
@@ -797,6 +812,8 @@ impl State {
             fresh: Vec::new(),
             fresh_shown: HashSet::new(),
             sizes: HashMap::new(),
+            channel_views: HashMap::new(),
+            favorites: HashSet::new(),
             clock: 0,
             subs: HashSet::new(),
             ratings: HashMap::new(),
@@ -973,6 +990,10 @@ impl State {
             }
             Setting::NotifyNew => {
                 let (es, en) = on_off(self.config.ui.notify_new);
+                self.tr(es, en).into()
+            }
+            Setting::FavoritesFirst => {
+                let (es, en) = on_off(self.config.ui.favorites_first);
                 self.tr(es, en).into()
             }
             Setting::FxStartup | Setting::FxPages | Setting::FxDialogs => {
@@ -1628,6 +1649,11 @@ impl State {
                 self.config.ui.notify_new = !self.config.ui.notify_new;
                 save("ui", "notify_new", SettingValue::Bool(self.config.ui.notify_new))
             }
+            Setting::FavoritesFirst => {
+                self.config.ui.favorites_first = !self.config.ui.favorites_first;
+                self.refresh_favorites();
+                save("ui", "favorites_first", SettingValue::Bool(self.config.ui.favorites_first))
+            }
             Setting::HideShorts => {
                 self.config.ui.hide_shorts = !self.config.ui.hide_shorts;
                 self.status = self.tr("Se aplica a las próximas listas", "Applies to the next lists").into();
@@ -1798,6 +1824,9 @@ impl State {
     fn load(&mut self, source: Source, title: String, filter: Filter, push: bool, kind: ListKind) -> Vec<Effect> {
         let limit = if filter == Filter::None { self.config.search.results } else { FILTERED_LIMIT };
         let id = self.request(title, filter, push, kind);
+        if let Some(pending) = &mut self.pending {
+            pending.favorites_first = matches!(source, Source::Subscriptions | Source::MyChannels);
+        }
         vec![Effect::Load { id, source, limit }]
     }
 
@@ -1807,7 +1836,7 @@ impl State {
         self.next_request += 1;
         self.status = format!("{} {title}…", self.tr("Cargando", "Loading"));
         self.loading = Some(title.clone());
-        self.pending = Some(Pending { id, title, filter, push, kind });
+        self.pending = Some(Pending { id, title, filter, push, kind, favorites_first: false });
         id
     }
 
@@ -1873,6 +1902,16 @@ impl State {
                 Filter::Mine => videos.retain(mine),
                 Filter::NotMine => videos.retain(|v| v.channel_id.is_some() && !mine(v)),
             }
+            if pending.favorites_first {
+                self.favorites_first(videos);
+            }
+        }
+        if let Items::Channels(channels) = &mut items
+            && pending.favorites_first
+            && self.config.ui.favorites_first
+        {
+            // Most watched first; the rest keep their order.
+            channels.sort_by_key(|c| std::cmp::Reverse(self.channel_views.get(&c.id).copied().unwrap_or(0)));
         }
         self.status = if items.is_empty() {
             self.tr("Sin resultados", "No results").into()
@@ -2353,7 +2392,33 @@ impl State {
     }
 
     /// Shown history lists follow `self.history`, the selection staying on its video.
+    /// Live videos, then the recent ones of my favorite channels, then the rest.
+    fn favorites_first(&self, videos: &mut [Video]) {
+        let recent = self.clock - FAVORITE_FRESH_DAYS * 86_400;
+        videos.sort_by_key(|v| match v.live {
+            crate::domain::Live::Now => 0,
+            _ if self.is_favorite(v) && v.published.is_some_and(|t| t >= recent) => 1,
+            _ => 2,
+        });
+    }
+
+    /// A video from one of the channels I watch most.
+    pub fn is_favorite(&self, video: &Video) -> bool {
+        video.channel_id.as_ref().is_some_and(|c| self.favorites.contains(c))
+    }
+
+    /// Counts again what I watched of each channel (after the history changes).
+    pub fn refresh_favorites(&mut self) {
+        self.channel_views = crate::domain::channel_views(&self.history, self.clock - FAVORITE_DAYS * 86_400);
+        self.favorites = if self.config.ui.favorites_first {
+            crate::domain::favorite_channels(&self.channel_views, FAVORITE_MIN, FAVORITES_MAX)
+        } else {
+            HashSet::new()
+        };
+    }
+
     fn sync_history(&mut self) {
+        self.refresh_favorites();
         let videos: Vec<Video> = self.history.iter().map(|e| e.video.clone()).collect();
         for listing in self.stack.iter_mut().filter(|l| l.kind == ListKind::History) {
             let current = match &listing.items {
@@ -2378,13 +2443,23 @@ impl State {
             self.known_subs = Some(videos.into_iter().map(|v| v.id).collect());
             return Vec::new();
         };
-        let new: Vec<Video> =
+        let mut new: Vec<Video> =
             videos.into_iter().filter(|v| known.insert(v.id.clone()) && !self.watched.contains(&v.id)).collect();
         if new.is_empty() {
             return Vec::new();
         }
+        // My favorite channels are named first.
+        new.sort_by_key(|v| !self.is_favorite(v));
+        let star = |v: &Video| if self.is_favorite(v) { "⭐ " } else { "" };
         let message = match new.as_slice() {
-            [one] => format!("🔔 {}: {}", one.channel, one.title),
+            [one] => format!("🔔 {}{}: {}", star(one), one.channel, one.title),
+            [first, ..] if self.is_favorite(first) => format!(
+                "🔔 ⭐ {}: {} (+{} {})",
+                first.channel,
+                first.title,
+                new.len() - 1,
+                self.tr("más de tus canales", "more from your channels")
+            ),
             many => format!(
                 "🔔 {} {}",
                 many.len(),
@@ -3588,6 +3663,57 @@ mod tests {
             [Effect::Load { source: Source::UpNext(ids), .. }, ..] => assert_eq!(ids, &["c", "b", "a"]),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn my_most_watched_channels_go_first() {
+        const DAY: i64 = 86_400;
+        let mut s = state();
+        s.clock = 100 * DAY;
+        let of = |id: &str, channel: &str, published: Option<i64>| Video {
+            channel_id: Some(channel.into()),
+            published,
+            ..video(id)
+        };
+        for id in ["f1", "f2", "f3"] {
+            s.remember(of(id, "UCfav", None), None);
+        }
+        s.remember(of("x", "UCone", None), None);
+        assert!(s.favorites.contains("UCfav") && !s.favorites.contains("UCone"), "3 videos or more");
+
+        let id = load_id(&open(&mut s, Section::Suscripciones));
+        let live = Video { live: crate::domain::Live::Now, ..of("live", "UCother", None) };
+        let videos = vec![
+            live,
+            of("other", "UCother", Some(99 * DAY)),
+            of("fav", "UCfav", Some(98 * DAY)),
+            of("fav-old", "UCfav", Some(80 * DAY)),
+        ];
+        s.update(Action::Loaded(id, Ok(Items::Videos(videos))));
+        let ids = |s: &State| match &s.listing().unwrap().items {
+            Items::Videos(v) => v.iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        assert_eq!(ids(&s), ["live", "fav", "other", "fav-old"], "an old one waits its turn");
+
+        let id = load_id(&open(&mut s, Section::Canales));
+        s.update(Action::Loaded(id, Ok(Items::Channels(vec![channel("UCone"), channel("UCx"), channel("UCfav")]))));
+        match &s.listing().unwrap().items {
+            Items::Channels(c) => {
+                assert_eq!(c.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["UCfav", "UCone", "UCx"])
+            }
+            other => panic!("{other:?}"),
+        }
+
+        s.update(Action::SubsPolled(Ok(Vec::new())));
+        let fresh = vec![of("n1", "UCother", Some(DAY)), of("n2", "UCfav", Some(DAY))];
+        match s.update(Action::SubsPolled(Ok(fresh))).as_slice() {
+            [Effect::Notify(message)] => assert!(message.starts_with("🔔 ⭐ chan n2"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+
+        change(&mut s, Setting::FavoritesFirst);
+        assert!(s.favorites.is_empty(), "turned off");
     }
 
     #[test]

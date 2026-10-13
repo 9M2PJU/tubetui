@@ -216,6 +216,8 @@ impl Runtime {
         state.update(Action::SubsLoaded(store::load_subs(&paths.subs)));
         state.update(Action::HistoryLoaded(store::load_watched(&paths.watched)));
         state.history = store::load_history(&paths.history);
+        state.clock = now();
+        state.refresh_favorites();
         state.set_downloads(store::load_downloads(&paths.downloads));
         let (tx, rx) = mpsc::channel();
         let runtime = Self {
