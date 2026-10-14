@@ -23,6 +23,8 @@ pub struct KeyContext {
     pub in_tab: bool,
     /// ... and its related list has the keys.
     pub related: bool,
+    /// The right-click menu is open.
+    pub context_menu: bool,
 }
 
 pub const SEEK_SECONDS: i32 = 5;
@@ -79,6 +81,7 @@ pub const WITH_MOUSE: &[(&str, Text)] = &[
     ("doble clic", Text::new("ver video · abrir canal · cambiar opción", "play · open channel · change option")),
     ("rueda", Text::new("moverse en la lista · en el video: volumen", "move in the list · on the video: volume")),
     ("clic video", Text::new("pausa (doble clic: pantalla completa)", "pause (double click: fullscreen)")),
+    ("clic der.", Text::new("opciones de lo que está debajo", "options for what is under it")),
     ("clic barra", Text::new("saltar a ese momento del video", "jump to that point of the video")),
     ("Shift", Text::new("mantenela para seleccionar y copiar texto", "hold it to select and copy text")),
 ];
@@ -135,6 +138,15 @@ pub fn map(key: KeyEvent, ctx: KeyContext) -> Option<Action> {
     }
     if ctx.confirm {
         return Some(Action::Confirm(matches!(key.code, KeyCode::Char('s' | 'S' | 'y' | 'Y'))));
+    }
+    if ctx.context_menu {
+        // Like the yes/no question: any other key closes it.
+        return Some(match key.code {
+            KeyCode::Up | KeyCode::Char('k') => Action::Up,
+            KeyCode::Down | KeyCode::Char('j') => Action::Down,
+            KeyCode::Enter | KeyCode::Char(' ') => Action::Enter,
+            _ => Action::Back,
+        });
     }
     if ctrl {
         return (key.code == KeyCode::Char('y')).then_some(Action::Prefix);
@@ -267,8 +279,15 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
-    const LISTS: KeyContext =
-        KeyContext { prefix: false, help: false, confirm: false, typing: false, in_tab: false, related: false };
+    const LISTS: KeyContext = KeyContext {
+        prefix: false,
+        help: false,
+        confirm: false,
+        typing: false,
+        in_tab: false,
+        related: false,
+        context_menu: false,
+    };
     const TYPING: KeyContext = KeyContext { typing: true, ..LISTS };
     const TAB: KeyContext = KeyContext { in_tab: true, ..LISTS };
     const PREFIXED: KeyContext = KeyContext { prefix: true, ..LISTS };

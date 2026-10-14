@@ -340,6 +340,23 @@ pub enum Confirm {
     },
 }
 
+/// The right-click menu: what can be done with what is under the pointer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextMenu {
+    /// The cell clicked: the menu opens there.
+    pub at: (u16, u16),
+    pub items: Vec<MenuItem>,
+    pub selected: usize,
+}
+
+/// One line of the right-click menu: what it says, its key, what it does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuItem {
+    pub label: &'static str,
+    pub key: &'static str,
+    pub action: Action,
+}
+
 /// A value written to `config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingValue {
@@ -494,6 +511,15 @@ pub enum Action {
     Select(usize),
     /// Move the list selection by this many rows (the mouse wheel).
     Scroll(isize),
+    /// Right click at this cell: the options of what was there. `row`: a row
+    /// of a list was clicked (else the video of the tab).
+    ContextMenu {
+        x: u16,
+        y: u16,
+        row: bool,
+    },
+    /// Do this line of the right-click menu.
+    MenuPick(usize),
     /// The video fills the whole terminal (or screen, in window mode).
     ToggleFullscreen,
     Quit,
@@ -761,6 +787,8 @@ pub struct State {
     /// How I rated the videos I opened or voted on.
     pub ratings: HashMap<String, Rating>,
     pub confirm: Option<Confirm>,
+    /// The right-click menu, while open.
+    pub context: Option<ContextMenu>,
     /// Local files marked (space) for the next delete.
     pub marked: HashSet<PathBuf>,
     /// A newer version, shown in "Acerca de".
@@ -818,6 +846,7 @@ impl State {
             subs: HashSet::new(),
             ratings: HashMap::new(),
             confirm: None,
+            context: None,
             marked: HashSet::new(),
             update: None,
             watched: HashSet::new(),
@@ -909,6 +938,7 @@ impl State {
             typing: self.prompt.is_some(),
             in_tab: self.active_tab().is_some(),
             related: self.on_related(),
+            context_menu: self.context.is_some(),
         }
     }
 
@@ -1017,6 +1047,9 @@ impl State {
 
     pub fn update(&mut self, action: Action) -> Vec<Effect> {
         self.prefix = matches!(action, Action::Prefix);
+        if let Some(effects) = self.in_context_menu(&action) {
+            return effects;
+        }
         let effects = self.apply(action);
         // Fullscreen belongs to a video tab; leaving it ends fullscreen.
         if self.active_tab().is_none() {
@@ -1095,6 +1128,8 @@ impl State {
                     focus => focus,
                 };
             }
+            Action::ContextMenu { x, y, row } => self.open_context_menu(x, y, row),
+            Action::MenuPick(_) => {}
             Action::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen && self.active_tab().is_some();
                 return self.command(PlayerCommand::Fullscreen(self.fullscreen));
@@ -2090,6 +2125,153 @@ impl State {
             }
             _ => None,
         }
+    }
+
+    /// While the right-click menu is open it takes the moves, Enter and Esc;
+    /// the rest (what arrives from the background) goes on as usual.
+    fn in_context_menu(&mut self, action: &Action) -> Option<Vec<Effect>> {
+        let menu = self.context.as_mut()?;
+        let last = menu.items.len().saturating_sub(1);
+        match *action {
+            Action::Up => menu.selected = menu.selected.checked_sub(1).unwrap_or(last),
+            Action::Down => menu.selected = if menu.selected >= last { 0 } else { menu.selected + 1 },
+            Action::Select(i) => menu.selected = i.min(last),
+            Action::Back => self.context = None,
+            Action::Enter | Action::MenuPick(_) => {
+                let i = if let Action::MenuPick(i) = *action { i } else { menu.selected };
+                let item = self.context.take().and_then(|m| m.items.into_iter().nth(i));
+                return Some(item.map(|item| self.update(item.action)).unwrap_or_default());
+            }
+            _ => return None,
+        }
+        Some(Vec::new())
+    }
+
+    fn open_context_menu(&mut self, x: u16, y: u16, row: bool) {
+        // The video of the tab, not its related list.
+        if !row && let Some(tab) = self.active_tab_mut() {
+            tab.on_related = false;
+        }
+        let items = self.context_items();
+        self.context = (!items.is_empty()).then_some(ContextMenu { at: (x, y), items, selected: 0 });
+    }
+
+    /// What the right-click menu offers for the selection (or the tab's video).
+    fn context_items(&self) -> Vec<MenuItem> {
+        let item = |es, en, key, action| MenuItem { label: self.tr(es, en), key, action };
+        let mut items = Vec::new();
+        if let Some(tab) = self.active_tab() {
+            if self.on_related() {
+                items.push(item("Ver", "Play", "Enter", Action::Enter));
+                items.push(item("Solo audio", "Sound only", "a", Action::Listen));
+                items.extend(self.video_items());
+                return items;
+            }
+            if tab.ended {
+                items.push(item("Volver a verlo", "Play it again", "Enter", Action::Enter));
+            } else {
+                items.push(item("Pausa / seguir", "Pause / resume", "espacio", Action::TogglePause));
+                if !tab.playback.audio_only {
+                    items.push(item("Pantalla completa", "Fullscreen", "f", Action::ToggleFullscreen));
+                }
+                items.push(item("Silenciar", "Mute", "m", Action::ToggleMute));
+                items.push(item("Subtítulos", "Subtitles", "j", Action::CycleSubtitles));
+            }
+            if tab.playback.video.is_some() {
+                items.push(if tab.playback.audio_only {
+                    item("Volver al video", "Back to the video", "a", Action::Listen)
+                } else {
+                    item("Solo audio", "Sound only", "a", Action::Listen)
+                });
+                items.extend(self.video_items());
+            }
+            items.push(item("Cerrar la pestaña", "Close the tab", "Ctrl+y x", Action::CloseTab));
+            return items;
+        }
+        let Some(listing) = self.listing().filter(|_| self.focus == Focus::List) else { return items };
+        let selected = listing.selected;
+        match &listing.items {
+            Items::Videos(videos) if videos.get(selected).is_some() => {
+                if listing.kind == ListKind::History {
+                    items.push(item("Ver (sigue donde quedó)", "Play (resumes)", "Enter", Action::Enter));
+                } else {
+                    items.push(item("Ver", "Play", "Enter", Action::Enter));
+                }
+                items.push(item("Solo audio", "Sound only", "a", Action::Listen));
+                items.extend(self.video_items());
+                if listing.kind == ListKind::History {
+                    items.push(item("Quitar del historial", "Remove from history", "x", Action::Trash));
+                }
+            }
+            Items::Channels(channels) if channels.get(selected).is_some() => {
+                items.push(item("Ver sus videos", "Its videos", "Enter", Action::Enter));
+                items.extend(self.subscribe_item());
+            }
+            Items::Playlists(playlists) if playlists.get(selected).is_some() => {
+                items.push(item("Ver sus videos", "Its videos", "Enter", Action::Enter));
+                items.push(item("Borrar la lista", "Delete the playlist", "x", Action::Trash));
+            }
+            Items::Files(files, kind) if files.get(selected).is_some() => {
+                items.push(match kind {
+                    MediaKind::Music => item("Escuchar desde acá", "Play from here", "Enter", Action::Enter),
+                    MediaKind::Video => item("Ver", "Play", "Enter", Action::Enter),
+                });
+                items.push(item("Marcar / desmarcar", "Mark / unmark", "espacio", Action::ToggleMark));
+                items.push(item("A la papelera", "To the trash", "x", Action::Trash));
+            }
+            Items::Downloads(downloads) => match downloads.get(selected).map(|d| &d.state) {
+                Some(DownloadState::Done(_)) => {
+                    items.push(item("Ver", "Play", "Enter", Action::Enter));
+                    items.push(item("Quitar de la lista", "Remove from the list", "x", Action::Trash));
+                }
+                Some(_) => items.push(item("Cancelar / quitar", "Cancel / remove", "x", Action::Trash)),
+                None => {}
+            },
+            Items::Profiles(profiles) if profiles.get(selected).is_some() => {
+                items.push(item("Usar esta sesión", "Use this login", "Enter", Action::Enter));
+            }
+            Items::Settings => items.push(item("Cambiar", "Change", "Enter", Action::Enter)),
+            _ => {}
+        }
+        if self.stack.len() > 1 {
+            items.push(item("Volver", "Back", "Esc", Action::Back));
+        }
+        items
+    }
+
+    /// What can be done with the selected YouTube video.
+    fn video_items(&self) -> Vec<MenuItem> {
+        let item = |es, en, key, action| MenuItem { label: self.tr(es, en), key, action };
+        let Some(video) = self.selected_video() else { return Vec::new() };
+        let mut items = vec![
+            if self.later.iter().any(|v| v.id == video.id) {
+                item("Quitar de Ver después", "Remove from Watch later", "l", Action::ToggleLater)
+            } else {
+                item("Ver después", "Watch later", "l", Action::ToggleLater)
+            },
+            item("Descargar", "Download", "d", Action::Download),
+            if self.ratings.get(&video.id) == Some(&Rating::Like) {
+                item("Quitar el me gusta", "Remove the like", "g", Action::Rate(Rating::Like))
+            } else {
+                item("Me gusta", "Like", "g", Action::Rate(Rating::Like))
+            },
+        ];
+        if self.selected_channel().is_some_and(|(_, _, url)| url.is_some()) {
+            items.push(item("Ir al canal", "Go to the channel", "c", Action::OpenChannel));
+        }
+        items.extend(self.subscribe_item());
+        items
+    }
+
+    /// Subscribe to (or leave) the selected channel, if there is one.
+    fn subscribe_item(&self) -> Option<MenuItem> {
+        let (id, ..) = self.selected_channel()?;
+        let (es, en) = if self.subs.contains(&id) {
+            ("Desuscribirse (pide confirmar)", "Unsubscribe (asks first)")
+        } else {
+            ("Suscribirse", "Subscribe")
+        };
+        Some(MenuItem { label: self.tr(es, en), key: "s", action: Action::ToggleSubscription })
     }
 
     fn toggle_later(&mut self) -> Vec<Effect> {
@@ -3755,6 +3937,39 @@ mod tests {
         let r1 = s.tabs[0].id;
         s.update(Action::PlayerClosed(r1, None));
         assert!(s.tabs.is_empty(), "embedded: nothing left to show");
+    }
+
+    #[test]
+    fn a_right_click_offers_what_can_be_done_there() {
+        let mut s = with_videos(&["a", "b"]);
+        s.update(Action::GoTab(0));
+        s.update(Action::Select(1));
+        s.update(Action::ContextMenu { x: 3, y: 4, row: true });
+        let menu = s.context.as_ref().expect("a menu");
+        assert_eq!(menu.at, (3, 4));
+        assert_eq!(menu.items[0].action, Action::Enter);
+        assert!(menu.items.iter().any(|i| i.action == Action::Download));
+        // Moves stay in the menu; the background goes on.
+        s.update(Action::Down);
+        s.update(Action::Sized("a".into(), Err("falló".into())));
+        assert_eq!(s.context.as_ref().unwrap().selected, 1);
+        assert_eq!(s.listing().unwrap().selected, 1, "the list did not move");
+        let later = s.context.as_ref().unwrap().items.iter().position(|i| i.action == Action::ToggleLater).unwrap();
+        s.update(Action::MenuPick(later));
+        assert!(s.context.is_none());
+        assert_eq!(s.later[0].id, "b", "done to the clicked video");
+        s.update(Action::ContextMenu { x: 0, y: 0, row: true });
+        assert_eq!(s.context.as_ref().unwrap().items[1].label, "Solo audio");
+        assert!(s.context.as_ref().unwrap().items.iter().any(|i| i.label == "Quitar de Ver después"));
+        s.update(Action::Back);
+        assert!(s.context.is_none() && s.listing().is_some(), "Esc closes only the menu");
+
+        let a = play(&mut s, 0);
+        s.update(Action::ContextMenu { x: 0, y: 0, row: false });
+        let actions: Vec<_> = s.context.as_ref().unwrap().items.iter().map(|i| i.action.clone()).collect();
+        assert_eq!(actions[0], Action::TogglePause);
+        assert_eq!(actions.last(), Some(&Action::CloseTab));
+        assert_eq!(s.update(Action::MenuPick(actions.len() - 1)), [Effect::Close(a)]);
     }
 
     #[test]

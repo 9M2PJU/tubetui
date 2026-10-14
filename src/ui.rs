@@ -9,7 +9,9 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Tabs};
 
-use crate::app::{Confirm, Focus, Group, ListKind, Listing, Prompt, Section, Setting, State, Tab, language_label};
+use crate::app::{
+    Confirm, ContextMenu, Focus, Group, ListKind, Listing, Prompt, Section, Setting, State, Tab, language_label,
+};
 use crate::config::{IconSet, donations};
 use crate::doctor::{Manager, Tool};
 use crate::domain::{Channel, Download, DownloadState, Live, Playlist, Size, Video, clock, date_labels};
@@ -248,6 +250,8 @@ pub enum Spot {
     Video,
     /// A second on the progress bar.
     Progress(u32),
+    /// A line of the right-click menu.
+    MenuItem(usize),
 }
 
 /// What is at cell (`x`, `y`), laid out as [`draw`] does it.
@@ -255,6 +259,10 @@ pub fn spot(state: &State, playing: Option<&Info>, screen: Rect, x: u16, y: u16)
     let at = Position::new(x, y);
     if state.help || state.confirm.is_some() {
         return None;
+    }
+    if let Some(menu) = &state.context {
+        let inner = Block::bordered().inner(context_area(menu, screen));
+        return inner.contains(at).then(|| Spot::MenuItem(usize::from(y - inner.y)));
     }
     if state.fullscreen {
         return Some(Spot::Video);
@@ -327,10 +335,29 @@ pub fn video_area(state: &State, area: Rect) -> Option<Rect> {
         return None;
     }
     state.active_tab().filter(|t| !t.playback.audio_only)?;
-    if state.fullscreen {
-        return Some(area);
+    let cells = if state.fullscreen { area } else { Block::bordered().inner(areas(area, state.sidebar).content) };
+    under_context_menu(state, area, cells)
+}
+
+/// `cells`, unless the right-click menu falls on them (an image would hide it).
+fn under_context_menu(state: &State, screen: Rect, cells: Rect) -> Option<Rect> {
+    let covered = state.context.as_ref().is_some_and(|menu| context_area(menu, screen).intersects(cells));
+    (!covered).then_some(cells)
+}
+
+/// Where the right-click menu is drawn: at the pointer, inside the screen.
+pub fn context_area(menu: &ContextMenu, screen: Rect) -> Rect {
+    let widest = menu.items.iter().map(|i| Span::raw(i.label).width() + Span::raw(i.key).width()).max();
+    let width = (widest.unwrap_or(0) as u16 + 7).min(screen.width);
+    let height = (menu.items.len() as u16 + 2).min(screen.height);
+    // One row below the pointer, so what was clicked stays in sight.
+    let (x, y) = menu.at;
+    Rect {
+        x: x.min(screen.right().saturating_sub(width)),
+        y: (y + 1).min(screen.bottom().saturating_sub(height)),
+        width,
+        height,
     }
-    Some(Block::bordered().inner(areas(area, state.sidebar).content))
 }
 
 pub fn draw(frame: &mut Frame, state: &State, view: &View) {
@@ -416,6 +443,9 @@ pub fn draw(frame: &mut Frame, state: &State, view: &View) {
     }
     if let Some(confirm) = &state.confirm {
         draw_confirm(frame, confirm, lang);
+    }
+    if let Some(menu) = &state.context {
+        draw_context_menu(frame, menu, lang);
     }
 }
 
@@ -770,12 +800,13 @@ pub fn thumbnail_area(state: &State, screen: Rect) -> Option<(String, Rect)> {
     if let Some(tab) = state.active_tab() {
         let video = tab.playback.video.as_ref().filter(|_| state.details_shown(tab) && !state.fullscreen)?;
         let inner = Block::bordered().inner(areas(screen, state.sidebar).content);
-        return Some((video.id.clone(), watch_layout(inner).thumbnail)).filter(|(_, cells)| cells.height > 0);
+        let cells = watch_layout(inner).thumbnail;
+        return under_context_menu(state, screen, cells).filter(|c| c.height > 0).map(|c| (video.id.clone(), c));
     }
     let video = state.videos_from_selection(0).first()?;
     let (_, list) = split_prompt(state, areas(screen, state.sidebar).content);
     let (_, preview) = split_preview(list);
-    Some((video.id.clone(), thumbnail_cells(preview?)))
+    Some((video.id.clone(), under_context_menu(state, screen, thumbnail_cells(preview?))?))
 }
 
 fn draw_inicio(frame: &mut Frame, state: &State, icons: &Icons, view: &View, area: Rect) {
@@ -1334,6 +1365,12 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
         vec![yes, key(lang.pick("otra tecla", "other key"), "no", "no")]
     } else if state.help {
         vec![key(lang.pick("cualquier tecla", "any key"), "cerrar la ayuda", "close the help")]
+    } else if state.context.is_some() {
+        vec![
+            key("↑ ↓", "elegir", "choose"),
+            key(lang.pick("Enter / clic", "Enter / click"), "hacerlo", "do it"),
+            key("Esc", "cerrar", "close"),
+        ]
     } else if state.prefix {
         let mut keys = vec![key("Ctrl+y +", "ahora la tecla:", "now the key:")];
         keys.extend(keymap::prefix_rows(lang));
@@ -1595,6 +1632,28 @@ fn draw_confirm(frame: &mut Frame, confirm: &Confirm, lang: Lang) {
     let title = lang.pick(" Confirmar ", " Confirm ");
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel(title, RED)), area);
+}
+
+/// The right-click menu: each option with its key, the chosen one lit.
+fn draw_context_menu(frame: &mut Frame, menu: &ContextMenu, lang: Lang) {
+    let area = context_area(menu, frame.area());
+    let block = panel(lang.pick(" Opciones ", " Options "), MAGENTA);
+    let width = usize::from(block.inner(area).width);
+    let lines: Vec<Line> = menu
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let gap = width.saturating_sub(Span::raw(item.label).width() + Span::raw(item.key).width() + 2);
+            let line = Line::from(vec![
+                Span::raw(format!(" {}{}", item.label, " ".repeat(gap))),
+                Span::styled(format!("{} ", item.key), Style::new().fg(MUTED)),
+            ]);
+            if i == menu.selected { line.style(Style::new().bg(HIGHLIGHT).fg(BLUE).bold()) } else { line }
+        })
+        .collect();
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// What the system has and lacks, with the command that installs it.

@@ -392,7 +392,7 @@ impl Runtime {
                         };
                         let playing = self.state.active_tab().and_then(|t| self.players.get(&t.id)).map(Player::info);
                         let spot = ui::spot(&self.state, playing.as_ref(), terminal.size()?.into(), m.column, m.row);
-                        pending.extend(mouse::actions(&self.state, spot, m.kind, double));
+                        pending.extend(mouse::actions(&self.state, spot, m.kind, double, (m.column, m.row)));
                     }
                     // No `terminal.clear()`: it asks the terminal for the cursor
                     // position and, with kitty busy drawing video, can wait 2 s
@@ -686,6 +686,8 @@ impl Runtime {
             }
             Effect::Download { id, video } => {
                 let dir = self.download_dir();
+                // Hidden, so Mis videos does not list it.
+                let temp = dir.join(format!(".tubetui-{}-{id}", std::process::id()));
                 let player = &self.state.config.player;
                 let (format, sub_lang) = (player::ytdl_format(player, Mode::Window), player.sub_lang.clone());
                 let cookies = self.cookies.clone();
@@ -699,6 +701,7 @@ impl Runtime {
                         &format,
                         &sub_lang,
                         &dir,
+                        &temp,
                         copy.as_ref().map(session::JarCopy::path),
                     );
                     let mut reported: Option<Instant> = None;
@@ -708,6 +711,8 @@ impl Runtime {
                             let _ = tx.send(Action::DownloadProgress { id, permille, speed, eta });
                         }
                     });
+                    // Done, failed or cancelled: the pieces left are of no use.
+                    let _ = std::fs::remove_dir_all(&temp);
                     Action::Downloaded { id, result: result.map_err(|e| e.to_string()) }
                 });
             }

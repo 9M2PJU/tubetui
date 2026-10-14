@@ -56,7 +56,9 @@ Every video opens in its own tab.
 - A **progress bar** under the video (played, downloaded, rest) and its
   volume, resolution and codec on top
 - **Mouse**: click to select, double click to open, wheel to scroll (on the
-  video: volume), click the video to pause, the progress bar to jump
+  video: volume), click the video to pause, the progress bar to jump.
+  **Right click** opens a menu with what can be done there: play, sound only,
+  watch later, download, like, channel, subscribe, close the tab, delete…
 - **Subscribe / unsubscribe** (`s`, unsubscribing asks first), **like /
   dislike** (`g` / `G`, again takes it back), **watch later** (`l`),
   **download** with subtitles (`d`), open the **channel** (`c`)
@@ -86,8 +88,9 @@ Every video opens in its own tab.
 - **Mis videos** and **Mi música** list the files in the folders you choose
   (several per kind); music plays from the chosen song to the end of the list
 - **Descargas**: what you download with `d`, with live progress, speed and
-  time left, and its size. `x` cancels one (or removes a finished one from the list, the
-  file stays), `Enter` plays the file. Quitting with downloads running asks
+  time left, and its size. `x` cancels one (its half-downloaded pieces are
+  deleted) or removes a finished one from the list (the file stays), `Enter`
+  plays the file. Quitting with downloads running asks
   first
 
 **Account and settings**
@@ -169,7 +172,8 @@ Global commands use a **`Ctrl+y` prefix** (tmux style): press `Ctrl+y`, then:
 With the mouse: click selects (menu sections and tabs open), double click
 plays / opens, the wheel scrolls lists and sets the volume over the video,
 a click on the video pauses (double click: fullscreen), a click on the
-progress bar jumps there. Hold Shift to select text.
+progress bar jumps there. A right click opens the options of what is under
+it (each with its key). Hold Shift to select text.
 
 In lists: `↑↓` / `jk`, `Enter`, `Esc` to go back, `Tab` menu ↔ list,
 `l` watch later, `s` subscribe, `g` / `G` like / dislike, `d` download, `c` channel, `a` play as

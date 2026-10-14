@@ -980,7 +980,16 @@ pub fn compact(n: u64) -> String {
 /// (read by `domain::parse_progress`).
 pub const PROGRESS_PREFIX: &str = "tubetui ";
 
-pub fn download_args(url: &str, format: &str, sub_lang: &str, dir: &Path, cookies: Option<&Path>) -> Vec<String> {
+/// Pieces go to `temp` (one folder per download) and only the finished files
+/// to `dir`: a cancelled download leaves nothing behind once `temp` is gone.
+pub fn download_args(
+    url: &str,
+    format: &str,
+    sub_lang: &str,
+    dir: &Path,
+    temp: &Path,
+    cookies: Option<&Path>,
+) -> Vec<String> {
     let mut args: Vec<String> = vec!["-f".into(), format.into(), "--no-playlist".into()];
     // Progress lines, then the final file, on stdout.
     args.extend(["--newline", "--progress", "--progress-template"].map(String::from));
@@ -990,7 +999,9 @@ pub fn download_args(url: &str, format: &str, sub_lang: &str, dir: &Path, cookie
     args.extend(["--print", "after_move:filepath"].map(String::from));
     args.extend(["--write-subs", "--write-auto-subs", "--sub-langs"].map(String::from));
     args.push(sub_lang.into());
-    args.extend(["-o".into(), dir.join("%(title)s.%(ext)s").display().to_string()]);
+    args.extend(["-P".into(), format!("home:{}", dir.display())]);
+    args.extend(["-P".into(), format!("temp:{}", temp.display())]);
+    args.extend(["-o".into(), "%(title)s.%(ext)s".into()]);
     if let Some(cookies) = cookies {
         args.extend(["--cookies".into(), cookies.display().to_string()]);
     }
@@ -1279,12 +1290,12 @@ mod tests {
 
     #[test]
     fn download_args_include_subs_and_output_dir() {
-        let args = download_args("URL", "best", "es", Path::new("/v"), None);
+        let args = download_args("URL", "best", "es", Path::new("/v"), Path::new("/v/.tubetui-3"), None);
         assert_eq!(args.last().unwrap(), "URL");
         let joined = args.join(" ");
         assert!(joined.contains("-f best"));
         assert!(joined.contains("--sub-langs es"));
-        assert!(joined.contains("-o /v/%(title)s.%(ext)s"));
+        assert!(joined.contains("-P home:/v -P temp:/v/.tubetui-3 -o %(title)s.%(ext)s"), "pieces apart");
         assert!(joined.contains("--print after_move:filepath"), "the final file, to play it");
         assert!(joined.contains(&format!("--progress-template download:{PROGRESS_PREFIX}%(progress._percent_str)s|")));
     }
