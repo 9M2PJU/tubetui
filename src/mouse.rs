@@ -17,6 +17,12 @@ pub fn actions(
     double: bool,
     (x, y): (u16, u16),
 ) -> Vec<Action> {
+    if state.splash {
+        return match kind {
+            MouseEventKind::Down(_) => vec![Action::EndSplash],
+            _ => Vec::new(),
+        };
+    }
     if state.help {
         // Like any key: a click closes the help.
         return match kind {

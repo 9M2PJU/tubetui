@@ -43,6 +43,8 @@ const THUMBS_AHEAD: usize = 10;
 const FRAME: Duration = Duration::from_millis(33);
 /// How often an overlay follows the terminal window when it moves.
 const OVERLAY_FOLLOW: Duration = Duration::from_millis(500);
+/// How long the opening logo stays (a key skips it).
+const SPLASH: Duration = Duration::from_millis(1600);
 /// Two clicks on the same cell within this time are a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// How often my channels are checked for new videos (`ui.notify_new`), and
@@ -218,6 +220,7 @@ impl Runtime {
         state.history = store::load_history(&paths.history);
         state.clock = now();
         state.refresh_favorites();
+        state.splash = state.config.ui.splash;
         state.set_downloads(store::load_downloads(&paths.downloads));
         let (tx, rx) = mpsc::channel();
         let runtime = Self {
@@ -280,7 +283,12 @@ impl Runtime {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
         let mut dirty = true;
         let mut was_opening = false;
+        let splash_end = Instant::now() + SPLASH;
         while !self.state.quit {
+            if self.state.splash && Instant::now() >= splash_end {
+                self.state.update(Action::EndSplash);
+                dirty = true;
+            }
             // Animate the loading indicator.
             match (&self.state.loading, self.loading_since) {
                 (Some(_), None) => self.loading_since = Some(Instant::now()),

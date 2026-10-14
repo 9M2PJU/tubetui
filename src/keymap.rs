@@ -25,6 +25,8 @@ pub struct KeyContext {
     pub related: bool,
     /// The right-click menu is open.
     pub context_menu: bool,
+    /// The opening logo is shown: any key skips it.
+    pub splash: bool,
 }
 
 pub const SEEK_SECONDS: i32 = 5;
@@ -132,6 +134,9 @@ pub fn map(key: KeyEvent, ctx: KeyContext) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     if ctrl && key.code == KeyCode::Char('c') {
         return Some(Action::Quit);
+    }
+    if ctx.splash {
+        return Some(Action::EndSplash);
     }
     if ctx.help {
         return Some(Action::ToggleHelp);
@@ -287,6 +292,7 @@ mod tests {
         in_tab: false,
         related: false,
         context_menu: false,
+        splash: false,
     };
     const TYPING: KeyContext = KeyContext { typing: true, ..LISTS };
     const TAB: KeyContext = KeyContext { in_tab: true, ..LISTS };

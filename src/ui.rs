@@ -63,7 +63,7 @@ pub struct Icons {
     /// In `Section::ALL` order.
     pub sections: [&'static str; 17],
     /// In `Setting::ALL` order.
-    pub settings: [&'static str; 28],
+    pub settings: [&'static str; 29],
     pub logo: &'static str,
     pub tab: &'static str,
     pub live: &'static str,
@@ -95,8 +95,8 @@ impl Icons {
 const EMOJI: Icons = Icons {
     sections: ["🏠", "🎯", "🧭", "📺", "🕒", "📜", "📚", "⭐", "💡", "🔎", "📡", "📼", "🎵", "📥", "🔧", "💜", "🚪"],
     settings: [
-        "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "⏩", "🗣", "😀", "🖼", "🖱", "✨", "🌊", "💥", "📼", "🎵",
-        "📁", "🏷", "🩺", "👁", "🩳", "🔔", "⭐", "⬆", "📝",
+        "👤", "📄", "🔄", "🚪", "🌐", "💬", "📐", "🎬", "🎧", "⏩", "🗣", "😀", "🖼", "🖱", "🎞", "✨", "🌊", "💥", "📼",
+        "🎵", "📁", "🏷", "🩺", "👁", "🩳", "🔔", "⭐", "⬆", "📝",
     ],
     logo: "▶️",
     tab: "🎬",
@@ -136,9 +136,9 @@ const NERD: Icons = Icons {
     ],
     settings: [
         "\u{f007}", "\u{f15b}", "\u{f021}", "\u{f08b}", "\u{f1ab}", "\u{f075}", "\u{f1de}", "\u{f008}", "\u{f025}",
-        "\u{f051}", "\u{f0ac}", "\u{f118}", "\u{f03e}", "\u{f245}", "\u{f0d0}", "\u{f0e7}", "\u{f0a1}", "\u{f03d}",
-        "\u{f001}", "\u{f07b}", "\u{f02c}", "\u{f0f1}", "\u{f06e}", "\u{f10b}", "\u{f0f3}", "\u{f005}", "\u{f01b}",
-        "\u{f044}",
+        "\u{f051}", "\u{f0ac}", "\u{f118}", "\u{f03e}", "\u{f245}", "\u{f04b}", "\u{f0d0}", "\u{f0e7}", "\u{f0a1}",
+        "\u{f03d}", "\u{f001}", "\u{f07b}", "\u{f02c}", "\u{f0f1}", "\u{f06e}", "\u{f10b}", "\u{f0f3}", "\u{f005}",
+        "\u{f01b}", "\u{f044}",
     ],
     logo: "\u{f16a}",
     tab: "\u{f144}",
@@ -159,8 +159,8 @@ const NERD: Icons = Icons {
 const UNICODE: Icons = Icons {
     sections: ["⌂", "◈", "◎", "▣", "◷", "↺", "≣", "★", "✧", "⌕", "⌁", "▷", "♫", "⇩", "⚙", "♥", "⏻"],
     settings: [
-        "☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "»", "⚑", "☻", "▨", "➚", "✦", "≈", "✸", "▷", "♫", "▭", "#", "✚",
-        "◉", "▯", "♪", "★", "↑", "✎",
+        "☺", "▤", "↻", "⏻", "⇄", "≡", "▦", "▶", "♪", "»", "⚑", "☻", "▨", "➚", "◆", "✦", "≈", "✸", "▷", "♫", "▭", "#",
+        "✚", "◉", "▯", "♪", "★", "↑", "✎",
     ],
     logo: "▶",
     tab: "▶",
@@ -257,7 +257,7 @@ pub enum Spot {
 /// What is at cell (`x`, `y`), laid out as [`draw`] does it.
 pub fn spot(state: &State, playing: Option<&Info>, screen: Rect, x: u16, y: u16) -> Option<Spot> {
     let at = Position::new(x, y);
-    if state.help || state.confirm.is_some() {
+    if state.splash || state.help || state.confirm.is_some() {
         return None;
     }
     if let Some(menu) = &state.context {
@@ -331,7 +331,7 @@ fn list_row(inner: Rect, selected: usize, len: usize, at: Position) -> Option<Sp
 /// The cells the embedded video may cover: the active video tab, unless a
 /// dialog is open (kitty draws images above text, it would hide the dialog).
 pub fn video_area(state: &State, area: Rect) -> Option<Rect> {
-    if state.help || state.confirm.is_some() {
+    if state.splash || state.help || state.confirm.is_some() {
         return None;
     }
     state.active_tab().filter(|t| !t.playback.audio_only)?;
@@ -363,6 +363,10 @@ pub fn context_area(menu: &ContextMenu, screen: Rect) -> Rect {
 pub fn draw(frame: &mut Frame, state: &State, view: &View) {
     let icons = icons(state.config.ui.icons);
     let lang = state.lang();
+    if state.splash {
+        draw_splash(frame, lang);
+        return;
+    }
     if state.fullscreen {
         // Nothing but the video (embedded) or a hint (window mode).
         if !view.embedded {
@@ -794,7 +798,7 @@ fn thumbnail_cells(preview: Rect) -> Rect {
 
 /// Where the thumbnail of the selected video goes, with that video's id.
 pub fn thumbnail_area(state: &State, screen: Rect) -> Option<(String, Rect)> {
-    if state.help || state.confirm.is_some() || state.prompt == Some(Prompt::CookiesFile) {
+    if state.splash || state.help || state.confirm.is_some() || state.prompt == Some(Prompt::CookiesFile) {
         return None;
     }
     if let Some(tab) = state.active_tab() {
@@ -1634,6 +1638,88 @@ fn draw_confirm(frame: &mut Frame, confirm: &Confirm, lang: Lang) {
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(panel(title, RED)), area);
 }
 
+/// "tubetui" in big letters (toilet's smmono12 font, 5 cells a letter).
+const LOGO: [&str; 7] = [
+    "          ▗▖                    █  ",
+    " ▐▌       ▐▌         ▐▌         ▀  ",
+    "▐███ ▐▌ ▐▌▐▙█▙  ▟█▙ ▐███ ▐▌ ▐▌ ██  ",
+    " ▐▌  ▐▌ ▐▌▐▛ ▜▌▐▙▄▟▌ ▐▌  ▐▌ ▐▌  █  ",
+    " ▐▌  ▐▌ ▐▌▐▌ ▐▌▐▛▀▀▘ ▐▌  ▐▌ ▐▌  █  ",
+    " ▐▙▄ ▐▙▄█▌▐█▄█▘▝█▄▄▌ ▐▙▄ ▐▙▄█▌▗▄█▄▖",
+    "  ▀▀  ▀▀▝▘▝▘▀▘  ▝▀▀   ▀▀  ▀▀▝▘▝▀▀▀▘",
+];
+/// YouTube's red, for the play button.
+const YOUTUBE_RED: Color = Color::Rgb(255, 0, 51);
+
+/// The red play button: a rounded box with a white triangle, drawn with half blocks.
+fn play_button() -> Vec<Line<'static>> {
+    const WIDTH: usize = 20;
+    const START: usize = 6;
+    // Width of the triangle on each half row, top to bottom.
+    const HALVES: [usize; 10] = [2, 4, 6, 8, 9, 9, 8, 6, 4, 2];
+    let edge = |c: &str| Line::from(format!(" {} ", c.repeat(WIDTH - 2))).fg(YOUTUBE_RED);
+    let mut lines = vec![edge("▄")];
+    for row in 0..5 {
+        let cells: String = (0..WIDTH)
+            .map(|c| {
+                let inside = |half: usize| c >= START && c - START < HALVES[half];
+                match (inside(row * 2), inside(row * 2 + 1)) {
+                    (true, true) => '█',
+                    (true, false) => '▀',
+                    (false, true) => '▄',
+                    (false, false) => ' ',
+                }
+            })
+            .collect();
+        lines.push(Line::from(cells).fg(Color::White).bg(YOUTUBE_RED));
+    }
+    lines.push(edge("▀"));
+    lines
+}
+
+/// The logo for a moment when the app opens.
+fn draw_splash(frame: &mut Frame, lang: Lang) {
+    let area = frame.area();
+    let tagline = lang.pick("YouTube en tu terminal", "YouTube in your terminal");
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let skip = lang.pick("cualquier tecla para seguir", "any key to go on");
+    let text_width = LOGO.iter().map(|l| Span::raw(*l).width()).max().unwrap_or(0);
+    let width = 20 + 2 + text_width as u16;
+    if area.width < width || area.height < 12 {
+        let line = Line::from(vec![
+            Span::styled(" ▶ ", Style::new().fg(Color::White).bg(YOUTUBE_RED)),
+            Span::raw(" tubetui").bold(),
+        ]);
+        frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), centered(area, area.width, 1));
+        return;
+    }
+    let mut lines: Vec<Line> = play_button()
+        .into_iter()
+        .zip(LOGO)
+        .map(|(button, text)| {
+            // "tube" in the theme's text color, "tui" in red, like YouTube's logo.
+            let cut = text.char_indices().nth(20).map_or(text.len(), |(i, _)| i);
+            let mut spans = button.spans.into_iter().map(|s| s.patch_style(button.style)).collect::<Vec<_>>();
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(&text[..cut], Style::new().fg(FG).bold()));
+            spans.push(Span::styled(&text[cut..], Style::new().fg(YOUTUBE_RED).bold()));
+            Line::from(spans)
+        })
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from(vec![
+            Span::styled(tagline, Style::new().fg(BLUE)),
+            Span::styled(format!("  {version}"), Style::new().fg(MUTED)),
+        ])
+        .centered(),
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(skip).fg(MUTED).centered());
+    let height = lines.len() as u16;
+    frame.render_widget(Paragraph::new(lines), centered(area, width, height));
+}
+
 /// The right-click menu: each option with its key, the chosen one lit.
 fn draw_context_menu(frame: &mut Frame, menu: &ContextMenu, lang: Lang) {
     let area = context_area(menu, frame.area());
@@ -2024,6 +2110,18 @@ mod tests {
     fn window_mode_tab_explains_where_video_is() {
         assert!(render_with(&with_tab(), &View { embedded: false, ..VIEW }).contains("ventana de mpv"));
         assert!(!render(&with_tab()).contains("ventana de mpv"));
+    }
+
+    #[test]
+    fn the_logo_shows_alone_when_the_app_opens() {
+        let mut s = state();
+        s.splash = true;
+        let screen = render(&s);
+        assert!(screen.contains("YouTube en tu terminal") && screen.contains("▐███"), "{screen}");
+        assert!(!screen.contains("Inicio"), "only the logo");
+        assert_eq!(spot(&s, None, Rect::new(0, 0, 120, 40), 5, 5), None);
+        s.update(Action::EndSplash);
+        assert!(render(&s).contains("Inicio"));
     }
 
     #[test]

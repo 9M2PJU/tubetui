@@ -150,6 +150,7 @@ pub enum Setting {
     Icons,
     Thumbnails,
     Mouse,
+    Splash,
     FxStartup,
     FxPages,
     FxDialogs,
@@ -167,7 +168,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::Browser,
         Self::ImportCookies,
         Self::Refresh,
@@ -182,6 +183,7 @@ impl Setting {
         Self::Icons,
         Self::Thumbnails,
         Self::Mouse,
+        Self::Splash,
         Self::FxStartup,
         Self::FxPages,
         Self::FxDialogs,
@@ -216,6 +218,7 @@ impl Setting {
             Self::Icons => ("Íconos", "Icons"),
             Self::Thumbnails => ("Portadas de los videos (kitty)", "Video thumbnails (kitty)"),
             Self::Mouse => ("Mouse (para copiar texto: Shift)", "Mouse (to copy text: Shift)"),
+            Self::Splash => ("Logo al abrir la app", "Logo when the app opens"),
             Self::FxStartup => ("Animación al abrir la app", "Animation when the app starts"),
             Self::FxPages => ("Animación al cambiar de página", "Animation when the page changes"),
             Self::FxDialogs => ("Animación de ayuda y preguntas", "Animation of help and questions"),
@@ -520,6 +523,8 @@ pub enum Action {
     },
     /// Do this line of the right-click menu.
     MenuPick(usize),
+    /// The opening logo goes away (a key, a click or its time).
+    EndSplash,
     /// The video fills the whole terminal (or screen, in window mode).
     ToggleFullscreen,
     Quit,
@@ -754,6 +759,8 @@ pub struct State {
     pub help: bool,
     /// The active video fills the terminal.
     pub fullscreen: bool,
+    /// The logo shown when the app opens (set by the runtime), until a key or a moment passes.
+    pub splash: bool,
     pub focus: Focus,
     /// Selected entry of `Section::ALL`.
     pub menu: usize,
@@ -823,6 +830,7 @@ impl State {
         Self {
             sidebar: config.ui.sidebar,
             show_watched: !config.ui.hide_watched,
+            splash: false,
             focus: if config.ui.sidebar { Focus::Menu } else { Focus::List },
             config,
             prefix: false,
@@ -939,6 +947,7 @@ impl State {
             in_tab: self.active_tab().is_some(),
             related: self.on_related(),
             context_menu: self.context.is_some(),
+            splash: self.splash,
         }
     }
 
@@ -996,6 +1005,10 @@ impl State {
             }
             Setting::Mouse => {
                 let (es, en) = on_off(self.config.ui.mouse);
+                self.tr(es, en).into()
+            }
+            Setting::Splash => {
+                let (es, en) = on_off(self.config.ui.splash);
                 self.tr(es, en).into()
             }
             Setting::CheckUpdates => {
@@ -1130,6 +1143,7 @@ impl State {
             }
             Action::ContextMenu { x, y, row } => self.open_context_menu(x, y, row),
             Action::MenuPick(_) => {}
+            Action::EndSplash => self.splash = false,
             Action::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen && self.active_tab().is_some();
                 return self.command(PlayerCommand::Fullscreen(self.fullscreen));
@@ -1679,6 +1693,10 @@ impl State {
                 self.show_watched = !self.config.ui.hide_watched;
                 self.refilter_watched();
                 save("ui", "hide_watched", SettingValue::Bool(self.config.ui.hide_watched))
+            }
+            Setting::Splash => {
+                self.config.ui.splash = !self.config.ui.splash;
+                save("ui", "splash", SettingValue::Bool(self.config.ui.splash))
             }
             Setting::NotifyNew => {
                 self.config.ui.notify_new = !self.config.ui.notify_new;

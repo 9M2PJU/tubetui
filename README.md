@@ -238,6 +238,7 @@ icons = "emoji"          # emoji | nerd | unicode
 lang = "en"              # en | es (unset: the system language)
 thumbnails = true        # thumbnail in the preview panel (kitty)
 mouse = true             # clicks and wheel; hold Shift to select text
+splash = true            # the tubetui logo for a moment when it opens (any key skips it)
 check_updates = true     # once a day, tell me about new versions and how to install them here
 hide_shorts = true       # leave Shorts out of every list
 notify_new = true        # check my subscriptions every 15 minutes and tell me about new videos

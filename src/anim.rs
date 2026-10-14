@@ -24,6 +24,8 @@ pub struct Scene {
     pages: Vec<String>,
     dialog: bool,
     sidebar: bool,
+    /// The opening logo.
+    splash: bool,
 }
 
 impl Scene {
@@ -33,13 +35,16 @@ impl Scene {
             pages: state.stack.iter().map(|l| l.title.clone()).collect(),
             dialog: state.help || state.confirm.is_some(),
             sidebar: state.sidebar,
+            splash: state.splash,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transition {
-    /// The app just started.
+    /// The opening logo appears.
+    Splash,
+    /// The app just started (or its logo went away).
     Startup,
     /// Another list, section or tab in the content area.
     Page,
@@ -49,8 +54,14 @@ pub enum Transition {
 
 /// Which animation, if any, a change of scene deserves.
 pub fn transition(previous: Option<&Scene>, next: &Scene) -> Option<Transition> {
-    let Some(previous) = previous else { return Some(Transition::Startup) };
-    if next.dialog && !previous.dialog {
+    let Some(previous) = previous else {
+        return Some(if next.splash { Transition::Splash } else { Transition::Startup });
+    };
+    if previous.splash && !next.splash {
+        Some(Transition::Startup)
+    } else if next.splash {
+        None
+    } else if next.dialog && !previous.dialog {
         Some(Transition::Dialog)
     } else if !next.dialog && (next.active != previous.active || next.pages != previous.pages) {
         Some(Transition::Page)
@@ -78,7 +89,7 @@ impl Animations {
         self.scene = Some(scene);
         let effects = &state.config.effects;
         let enabled = |change| match change {
-            Transition::Startup => effects.startup,
+            Transition::Splash | Transition::Startup => effects.startup,
             Transition::Page => effects.pages,
             Transition::Dialog => effects.dialogs,
         };
@@ -90,6 +101,10 @@ impl Animations {
         let areas = ui::areas(screen, state.sidebar);
         let timer = |ms| (ms, Interpolation::QuadOut);
         match change {
+            Transition::Splash => {
+                let flash = fx::fade_from_fg(BACKGROUND, timer(700));
+                self.add(fx::parallel(&[fx::coalesce(timer(600)), flash]).with_area(screen));
+            }
             Transition::Startup => {
                 if let Some(sidebar) = areas.sidebar {
                     self.add(fx::sweep_in(Motion::UpToDown, 8, 0, BACKGROUND, timer(450)).with_area(sidebar));
@@ -128,12 +143,20 @@ mod tests {
     use super::*;
 
     fn scene(active: usize, pages: &[&str], dialog: bool) -> Scene {
-        Scene { active, pages: pages.iter().map(|p| p.to_string()).collect(), dialog, sidebar: true }
+        Scene { active, pages: pages.iter().map(|p| p.to_string()).collect(), dialog, sidebar: true, splash: false }
     }
 
     #[test]
     fn first_frame_is_the_startup() {
         assert_eq!(transition(None, &scene(0, &[], false)), Some(Transition::Startup));
+    }
+
+    #[test]
+    fn the_logo_comes_first_then_the_menu() {
+        let logo = Scene { splash: true, ..scene(0, &[], false) };
+        assert_eq!(transition(None, &logo), Some(Transition::Splash));
+        assert_eq!(transition(Some(&logo), &logo), None);
+        assert_eq!(transition(Some(&logo), &scene(0, &[], false)), Some(Transition::Startup));
     }
 
     #[test]

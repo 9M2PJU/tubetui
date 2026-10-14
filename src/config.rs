@@ -151,6 +151,8 @@ pub struct UiConfig {
     pub thumbnails: bool,
     /// Clicks and the wheel (selecting text then needs Shift).
     pub mouse: bool,
+    /// The tubetui logo for a moment when the app opens.
+    pub splash: bool,
     /// Ask GitHub once a day whether there is a newer version.
     pub check_updates: bool,
     /// Inicio, Descubrir and Suscripciones leave out the videos I watched
@@ -325,6 +327,7 @@ impl Default for UiConfig {
             lang: None,
             thumbnails: true,
             mouse: true,
+            splash: true,
             check_updates: true,
             hide_watched: true,
             hide_shorts: true,
