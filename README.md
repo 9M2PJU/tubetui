@@ -107,7 +107,8 @@ Every video opens in its own tab.
 
 ## Requirements
 
-- [`mpv`](https://mpv.io) and [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) in `PATH`
+- [`mpv`](https://mpv.io) and [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) in `PATH` (on Windows they are
+  also found where winget, scoop or the mpv installer leave them)
 - For embedded video: the [kitty](https://sw.kovidgoyal.net/kitty/) terminal
 - Optional: `wmctrl` (X11) for window fullscreen
 
@@ -124,8 +125,8 @@ Ready-made packages for every release are on the
 [GitHub Releases](https://github.com/polblancoo/tubetui/releases/latest):
 
 - **Windows**: `tubetui-x86_64-windows-setup.exe` (installs for your user,
-  adds tubetui to the PATH and the Start menu, and can install mpv and yt-dlp
-  with winget), or the portable `.zip`
+  adds tubetui to the PATH and the Start menu, and can install mpv (the official
+  build, `mpv-player.mpv-CI.MSVC`) and yt-dlp with winget), or the portable `.zip`
 - **Debian / Ubuntu / Mint**: `sudo apt install ./tubetui_amd64.deb`
 - **Other Linux**: `tubetui-x86_64-linux.tar.gz`
 - **macOS (Apple Silicon)**: `tubetui-aarch64-macos.tar.gz`

@@ -495,7 +495,12 @@ impl Player {
             Mode::Embedded => Stdio::inherit(), // frames go to our terminal
             Mode::Window | Mode::Overlay => Stdio::null(),
         };
-        let child = Command::new("mpv")
+        let mut command = Command::new(crate::doctor::program("mpv"));
+        // mpv asks yt-dlp for the streams: tell it where yt-dlp is if it is not on PATH.
+        if let Some(yt_dlp) = crate::doctor::find("yt-dlp") {
+            command.arg(format!("--script-opts=ytdl_hook-ytdl_path={}", yt_dlp.display()));
+        }
+        let child = command
             .args(mpv_args(launch, geometry, &ipc_path))
             .stdin(Stdio::null())
             .stdout(stdout)

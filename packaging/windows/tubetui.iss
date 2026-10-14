@@ -55,7 +55,7 @@ Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 Name: "{autoprograms}\tubetui"; Filename: "{app}\tubetui.exe"; WorkingDir: "{userdocs}"
 
 [Run]
-Filename: "winget"; Parameters: "install --id shinchiro.mpv -e --accept-source-agreements --accept-package-agreements"; StatusMsg: "{cm:Installing,mpv}"; Tasks: deps; Flags: waituntilterminated
+Filename: "winget"; Parameters: "install --id mpv-player.mpv-CI.MSVC -e --accept-source-agreements --accept-package-agreements"; StatusMsg: "{cm:Installing,mpv}"; Tasks: deps; Flags: waituntilterminated
 Filename: "winget"; Parameters: "install --id yt-dlp.yt-dlp -e --accept-source-agreements --accept-package-agreements"; StatusMsg: "{cm:Installing,yt-dlp}"; Tasks: deps; Flags: waituntilterminated
 
 [Registry]

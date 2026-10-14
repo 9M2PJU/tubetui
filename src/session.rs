@@ -267,7 +267,7 @@ pub fn refresh_cookies(spec: &str, path: &Path, force: bool, lang: Lang) -> Resu
     let fresh = sibling(path, "new");
     let _ = std::fs::remove_file(&fresh);
     // Any authenticated request makes yt-dlp write the jar; `-I 0` downloads nothing.
-    let output = Command::new("yt-dlp")
+    let output = Command::new(crate::doctor::program("yt-dlp"))
         .args(["-q", "--skip-download", "--flat-playlist", "-I", "0", "--cookies-from-browser", spec, "--cookies"])
         .arg(&fresh)
         .arg(":ytsubs")

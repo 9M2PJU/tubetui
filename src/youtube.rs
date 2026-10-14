@@ -870,7 +870,7 @@ pub fn size(url: &str, format: &str, cookies: Option<&Path>) -> Result<crate::do
 }
 
 fn run_yt_dlp(args: &[String]) -> Result<String, YoutubeError> {
-    let output = Command::new("yt-dlp").args(args).output()?;
+    let output = Command::new(crate::doctor::program("yt-dlp")).args(args).output()?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     // With --ignore-errors a partial list still comes back on stdout.
     if !output.status.success() && stdout.trim().is_empty() {
@@ -1019,8 +1019,12 @@ pub fn download(
 ) -> Result<std::path::PathBuf, YoutubeError> {
     use std::io::{BufRead, BufReader, Read};
     use std::process::Stdio;
-    let mut child =
-        Command::new("yt-dlp").args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut child = Command::new(crate::doctor::program("yt-dlp"))
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
     let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(YoutubeError::Failed("yt-dlp sin salida".into()));
     };

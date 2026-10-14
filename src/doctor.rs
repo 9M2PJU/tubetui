@@ -122,7 +122,7 @@ impl Tool {
         use Manager::*;
         Some(match (self, manager) {
             (_, Unknown) | (Self::Keyring, _) => return None,
-            (Self::Mpv, Winget) => "shinchiro.mpv",
+            (Self::Mpv, Winget) => "mpv-player.mpv-CI.MSVC",
             (Self::YtDlp, Winget) => "yt-dlp.yt-dlp",
             (Self::Ffmpeg, Winget) => "Gyan.FFmpeg",
             (Self::Kitty | Self::Xdotool | Self::Xwininfo | Self::Xprop | Self::Wmctrl, Winget) => return None,
@@ -273,12 +273,51 @@ fn check_keyring(manager: Manager) -> Check {
     check
 }
 
-/// The program on `PATH` (with Windows' `.exe`).
+/// The program on `PATH` (with Windows' `.exe`) or, on Windows, where the
+/// usual installers leave it without adding it to `PATH`.
 pub fn find(program: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
     let names =
         if cfg!(windows) { vec![format!("{program}.exe"), program.to_owned()] } else { vec![program.to_owned()] };
-    std::env::split_paths(&paths).flat_map(|dir| names.iter().map(move |n| dir.join(n))).find(|p| p.is_file())
+    let paths = std::env::var_os("PATH").unwrap_or_default();
+    let on_path = std::env::split_paths(&paths).flat_map(|dir| names.iter().map(move |n| dir.join(n)));
+    let installed = if cfg!(windows) { known_places(program, |key| std::env::var(key).ok()) } else { Vec::new() };
+    on_path.chain(installed).find(|p| p.is_file())
+}
+
+/// What to run: the program found, or its bare name (the error then says it is missing).
+pub fn program(name: &str) -> PathBuf {
+    find(name).unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// The folder winget unpacks `mpv-player.mpv-CI.MSVC` into.
+const WINGET_MPV: &str = "mpv-player.mpv-CI.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe";
+
+/// Where Windows installers put mpv and yt-dlp: winget (its links, its
+/// packages, the old "MPV Player" installer), a hand-made `C:\mpv`, scoop.
+fn known_places(program: &str, env: impl Fn(&str) -> Option<String>) -> Vec<PathBuf> {
+    let exe = format!("{program}.exe");
+    let under = |key: &str, dirs: &[&str]| {
+        env(key).map(|base| dirs.iter().fold(PathBuf::from(base), |path, dir| path.join(dir)).join(&exe))
+    };
+    let places = match program {
+        "mpv" => vec![
+            under("LOCALAPPDATA", &["Microsoft", "WinGet", "Links"]),
+            // The official build through winget: a zip unpacked here.
+            under("LOCALAPPDATA", &["Microsoft", "WinGet", "Packages", WINGET_MPV]),
+            under("ProgramFiles", &["MPV Player"]),
+            under("ProgramFiles", &["mpv"]),
+            under("LOCALAPPDATA", &["Programs", "mpv"]),
+            under("USERPROFILE", &["scoop", "apps", "mpv", "current"]),
+            Some(PathBuf::from(r"C:\mpv").join(&exe)),
+        ],
+        "yt-dlp" => vec![
+            under("LOCALAPPDATA", &["Microsoft", "WinGet", "Links"]),
+            under("USERPROFILE", &["scoop", "shims"]),
+            under("ProgramFiles", &["yt-dlp"]),
+        ],
+        _ => Vec::new(),
+    };
+    places.into_iter().flatten().collect()
 }
 
 fn version_of(tool: Tool, path: &str) -> Option<String> {
@@ -324,6 +363,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn windows_installers_are_looked_for_where_they_install() {
+        let env = |key: &str| match key {
+            "ProgramFiles" => Some(r"C:\Program Files".to_owned()),
+            "LOCALAPPDATA" => Some(r"C:\Users\pol\AppData\Local".to_owned()),
+            _ => None,
+        };
+        let mpv = known_places("mpv", env);
+        assert!(mpv.contains(&PathBuf::from(r"C:\Program Files").join("MPV Player").join("mpv.exe")), "{mpv:?}");
+        assert!(mpv.contains(&PathBuf::from(r"C:\mpv").join("mpv.exe")));
+        assert_eq!(mpv.len(), 6, "no USERPROFILE: no scoop");
+        let yt_dlp = known_places("yt-dlp", env);
+        let links = PathBuf::from(r"C:\Users\pol\AppData\Local").join("Microsoft").join("WinGet").join("Links");
+        assert_eq!(yt_dlp[0], links.join("yt-dlp.exe"));
+        assert!(known_places("kitty", env).is_empty());
+    }
+
+    #[test]
     fn package_manager_from_the_system() {
         assert_eq!(manager("linux", "ID=ubuntu\nID_LIKE=debian\n"), Manager::Apt);
         assert_eq!(manager("linux", "ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n"), Manager::Apt);
@@ -343,7 +399,10 @@ mod tests {
         assert_eq!(install_command(Tool::Xprop, Manager::Apt).unwrap(), "sudo apt install x11-utils");
         assert_eq!(install_command(Tool::Xwininfo, Manager::Pacman).unwrap(), "sudo pacman -S xorg-xwininfo");
         assert_eq!(install_command(Tool::Ffmpeg, Manager::Dnf).unwrap(), "sudo dnf install ffmpeg-free");
-        assert_eq!(install_command(Tool::Mpv, Manager::Winget).unwrap(), "winget install --id shinchiro.mpv -e");
+        assert_eq!(
+            install_command(Tool::Mpv, Manager::Winget).unwrap(),
+            "winget install --id mpv-player.mpv-CI.MSVC -e"
+        );
         assert_eq!(install_command(Tool::Kitty, Manager::Brew).unwrap(), "brew install --cask kitty");
         assert_eq!(install_command(Tool::Kitty, Manager::Winget), None);
         assert_eq!(install_command(Tool::Mpv, Manager::Unknown), None);
