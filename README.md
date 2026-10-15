@@ -28,7 +28,8 @@ Every video opens in its own tab.
 - **Mis listas**: your YouTube playlists, plus *Liked videos* and *Watch
   later*; `Enter` opens one, `x` deletes it from YouTube (after asking)
 - **Historial**: everything you watched, newest first, with the day you
-  watched it (`x` removes one)
+  watched it: in tubetui and, logged in, on YouTube too (the browser, the
+  phone), more pages coming as you scroll down (`x` removes one from the list)
 - **Resume where you left off**: closing a video remembers the second; opening
   it again starts there, and lists show how far you got. Finished videos (or
   ones you barely started) start from the beginning

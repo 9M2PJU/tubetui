@@ -1133,7 +1133,7 @@ fn video_row<'a>(state: &State, icons: &Icons, view: &View, v: &'a Video) -> Lis
 /// `watched_date`: the date column says when I watched it (Historial).
 fn video_row_dated<'a>(state: &State, icons: &Icons, view: &View, v: &'a Video, watched_date: bool) -> ListItem<'a> {
     let lang = state.lang();
-    let watched_at = watched_date.then(|| state.history.iter().find(|e| e.video.id == v.id).map(|e| e.at)).flatten();
+    let watched_at = watched_date.then(|| state.watched_at(&v.id)).flatten();
     let live = if watched_at.is_some() { Live::No } else { v.live };
     let mut spans = match (live, watched_at.or(v.published)) {
         (Live::Now, _) => {

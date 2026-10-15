@@ -565,11 +565,39 @@ impl Runtime {
             }
             Effect::LoadHistory => {
                 if let Some(cookies) = self.cookies.clone() {
+                    let (reread, lang) = (self.browser_spec(), self.state.lang());
                     // Without it only the local history hides videos.
                     self.background(move || {
-                        Action::HistoryLoaded(youtube::watch_history(&cookies).unwrap_or_default())
+                        let mut ids = youtube::watch_history(&cookies);
+                        if let (Err(youtube::YoutubeError::NoSession), Some(spec)) = (&ids, &reread)
+                            && session::refresh_cookies(spec, &cookies, true, lang).is_ok()
+                        {
+                            ids = youtube::watch_history(&cookies);
+                        }
+                        Action::HistoryLoaded(ids.unwrap_or_default())
                     });
                 }
+            }
+            Effect::YoutubeHistory { id, next } => {
+                let Some(cookies) = self.cookies.clone() else {
+                    let error = self.tr(
+                        "Sin sesión: elegí un navegador en Configuración",
+                        "Not logged in: pick a browser in Settings",
+                    );
+                    self.send(Action::YoutubeHistory(id, Err(error.into())));
+                    return Ok(());
+                };
+                let (reread, lang) = (self.browser_spec(), self.state.lang());
+                self.background(move || {
+                    let mut page = youtube::history(&cookies, next.as_deref());
+                    // The browser renews the login, so our copy can go stale: read it again once.
+                    if let (Err(youtube::YoutubeError::NoSession), Some(spec)) = (&page, &reread)
+                        && session::refresh_cookies(spec, &cookies, true, lang).is_ok()
+                    {
+                        page = youtube::history(&cookies, next.as_deref());
+                    }
+                    Action::YoutubeHistory(id, page.map_err(|e| e.to_string()))
+                });
             }
             Effect::SaveWatched(id) => {
                 if let Err(e) = store::add_watched(&self.paths.watched, &id) {

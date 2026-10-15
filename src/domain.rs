@@ -221,6 +221,17 @@ pub(crate) fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (yoe + era * 400 + i64::from(month <= 2), month, day)
 }
 
+/// (year, month, day) → days since 1970-01-01, the inverse of `civil_from_days`.
+pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year.rem_euclid(400);
+    let mp = i64::from(if month > 2 { month - 3 } else { month + 9 });
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 /// `0:05`, `10:35`, `1:02:03`.
 pub fn clock(s: u32) -> String {
     if s >= 3600 {
@@ -337,6 +348,14 @@ mod tests {
         list.sort_by_key(|v| std::cmp::Reverse(v.recency()));
         let order: Vec<_> = list.iter().map(|v| (v.live, v.published)).collect();
         assert_eq!(order, [(Live::Now, None), (Live::Upcoming, None), (Live::No, Some(10)), (Live::No, None)]);
+    }
+
+    #[test]
+    fn civil_dates_go_both_ways() {
+        for days in [-1, 0, 59, 10_956, 11_016, 20_740] {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), days);
+        }
     }
 
     #[test]

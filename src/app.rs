@@ -18,7 +18,7 @@ use crate::keymap::KeyContext;
 use crate::media::{LocalFile, MediaKind, parse_dirs};
 use crate::sponsorblock::Segment;
 use crate::update::Update;
-use crate::youtube::{Comment, Items, Rating, SearchPage, Source, Watch};
+use crate::youtube::{Comment, HistoryPage, Items, Rating, SearchPage, Source, Watch};
 
 /// Lists that are filtered afterwards ask YouTube for more videos.
 pub const FILTERED_LIMIT: u32 = 200;
@@ -389,6 +389,8 @@ pub enum Action {
     Loaded(u64, Result<Items, String>),
     /// A page requested with `Effect::Search`: a new list, or more of one.
     Page(u64, Result<SearchPage, String>),
+    /// A page of my YouTube history requested with `Effect::YoutubeHistory`.
+    YoutubeHistory(u64, Result<HistoryPage, String>),
     /// Cached channel ids, read at startup.
     SubsLoaded(HashSet<String>),
     /// The watch page of a tab's video arrived.
@@ -537,6 +539,11 @@ pub enum Effect {
     CheckSystem,
     /// Fetch my YouTube watch history (to hide what I watched).
     LoadHistory,
+    /// A page of my YouTube watch history, for "Historial": the first, or the next one.
+    YoutubeHistory {
+        id: u64,
+        next: Option<String>,
+    },
     /// Remember a video as watched.
     SaveWatched(String),
     /// Move these files to the system trash.
@@ -774,6 +781,9 @@ pub struct State {
     pub later: Vec<Video>,
     /// "Historial", newest first.
     pub history: Vec<HistoryEntry>,
+    /// What I watched elsewhere (YouTube's history), newest first: shown in
+    /// "Historial" with `history`, never saved.
+    pub youtube_history: Vec<HistoryEntry>,
     /// "Descargas", newest first.
     pub downloads: Vec<Download>,
     /// Videos of my channels seen by the background check (`None` until the first one).
@@ -843,6 +853,7 @@ impl State {
             loading: None,
             later,
             history: Vec::new(),
+            youtube_history: Vec::new(),
             downloads: Vec::new(),
             known_subs: None,
             fresh: Vec::new(),
@@ -1160,6 +1171,7 @@ impl State {
             }
             Action::Loaded(id, result) => return self.loaded(id, result, None),
             Action::Page(id, result) => return self.page(id, result),
+            Action::YoutubeHistory(id, result) => self.youtube_history_page(id, result),
             Action::SubsLoaded(subs) => self.subs = subs,
             Action::Watched(id, result) => {
                 // Without details the tab just stays as it is.
@@ -1431,6 +1443,11 @@ impl State {
             return Vec::new();
         }
         match self.focus {
+            // One step past an end goes round to the other end; jumps stop there.
+            Focus::Menu if delta.abs() == 1 => {
+                let len = Section::ALL.len() as isize;
+                self.menu = (self.menu as isize + delta).rem_euclid(len) as usize;
+            }
             Focus::Menu => self.menu = step(self.menu, Section::ALL.len()),
             Focus::List => {
                 if let Some(l) = self.stack.last_mut() {
@@ -1452,6 +1469,9 @@ impl State {
         let Some(next) = listing.next.clone() else { return Vec::new() };
         listing.more = Some(id);
         self.next_request += 1;
+        if listing.kind == ListKind::History {
+            return vec![Effect::YoutubeHistory { id, next: Some(next) }];
+        }
         vec![Effect::Search { id, query: String::new(), next: Some(next) }]
     }
 
@@ -1568,12 +1588,23 @@ impl State {
                 Vec::new()
             }
             Section::Historial => {
-                let items = Items::Videos(self.history.iter().map(|e| e.video.clone()).collect());
-                self.show(Listing::new(title, items, ListKind::History));
-                if self.history.is_empty() {
-                    self.status = self.tr("Todavía no viste nada en tubetui", "Nothing watched in tubetui yet").into();
-                }
-                Vec::new()
+                let items = Items::Videos(self.history_entries().into_iter().map(|e| e.video).collect());
+                let mut listing = Listing::new(title, items, ListKind::History);
+                let effects = if self.logged_in() {
+                    let id = self.next_request;
+                    self.next_request += 1;
+                    listing.more = Some(id);
+                    self.status = self.tr("Trayendo tu historial de YouTube…", "Fetching your YouTube history…").into();
+                    vec![Effect::YoutubeHistory { id, next: None }]
+                } else {
+                    if self.history.is_empty() {
+                        self.status =
+                            self.tr("Todavía no viste nada en tubetui", "Nothing watched in tubetui yet").into();
+                    }
+                    Vec::new()
+                };
+                self.show(listing);
+                effects
             }
             Section::BuscarVideos => {
                 self.search_videos();
@@ -1915,6 +1946,30 @@ impl State {
             Err(error) => self.status = error,
         }
         Vec::new()
+    }
+
+    /// A page of my YouTube history: the first replaces what came before, the
+    /// next ones add to it.
+    fn youtube_history_page(&mut self, id: u64, result: Result<HistoryPage, String>) {
+        let Some(listing) = self.stack.iter_mut().find(|l| l.more == Some(id)) else { return };
+        let first = listing.next.is_none();
+        listing.more = None;
+        match result {
+            Ok(page) => {
+                listing.next = page.next;
+                if first {
+                    self.youtube_history.clear();
+                }
+                self.watched.extend(page.videos.iter().map(|(v, _)| v.id.clone()));
+                let entries = page.videos.into_iter().map(|(video, at)| HistoryEntry { video, at, position: None });
+                self.youtube_history.extend(entries);
+                self.sync_history();
+                self.refilter_watched();
+                let count = self.listing().map_or(0, |l| l.items.len());
+                self.status = format!("{} · {count}", self.tr("Historial", "History"));
+            }
+            Err(error) => self.status = error,
+        }
     }
 
     fn loaded(&mut self, id: u64, result: Result<Items, String>, next: Option<String>) -> Vec<Effect> {
@@ -2585,10 +2640,31 @@ impl State {
     /// Takes the selected video out of the history.
     fn forget_selected(&mut self) -> Vec<Effect> {
         let Some(video) = self.selected_video().cloned() else { return Vec::new() };
+        let on_youtube = self.youtube_history.iter().any(|e| e.video.id == video.id);
         self.history.retain(|e| e.video.id != video.id);
+        self.youtube_history.retain(|e| e.video.id != video.id);
         self.sync_history();
         self.status = format!("🗑 {}: {}", self.tr("Quitado del historial", "Removed from history"), video.title);
+        if on_youtube {
+            let note = self.tr("(en YouTube sigue en tu historial)", "(still in your YouTube history)");
+            self.status = format!("{} {note}", self.status);
+        }
         vec![Effect::SaveHistory(self.history.clone())]
+    }
+
+    /// "Historial": what I watched in tubetui and on YouTube, newest first.
+    pub fn history_entries(&self) -> Vec<HistoryEntry> {
+        let mut entries = self.history.clone();
+        let mine: HashSet<&str> = self.history.iter().map(|e| e.video.id.as_str()).collect();
+        entries.extend(self.youtube_history.iter().filter(|e| !mine.contains(e.video.id.as_str())).cloned());
+        entries.sort_by_key(|e| std::cmp::Reverse(e.at));
+        entries
+    }
+
+    /// When I last watched `id`, in tubetui or on YouTube.
+    pub fn watched_at(&self, id: &str) -> Option<i64> {
+        let local = self.history.iter().find(|e| e.video.id == id).map(|e| e.at);
+        local.or_else(|| self.youtube_history.iter().find(|e| e.video.id == id).map(|e| e.at))
     }
 
     /// Shown history lists follow `self.history`, the selection staying on its video.
@@ -2619,7 +2695,7 @@ impl State {
 
     fn sync_history(&mut self) {
         self.refresh_favorites();
-        let videos: Vec<Video> = self.history.iter().map(|e| e.video.clone()).collect();
+        let videos: Vec<Video> = self.history_entries().into_iter().map(|e| e.video).collect();
         for listing in self.stack.iter_mut().filter(|l| l.kind == ListKind::History) {
             let current = match &listing.items {
                 Items::Videos(shown) => shown.get(listing.selected).map(|v| v.id.clone()),
@@ -2936,6 +3012,57 @@ mod tests {
     }
 
     #[test]
+    fn the_history_brings_what_i_watched_on_youtube_too() {
+        let mut s = with_videos(&["a"]);
+        s.clock = 1000;
+        play(&mut s, 0);
+        s.config.session.browser = "brave".into();
+        let id = match open(&mut s, Section::Historial).as_slice() {
+            [Effect::YoutubeHistory { id, next: None }] => *id,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(s.listing().unwrap().items, Items::Videos(vec![video("a")]), "mine while it comes");
+        let page = |videos: &[(&str, i64)], next: Option<&str>| HistoryPage {
+            videos: videos.iter().map(|(id, at)| (video(id), *at)).collect(),
+            next: next.map(str::to_owned),
+        };
+        s.update(Action::YoutubeHistory(id, Ok(page(&[("y1", 1500), ("a", 900), ("y2", 500)], Some("T")))));
+        let ids = |s: &State| match &s.listing().unwrap().items {
+            Items::Videos(v) => v.iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        assert_eq!(ids(&s), ["y1", "a", "y2"], "by date, mine not repeated");
+        assert_eq!(s.listing().unwrap().selected, 1, "still on a");
+        assert_eq!((s.watched_at("a"), s.watched_at("y1")), (Some(1000), Some(1500)));
+        assert!(s.watched.contains("y2"), "hidden from the feeds too");
+        let more = match s.update(Action::Down).as_slice() {
+            [Effect::YoutubeHistory { id, next: Some(token) }] if token == "T" => *id,
+            other => panic!("{other:?}"),
+        };
+        s.update(Action::YoutubeHistory(more, Ok(page(&[("y3", 100)], None))));
+        assert_eq!(ids(&s), ["y1", "a", "y2", "y3"]);
+        assert_eq!(s.listing().unwrap().selected, 2, "the selection stays on y2");
+        s.listing_mut().selected = 1;
+        s.update(Action::Trash);
+        assert_eq!(ids(&s), ["y1", "y2", "y3"]);
+        s.listing_mut().selected = 0;
+        s.update(Action::Trash);
+        assert!(s.status.contains("YouTube"), "{}", s.status);
+        assert_eq!(ids(&s), ["y2", "y3"]);
+    }
+
+    #[test]
+    fn the_menu_goes_round_at_its_ends() {
+        let mut s = state();
+        s.focus = Focus::Menu;
+        s.menu = 0;
+        s.update(Action::Up);
+        assert_eq!(s.menu, Section::ALL.len() - 1, "from the top to the bottom");
+        s.update(Action::Down);
+        assert_eq!(s.menu, 0, "from the bottom to the top");
+    }
+
+    #[test]
     fn shorts_are_left_out_unless_wanted() {
         let short = Video { short: true, ..video("s") };
         let mut s = state();
@@ -3172,17 +3299,6 @@ mod tests {
         assert!(s.help && s.key_context().help);
         s.update(Action::ToggleHelp);
         assert!(!s.help);
-    }
-
-    #[test]
-    fn menu_selection_is_clamped() {
-        let mut s = state();
-        s.update(Action::Up);
-        assert_eq!(s.menu, 0);
-        for _ in 0..50 {
-            s.update(Action::Down);
-        }
-        assert_eq!(s.menu, Section::ALL.len() - 1);
     }
 
     #[test]

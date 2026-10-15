@@ -268,8 +268,100 @@ pub fn collect_playlists(page: &Value) -> Vec<Playlist> {
 /// Ids of the videos in my YouTube watch history (its first page, the most
 /// recent couple of hundred).
 pub fn watch_history(cookies: &Path) -> Result<HashSet<String>, YoutubeError> {
-    let page = InnerTube::new(cookies)?.call("browse", json!({ "browseId": "FEhistory" }))?;
-    Ok(collect_video_ids(&page))
+    Ok(history(cookies, None)?.videos.into_iter().map(|(v, _)| v.id).collect())
+}
+
+/// One page of my YouTube watch history and the token that asks for the next one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HistoryPage {
+    /// Newest first, each with about when I watched it: YouTube only tells the day.
+    pub videos: Vec<(Video, i64)>,
+    pub next: Option<String>,
+}
+
+/// My YouTube watch history, about 200 videos at a time; `next` continues it.
+pub fn history(cookies: &Path, next: Option<&str>) -> Result<HistoryPage, YoutubeError> {
+    let body = match next {
+        Some(token) => json!({ "continuation": token }),
+        None => json!({ "browseId": "FEhistory" }),
+    };
+    // English, so the days ("Yesterday", "Oct 8") can be read.
+    let reply = InnerTube { hl: "en", ..InnerTube::new(cookies)? }.call("browse", body)?;
+    parse_history(&reply, unix_now())
+}
+
+/// A history page: its videos under each day's heading, and the next-page token.
+/// A login YouTube no longer takes gets the "sign in" page: `NoSession`.
+pub fn parse_history(reply: &Value, now: i64) -> Result<HistoryPage, YoutubeError> {
+    let mut page = HistoryPage::default();
+    let mut signed_out = false;
+    walk(reply, &mut |object| {
+        signed_out |= object.contains_key("signInEndpoint");
+        if let Some(section) = object.get("itemSectionRenderer") {
+            let day = text(&section["header"]["itemSectionHeaderRenderer"]["title"])
+                .and_then(|title| history_day(&title, now))
+                .unwrap_or(now);
+            for item in section["contents"].as_array().into_iter().flatten() {
+                let video = match (item.get("lockupViewModel"), item.get("videoRenderer")) {
+                    (Some(lockup), _) => lockup_video(lockup, now),
+                    (_, Some(renderer)) => video_renderer(renderer, now),
+                    _ => None,
+                };
+                if let Some(video) = video {
+                    // Newest first within the day too.
+                    let at = day - page.videos.len() as i64;
+                    page.videos.push((video, at));
+                }
+            }
+        }
+        if let Some(token) = object
+            .get("continuationItemRenderer")
+            .and_then(|c| c["continuationEndpoint"]["continuationCommand"]["token"].as_str())
+        {
+            page.next = Some(token.to_owned());
+        }
+    });
+    if signed_out && page.videos.is_empty() {
+        return Err(YoutubeError::NoSession);
+    }
+    Ok(page)
+}
+
+const DAY: i64 = 86_400;
+const WEEKDAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/// A history heading → a time on that day: `"Today"`, `"Yesterday"`, a weekday
+/// of this week, `"Oct 8"` of the last twelve months or `"Oct 8, 2024"`.
+fn history_day(title: &str, now: i64) -> Option<i64> {
+    let today = now.div_euclid(DAY);
+    // Midday of an earlier day: YouTube's days are local, these UTC.
+    let midday = |day: i64| day * DAY + DAY / 2;
+    match title.trim() {
+        "Today" => return Some(now),
+        "Yesterday" => return Some(now - DAY),
+        _ => {}
+    }
+    if let Some(weekday) = WEEKDAYS.iter().position(|d| *d == title.trim()) {
+        // 1970-01-01 was a Thursday.
+        let back = (today + 4 - weekday as i64).rem_euclid(7);
+        return Some(midday(today - if back < 2 { back + 7 } else { back }));
+    }
+    let (month_day, year) = match title.split_once(", ") {
+        Some((month_day, year)) => (month_day, Some(year.trim().parse::<i64>().ok()?)),
+        None => (title, None),
+    };
+    let (month, day) = month_day.trim().split_once(' ')?;
+    let month = MONTHS.iter().position(|m| *m == month)? as u32 + 1;
+    let day: u32 = day.parse().ok()?;
+    let (this_year, ..) = crate::domain::civil_from_days(today);
+    let date = |year| crate::domain::days_from_civil(year, month, day);
+    let days = match year {
+        Some(year) => date(year),
+        None if date(this_year) <= today => date(this_year),
+        None => date(this_year - 1),
+    };
+    Some(midday(days))
 }
 
 /// Video ids in a page, in both of YouTube's formats.
@@ -1342,6 +1434,40 @@ mod tests {
                 lockup("a", "LOCKUP_CONTENT_TYPE_VIDEO", json!([]), "1:00"),
                 { "continuationItemRenderer": {} }
             ] } } } } })
+    }
+
+    #[test]
+    fn reads_the_history_by_day() {
+        let now = 1_791_936_000 + 3_600; // Wednesday 2026-10-14 01:00 UTC
+        let day =
+            |title: &str| history_day(title, now).map(|t| crate::domain::date_labels(t, now, crate::i18n::Lang::Es).0);
+        assert_eq!(history_day("Today", now), Some(now));
+        assert_eq!(day("Yesterday").as_deref(), Some("13/10/26"));
+        assert_eq!(day("Monday").as_deref(), Some("12/10/26"));
+        assert_eq!(day("Wednesday").as_deref(), Some("07/10/26"), "a week ago, not today");
+        assert_eq!(day("Oct 8").as_deref(), Some("08/10/26"));
+        assert_eq!(day("Dec 24").as_deref(), Some("24/12/25"), "not yet this year");
+        assert_eq!(day("Feb 29, 2024").as_deref(), Some("29/02/24"));
+        assert_eq!(history_day("Someday", now), None);
+
+        let section = |title: &str, ids: &[&str]| {
+            json!({ "itemSectionRenderer": {
+            "header": { "itemSectionHeaderRenderer": { "title": { "simpleText": title } } },
+            "contents": ids.iter().map(|id| json!({ "videoRenderer": { "videoId": id, "title": { "simpleText": id } } }))
+                .collect::<Vec<_>>() } })
+        };
+        let reply = json!({ "onResponseReceivedActions": [{ "appendContinuationItemsAction": { "continuationItems": [
+            section("Yesterday", &["a", "b"]),
+            section("Oct 8", &["c"]),
+            { "continuationItemRenderer": { "continuationEndpoint": { "continuationCommand": { "token": "NEXT" } } } }
+        ] } }] });
+        let page = parse_history(&reply, now).unwrap();
+        let got: Vec<(&str, i64)> = page.videos.iter().map(|(v, at)| (v.id.as_str(), *at)).collect();
+        let oct8 = 1_791_417_600 + 43_200;
+        assert_eq!(got, [("a", now - 86_400), ("b", now - 86_400 - 1), ("c", oct8 - 2)]);
+        assert_eq!(page.next.as_deref(), Some("NEXT"));
+        let signed_out = json!({ "contents": [{ "messageRenderer": { "button": { "signInEndpoint": {} } } }] });
+        assert!(matches!(parse_history(&signed_out, now), Err(YoutubeError::NoSession)));
     }
 
     #[test]
