@@ -14,7 +14,7 @@ use crate::app::{
 };
 use crate::config::{IconSet, donations};
 use crate::doctor::{Manager, Tool};
-use crate::domain::{Channel, Download, DownloadState, Live, Playlist, Size, Video, clock, date_labels};
+use crate::domain::{Channel, Download, DownloadState, Live, Playlist, Size, Video, bytes_label, clock, date_labels};
 use crate::i18n::Lang;
 use crate::media::{LocalFile, MediaKind};
 use crate::player::Info;
@@ -1013,7 +1013,8 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
             Setting::ALL.iter().enumerate().map(|(i, s)| setting_row(state, icons.settings[i], *s)).collect()
         }
         Items::Files(files, kind) => {
-            files.iter().map(|f| file_row(icons, f, *kind, state.marked.contains(&f.path))).collect()
+            let folder_width = files.iter().map(|f| Span::raw(f.folder.as_str()).width()).max().unwrap_or(0).min(28);
+            files.iter().map(|f| file_row(icons, f, *kind, state.marked.contains(&f.path), folder_width)).collect()
         }
         Items::Downloads(downloads) => downloads.iter().map(|d| download_row(state, d, state.lang())).collect(),
         Items::About | Items::System => Vec::new(),
@@ -1293,14 +1294,26 @@ fn profile_row<'a>(state: &State, icons: &Icons, spec: &'a str) -> ListItem<'a> 
     } else {
         session::label(spec)
     };
-    ListItem::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!(" {current}"), GREEN),
         Span::raw(format!("{} ", icons.user)),
         Span::styled(label, FG),
-    ]))
+    ];
+    if let Some(&used) = state.browsers_used.get(spec) {
+        let (date, age) = date_labels(used, state.clock, state.lang());
+        let last = state.lang().pick("último uso", "last used");
+        spans.push(Span::styled(format!("  · {last} {date} ({age})"), MUTED));
+    }
+    ListItem::new(Line::from(spans))
 }
 
-fn file_row<'a>(icons: &Icons, file: &'a LocalFile, kind: MediaKind, marked: bool) -> ListItem<'a> {
+fn file_row<'a>(
+    icons: &Icons,
+    file: &'a LocalFile,
+    kind: MediaKind,
+    marked: bool,
+    folder_width: usize,
+) -> ListItem<'a> {
     let icon = match kind {
         MediaKind::Video => icons.section(Section::MisVideos),
         MediaKind::Music => icons.section(Section::MiMusica),
@@ -1308,7 +1321,8 @@ fn file_row<'a>(icons: &Icons, file: &'a LocalFile, kind: MediaKind, marked: boo
     ListItem::new(Line::from(vec![
         Span::styled(if marked { "✗" } else { " " }, Style::new().fg(RED).bold()),
         Span::raw(format!("{icon} ")),
-        Span::styled(format!("{} ", pad(&file.folder, 28)), MAGENTA),
+        Span::styled(format!("{} ", pad(&file.folder, folder_width)), MAGENTA),
+        Span::styled(format!("{:>8}  ", if file.size > 0 { bytes_label(file.size) } else { String::new() }), YELLOW),
         Span::styled(file.name.as_str(), FG),
     ]))
 }
@@ -1413,22 +1427,35 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
     } else {
         let back = key("Esc", "volver", "back");
         match state.listing().map(|l| &l.items) {
-            Some(Items::Videos(_)) if state.listing().is_some_and(|l| l.all.is_some()) => vec![
-                key("Enter", "ver", "play"),
-                if state.show_watched {
-                    key("v", "ocultar vistos", "hide watched")
-                } else {
-                    key("v", "mostrar vistos", "show watched")
-                },
-                key("l", "ver después", "watch later"),
-                key("a", "solo audio", "sound only"),
-                subscribe.clone(),
-                key("g", "me gusta", "like"),
-                key("d", "descargar", "download"),
-                key("c", "canal", "channel"),
-                key("/", "buscar", "search"),
-                back,
-            ],
+            Some(Items::Videos(_)) if state.listing().is_some_and(|l| l.all.is_some()) => {
+                let home = state.listing().filter(|l| l.home).map(|_| {
+                    if state.config.ui.home_all {
+                        key("t", "solo mis canales", "only my channels")
+                    } else {
+                        key("t", "todo, como YouTube", "all, as on YouTube")
+                    }
+                });
+                let mut keys = vec![
+                    key("Enter", "ver", "play"),
+                    if state.show_watched {
+                        key("v", "ocultar vistos", "hide watched")
+                    } else {
+                        key("v", "mostrar vistos", "show watched")
+                    },
+                    key("l", "ver después", "watch later"),
+                    key("a", "solo audio", "sound only"),
+                    subscribe.clone(),
+                    key("g", "me gusta", "like"),
+                    key("d", "descargar", "download"),
+                    key("c", "canal", "channel"),
+                    key("/", "buscar", "search"),
+                    back,
+                ];
+                if let Some(home) = home {
+                    keys.insert(1, home);
+                }
+                keys
+            }
             Some(Items::Videos(_)) if state.listing().is_some_and(|l| l.kind == ListKind::History) => vec![
                 key("Enter", "ver (sigue donde lo dejaste)", "play (resumes where you left)"),
                 key("x", "quitar del historial", "remove from history"),
@@ -2061,6 +2088,10 @@ mod tests {
         s.config.session.browser = "brave:Default".into();
         let screen = render(&s);
         assert!(screen.contains("● ☺ brave · Default"), "{screen}");
+        assert!(!screen.contains("último uso"), "unknown: nothing");
+        s.clock = 1_791_590_400 + 3_600;
+        s.browsers_used.insert("brave:Default".into(), 1_791_590_400 - 40 * 86_400);
+        assert!(render(&s).contains("brave · Default  · último uso 31/08/26 (1m)"), "{}", render(&s));
         assert!(screen.contains("☺ Sin sesión"));
     }
 
@@ -2166,7 +2197,8 @@ mod tests {
         assert_eq!(hint(&list, "s"), Some("suscribirse"));
         list.subs.insert("UCa".into());
         assert_eq!(hint(&list, "s"), Some("desuscribirse (pide confirmar)"));
-        let file = |n: &str| LocalFile { path: format!("/m/{n}.mp3").into(), name: n.into(), folder: "D".into() };
+        let file =
+            |n: &str| LocalFile { path: format!("/m/{n}.mp3").into(), name: n.into(), folder: "D".into(), size: 0 };
         let mut files = with_items(Items::Files(vec![file("a"), file("b")], MediaKind::Music));
         assert_eq!(hint(&files, "espacio"), Some("marcar varios"));
         assert_eq!(hint(&files, "x"), Some("este a la papelera (pide confirmar)"));
@@ -2212,7 +2244,8 @@ mod tests {
 
     #[test]
     fn music_tab_shows_the_song_and_takes_no_video_area() {
-        let file = |n: &str| LocalFile { path: format!("/m/{n}.mp3").into(), name: n.into(), folder: "Disco".into() };
+        let file =
+            |n: &str| LocalFile { path: format!("/m/{n}.mp3").into(), name: n.into(), folder: "Disco".into(), size: 0 };
         let mut s = with_items(Items::Files(vec![file("Tema uno"), file("Tema dos")], MediaKind::Music));
         let screen = render(&s);
         assert!(screen.contains("♫ Disco"), "{screen}");

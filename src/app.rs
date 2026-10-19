@@ -317,11 +317,13 @@ pub struct Listing {
     pub more: Option<u64>,
     /// Feeds: every video, watched ones included (`items` may leave them out).
     pub all: Option<Vec<Video>>,
+    /// "Mis recomendados": `t` switches between my channels and all of YouTube's.
+    pub home: bool,
 }
 
 impl Listing {
     pub fn new(title: String, items: Items, kind: ListKind) -> Self {
-        Self { title, items, selected: 0, kind, next: None, more: None, all: None }
+        Self { title, items, selected: 0, kind, next: None, more: None, all: None, home: false }
     }
 }
 
@@ -393,6 +395,8 @@ pub enum Action {
     YoutubeHistory(u64, Result<HistoryPage, String>),
     /// Cached channel ids, read at startup.
     SubsLoaded(HashSet<String>),
+    /// When each browser profile last wrote its cookies, by spec (the browser picker).
+    BrowsersUsed(HashMap<String, i64>),
     /// The watch page of a tab's video arrived.
     Watched(TabId, Result<Watch, String>),
     /// The login was (re)read. `cookies` is for the runtime; `subs` are my channels.
@@ -502,6 +506,8 @@ pub enum Action {
     HistoryLoaded(HashSet<String>),
     /// Feeds: show / hide the videos already watched.
     ToggleWatched,
+    /// "Mis recomendados": only my channels, or everything YouTube recommends.
+    ToggleHomeAll,
     /// GitHub has a newer version (and how to get it here).
     UpdateFound(Update),
     /// Mark / unmark the selected local file and go to the next one.
@@ -756,6 +762,8 @@ struct Pending {
     kind: ListKind,
     /// My favorite channels go first (Suscripciones, Mis canales).
     favorites_first: bool,
+    /// "Mis recomendados".
+    home: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -803,6 +811,8 @@ pub struct State {
     pub subs: HashSet<String>,
     /// How I rated the videos I opened or voted on.
     pub ratings: HashMap<String, Rating>,
+    /// When each browser profile was last used, by spec.
+    pub browsers_used: HashMap<String, i64>,
     pub confirm: Option<Confirm>,
     /// The right-click menu, while open.
     pub context: Option<ContextMenu>,
@@ -864,6 +874,7 @@ impl State {
             clock: 0,
             subs: HashSet::new(),
             ratings: HashMap::new(),
+            browsers_used: HashMap::new(),
             confirm: None,
             context: None,
             marked: HashSet::new(),
@@ -1173,6 +1184,7 @@ impl State {
             Action::Page(id, result) => return self.page(id, result),
             Action::YoutubeHistory(id, result) => self.youtube_history_page(id, result),
             Action::SubsLoaded(subs) => self.subs = subs,
+            Action::BrowsersUsed(used) => self.browsers_used = used,
             Action::Watched(id, result) => {
                 // Without details the tab just stays as it is.
                 if let (Some(tab), Ok(watch)) = (self.tabs.iter_mut().find(|t| t.id == id), result) {
@@ -1239,6 +1251,18 @@ impl State {
                 self.watched.extend(ids);
                 self.refilter_watched();
             }
+            Action::ToggleHomeAll if self.listing().is_some_and(|l| l.home) => {
+                self.config.ui.home_all = !self.config.ui.home_all;
+                let mut effects = self.open_section(Section::Inicio);
+                self.status = self.home_mode().into();
+                effects.push(Effect::SaveSetting {
+                    table: "ui",
+                    key: "home_all",
+                    value: SettingValue::Bool(self.config.ui.home_all),
+                });
+                return effects;
+            }
+            Action::ToggleHomeAll => {}
             Action::ToggleWatched => {
                 self.show_watched = !self.show_watched;
                 self.refilter_watched();
@@ -1540,6 +1564,7 @@ impl State {
                     let file = LocalFile {
                         name: path.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
                         folder: path.parent().map_or_else(String::new, |p| p.display().to_string()),
+                        size: std::fs::metadata(path).map_or(0, |m| m.len()),
                         path: path.clone(),
                     };
                     Playback::local(&[file], 0, MediaKind::Video).map(|p| self.play(p)).unwrap_or_default()
@@ -1566,7 +1591,20 @@ impl State {
                 self.status = hint.into();
                 Vec::new()
             }
-            Section::Inicio => self.load_feed(Source::Recommended, title, Filter::Mine),
+            Section::Inicio => {
+                let filter = if self.config.ui.home_all { Filter::None } else { Filter::Mine };
+                let mut effects = self.load_feed(Source::Recommended, title, filter);
+                if let Some(pending) = &mut self.pending {
+                    pending.home = true;
+                }
+                // As many as for my channels only, so "all" is never shorter.
+                for effect in &mut effects {
+                    if let Effect::Load { limit, .. } = effect {
+                        *limit = FILTERED_LIMIT;
+                    }
+                }
+                effects
+            }
             Section::Descubrir => self.discover(),
             Section::ParaVos => self.up_next(title),
             Section::DescubrirCanales => self.load_feed(Source::Recommended, title, Filter::NotMine),
@@ -1920,7 +1958,7 @@ impl State {
         self.next_request += 1;
         self.status = format!("{} {title}…", self.tr("Cargando", "Loading"));
         self.loading = Some(title.clone());
-        self.pending = Some(Pending { id, title, filter, push, kind, favorites_first: false });
+        self.pending = Some(Pending { id, title, filter, push, kind, favorites_first: false, home: false });
         id
     }
 
@@ -2042,7 +2080,7 @@ impl State {
         } else {
             format!("{} · {}", pending.title, items.len())
         };
-        let mut listing = Listing { next, ..Listing::new(pending.title, items, pending.kind) };
+        let mut listing = Listing { next, home: pending.home, ..Listing::new(pending.title, items, pending.kind) };
         if listing.kind == ListKind::Feed
             && let Items::Videos(videos) = &listing.items
         {
@@ -2052,6 +2090,9 @@ impl State {
                 let note = self.tr("vistos ocultos (v los muestra)", "watched hidden (v shows them)");
                 self.status = format!("{} · {} · {hidden} {note}", listing.title, listing.items.len());
             }
+        }
+        if listing.home {
+            self.status = format!("{} · {}", self.status, self.home_mode());
         }
         if pending.push {
             self.stack.push(listing);
@@ -2272,6 +2313,11 @@ impl State {
                 }
                 items.push(item("Solo audio", "Sound only", "a", Action::Listen));
                 items.extend(self.video_items());
+                if listing.home && self.config.ui.home_all {
+                    items.push(item("Solo de mis canales", "Only my channels", "t", Action::ToggleHomeAll));
+                } else if listing.home {
+                    items.push(item("Todo, como YouTube", "All, as on YouTube", "t", Action::ToggleHomeAll));
+                }
                 if listing.kind == ListKind::History {
                     items.push(item("Quitar del historial", "Remove from history", "x", Action::Trash));
                 }
@@ -2650,6 +2696,18 @@ impl State {
             self.status = format!("{} {note}", self.status);
         }
         vec![Effect::SaveHistory(self.history.clone())]
+    }
+
+    /// What "Mis recomendados" shows, and how to switch.
+    fn home_mode(&self) -> &'static str {
+        if self.config.ui.home_all {
+            self.tr(
+                "todo lo que recomienda YouTube (t: solo mis canales)",
+                "all YouTube recommends (t: only my channels)",
+            )
+        } else {
+            self.tr("solo de mis canales (t: todo, como YouTube)", "only my channels (t: all, as on YouTube)")
+        }
     }
 
     /// "Historial": what I watched in tubetui and on YouTube, newest first.
@@ -3373,6 +3431,41 @@ mod tests {
         s.update(Action::Loaded(id, Ok(Items::Videos(vec![video("a"), video("b")]))));
         assert_eq!(s.listing().unwrap().items, Items::Videos(vec![video("a")]));
         assert_eq!(s.listing().unwrap().title, "Mis recomendados");
+    }
+
+    #[test]
+    fn t_switches_my_recommendations_to_all_of_youtube_and_back() {
+        let mut s = state();
+        s.config.session.browser = "brave".into();
+        s.update(Action::SubsLoaded(HashSet::from(["UCa".to_string()])));
+        let feed = vec![video("a"), Video { channel_id: Some("UCz".into()), ..video("z") }];
+        let load = |s: &mut State, effects: Vec<Effect>| {
+            let id = match effects.as_slice() {
+                [Effect::Load { id, source: Source::Recommended, .. }, ..] => *id,
+                other => panic!("{other:?}"),
+            };
+            s.update(Action::Loaded(id, Ok(Items::Videos(feed.clone()))));
+            s.listing().unwrap().items.len()
+        };
+        let effects = open(&mut s, Section::Inicio);
+        assert_eq!(load(&mut s, effects), 1, "only mine");
+        assert!(s.status.contains("t: todo"), "{}", s.status);
+        let effects = s.update(Action::ToggleHomeAll);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::SaveSetting { key: "home_all", value: SettingValue::Bool(true), .. }))
+        );
+        assert_eq!(load(&mut s, effects), 2, "all of YouTube's");
+        assert!(s.status.contains("t: solo mis canales"), "{}", s.status);
+        let effects = s.update(Action::ToggleHomeAll);
+        assert_eq!(load(&mut s, effects), 1);
+        let id = match open(&mut s, Section::Suscripciones).as_slice() {
+            [Effect::Load { id, .. }, ..] => *id,
+            other => panic!("{other:?}"),
+        };
+        s.update(Action::Loaded(id, Ok(Items::Videos(feed.clone()))));
+        assert!(s.update(Action::ToggleHomeAll).is_empty(), "only in Mis recomendados");
     }
 
     #[test]
@@ -4156,7 +4249,12 @@ mod tests {
     fn files(names: &[&str]) -> Vec<LocalFile> {
         names
             .iter()
-            .map(|n| LocalFile { path: format!("/m/{n}.mp3").into(), name: n.to_string(), folder: "Disco".into() })
+            .map(|n| LocalFile {
+                path: format!("/m/{n}.mp3").into(),
+                name: n.to_string(),
+                folder: "Disco".into(),
+                size: 0,
+            })
             .collect()
     }
 

@@ -159,6 +159,9 @@ struct Runtime {
     rx: mpsc::Receiver<Action>,
     /// Cookie file of the current login, once it is known to work.
     cookies: Option<PathBuf>,
+    /// The login is still being read: history pages asked meanwhile wait for it.
+    session_pending: bool,
+    waiting_history: Vec<Effect>,
     /// The video tab seen most recently; the one allowed to play in the background.
     last_watched: Option<TabId>,
     /// Last terminal resize, while it is still settling.
@@ -231,6 +234,8 @@ impl Runtime {
             tx,
             rx,
             cookies: None,
+            session_pending: true,
+            waiting_history: Vec::new(),
             last_watched: None,
             resized_at: None,
             clear_at: None,
@@ -429,6 +434,10 @@ impl Runtime {
                 dirty = true;
                 if let Action::SessionReady { cookies, subs } = &action {
                     self.cookies = cookies.clone().filter(|_| subs.is_ok());
+                    self.session_pending = false;
+                    for effect in std::mem::take(&mut self.waiting_history) {
+                        self.perform(effect, terminal)?;
+                    }
                 }
                 if let Action::Downloaded { id, .. } = &action {
                     self.downloads.remove(id);
@@ -580,9 +589,13 @@ impl Runtime {
             }
             Effect::YoutubeHistory { id, next } => {
                 let Some(cookies) = self.cookies.clone() else {
+                    if self.session_pending {
+                        self.waiting_history.push(Effect::YoutubeHistory { id, next });
+                        return Ok(());
+                    }
                     let error = self.tr(
-                        "Sin sesión: elegí un navegador en Configuración",
-                        "Not logged in: pick a browser in Settings",
+                        "Sin sesión de YouTube: entrá a YouTube en el navegador o elegí otro en Configuración",
+                        "Not logged in to YouTube: log in in the browser or pick another one in Settings",
                     );
                     self.send(Action::YoutubeHistory(id, Err(error.into())));
                     return Ok(());
@@ -649,8 +662,13 @@ impl Runtime {
             }
             Effect::ScanBrowsers { id } => {
                 let home = directories::BaseDirs::new().map(|d| d.home_dir().to_owned()).unwrap_or_default();
-                let mut profiles =
-                    session::scan_browsers(&home, &session::resolve_keyring(&self.state.config.session.keyring));
+                let mut found =
+                    session::scan_browsers_used(&home, &session::resolve_keyring(&self.state.config.session.keyring));
+                // The one in use first.
+                found.sort_by_key(|(_, used)| std::cmp::Reverse(*used));
+                let used = found.iter().filter_map(|(spec, at)| Some((spec.clone(), (*at)?))).collect();
+                self.send(Action::BrowsersUsed(used));
+                let mut profiles: Vec<String> = found.into_iter().map(|(spec, _)| spec).collect();
                 profiles.push(String::new()); // "Sin sesión"
                 self.send(Action::Loaded(id, Ok(Items::Profiles(profiles))));
             }
@@ -661,7 +679,10 @@ impl Runtime {
                     Action::Loaded(id, Ok(Items::Files(files, kind)))
                 });
             }
-            Effect::StartSession { force } => self.start_session(force),
+            Effect::StartSession { force } => {
+                self.session_pending = true;
+                self.start_session(force);
+            }
             Effect::SaveSetting { table, key, value } => {
                 let Some(path) = &self.config_path else { return Ok(()) };
                 let result = match value {

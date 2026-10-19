@@ -164,6 +164,8 @@ pub struct UiConfig {
     pub notify_new: bool,
     /// The channels I watch most go first in Suscripciones and Mis canales.
     pub favorites_first: bool,
+    /// "Mis recomendados" shows YouTube's whole home feed, not only my channels (`t`).
+    pub home_all: bool,
 }
 
 /// Short animations, each one can be turned off.
@@ -332,6 +334,7 @@ impl Default for UiConfig {
             hide_watched: true,
             hide_shorts: true,
             notify_new: true,
+            home_all: false,
             favorites_first: true,
         }
     }

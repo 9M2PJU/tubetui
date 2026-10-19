@@ -30,6 +30,8 @@ pub struct LocalFile {
     pub name: String,
     /// Path of the containing folder relative to the scanned root, e.g. `Artista/Disco`.
     pub folder: String,
+    /// Bytes on disk; 0 when unknown.
+    pub size: u64,
 }
 
 /// Media files of `kind` under `roots`, sorted by folder and name. Hidden
@@ -61,7 +63,9 @@ fn walk(root: &Path, dir: &Path, kind: MediaKind, depth: usize, files: &mut Vec<
         } else if has_extension(&path, kind.extensions()) {
             let folder = dir.strip_prefix(root).unwrap_or(dir).display().to_string();
             let root_name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let size = entry.metadata().map_or(0, |m| m.len());
             files.push(LocalFile {
+                size,
                 name: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
                 folder: if folder.is_empty() { root_name } else { folder },
                 path,

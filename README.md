@@ -19,7 +19,7 @@ Every video opens in its own tab.
 
 **YouTube**
 - **Mis recomendados** (your home feed, in YouTube's own order, only your
-  channels), **Descubrir** (this week's most watched videos on your topics,
+  channels; `t` switches to everything YouTube recommends, as in the browser), **Descubrir** (this week's most watched videos on your topics,
   e.g. `rust, nba, jazz`, outside your channels and your history), **Suscripciones** (newest from your
   channels, live and upcoming first), **Mis canales**, **Descubrir canales**
   (YouTube's picks from channels you don't follow yet)
@@ -245,6 +245,7 @@ check_updates = true     # once a day, tell me about new versions and how to ins
 hide_shorts = true       # leave Shorts out of every list
 notify_new = true        # check my subscriptions every 15 minutes and tell me about new videos
 favorites_first = true   # my most watched channels first in Suscripciones and Mis canales
+home_all = false         # Mis recomendados: only my channels, or all YouTube recommends (t switches)
 
 [effects]                # animations
 startup = true

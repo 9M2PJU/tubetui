@@ -73,6 +73,12 @@ const FIREFOX: &[&str] = &["Library/Application Support/Firefox/Profiles"];
 /// `--cookies-from-browser` specs (`brave+KEYRING:Default`, `firefox:abcd.default`,
 /// `firefox:/home/me/snap/firefox/common/.mozilla/firefox/abcd.default`).
 pub fn scan_browsers(home: &Path, keyring: &str) -> Vec<String> {
+    scan_browsers_used(home, keyring).into_iter().map(|(spec, _)| spec).collect()
+}
+
+/// [`scan_browsers`], each with when the browser last wrote its cookies (unix
+/// time): the one in use shows today.
+pub fn scan_browsers_used(home: &Path, keyring: &str) -> Vec<(String, Option<i64>)> {
     let keyring = if keyring.is_empty() { String::new() } else { format!("+{keyring}") };
     let mut found = Vec::new();
     for (name, dirs) in CHROMIUM {
@@ -81,8 +87,9 @@ pub fn scan_browsers(home: &Path, keyring: &str) -> Vec<String> {
                 let is_profile = profile == "Default" || profile.starts_with("Profile ");
                 let base = home.join(dir).join(&profile);
                 if is_profile && (base.join("Cookies").exists() || base.join("Network/Cookies").exists()) {
+                    let used = last_written(&[&base.join("Cookies"), &base.join("Network/Cookies")]);
                     let profile = if i == 0 { profile } else { base.display().to_string() };
-                    found.push(format!("{name}{keyring}:{profile}"));
+                    found.push((format!("{name}{keyring}:{profile}"), used));
                 }
             }
         }
@@ -91,8 +98,9 @@ pub fn scan_browsers(home: &Path, keyring: &str) -> Vec<String> {
         for profile in subdirs(&home.join(dir)) {
             let base = home.join(dir).join(&profile);
             if base.join("cookies.sqlite").exists() {
+                let used = last_written(&[&base.join("cookies.sqlite")]);
                 let profile = if i == 0 { profile } else { base.display().to_string() };
-                found.push(format!("firefox:{profile}"));
+                found.push((format!("firefox:{profile}"), used));
             }
         }
     }
@@ -186,6 +194,23 @@ pub fn label(spec: &str) -> String {
     };
     let profile = profile.rsplit('/').next().unwrap_or(profile);
     if profile.is_empty() { format!("{browser}{place}") } else { format!("{browser}{place} · {profile}") }
+}
+
+/// The newest change to these databases or their journals (`-wal`, `-journal`).
+fn last_written(databases: &[&Path]) -> Option<i64> {
+    databases
+        .iter()
+        .flat_map(|db| ["", "-wal", "-journal"].map(|suffix| sibling_name(db, suffix)))
+        .filter_map(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok())
+        .filter_map(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .max()
+}
+
+fn sibling_name(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 fn subdirs(dir: &Path) -> Vec<String> {
@@ -477,6 +502,8 @@ mod tests {
             ]
         );
         assert_eq!(scan_browsers(&home, "")[0], "brave:Default");
+        let used = scan_browsers_used(&home, "");
+        assert!(used.iter().all(|(_, at)| at.is_some_and(|t| t > 1_700_000_000)), "{used:?}");
         assert_eq!(label(&format!("firefox:{snap}")), "firefox (snap) · cd34.default");
         assert_eq!(label(&format!("chrome+GNOMEKEYRING:{flatpak}")), "chrome (flatpak) · Default");
         assert_eq!(label("brave+GNOMEKEYRING:Profile 1"), "brave · Profile 1");
