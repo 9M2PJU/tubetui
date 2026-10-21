@@ -305,6 +305,40 @@ pub enum ListKind {
     Settings,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FileSort {
+    #[default]
+    Folder,
+    Name,
+    Size,
+}
+
+impl FileSort {
+    fn next(self) -> Self {
+        match self {
+            Self::Folder => Self::Name,
+            Self::Name => Self::Size,
+            Self::Size => Self::Folder,
+        }
+    }
+
+    pub fn label(self, lang: Lang) -> &'static str {
+        match self {
+            Self::Folder => lang.pick("carpeta", "folder"),
+            Self::Name => lang.pick("nombre", "name"),
+            Self::Size => lang.pick("peso", "size"),
+        }
+    }
+
+    fn sort(self, files: &mut [LocalFile]) {
+        match self {
+            Self::Folder => files.sort_by_cached_key(|f| (f.folder.to_lowercase(), f.name.to_lowercase())),
+            Self::Name => files.sort_by_cached_key(|f| f.name.to_lowercase()),
+            Self::Size => files.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listing {
     pub title: String,
@@ -508,6 +542,8 @@ pub enum Action {
     ToggleWatched,
     /// "Mis recomendados": only my channels, or everything YouTube recommends.
     ToggleHomeAll,
+    /// Local files: sort by folder, name or size (largest first).
+    CycleSort,
     /// GitHub has a newer version (and how to get it here).
     UpdateFound(Update),
     /// Mark / unmark the selected local file and go to the next one.
@@ -818,6 +854,8 @@ pub struct State {
     pub context: Option<ContextMenu>,
     /// Local files marked (space) for the next delete.
     pub marked: HashSet<PathBuf>,
+    /// How "Mis videos" / "Mi música" are ordered.
+    pub file_sort: FileSort,
     /// A newer version, shown in "Acerca de".
     pub update: Option<Update>,
     /// Videos I watched, here or on YouTube.
@@ -878,6 +916,7 @@ impl State {
             confirm: None,
             context: None,
             marked: HashSet::new(),
+            file_sort: FileSort::default(),
             update: None,
             watched: HashSet::new(),
             system: None,
@@ -1263,6 +1302,17 @@ impl State {
                 return effects;
             }
             Action::ToggleHomeAll => {}
+            Action::CycleSort => {
+                if let Some(Listing { items: Items::Files(files, _), selected, .. }) = self.stack.last_mut()
+                    && self.active == 0
+                {
+                    let current = files.get(*selected).map(|f| f.path.clone());
+                    self.file_sort = self.file_sort.next();
+                    self.file_sort.sort(files);
+                    *selected = current.and_then(|p| files.iter().position(|f| f.path == p)).unwrap_or(0);
+                    self.status = format!("{}: {}", self.tr("Orden", "Sorted by"), self.file_sort.label(self.lang()));
+                }
+            }
             Action::ToggleWatched => {
                 self.show_watched = !self.show_watched;
                 self.refilter_watched();
@@ -2059,6 +2109,9 @@ impl State {
             // Most watched first; the rest keep their order.
             channels.sort_by_key(|c| std::cmp::Reverse(self.channel_views.get(&c.id).copied().unwrap_or(0)));
         }
+        if let Items::Files(files, _) = &mut items {
+            self.file_sort.sort(files);
+        }
         self.status = if items.is_empty() {
             self.tr("Sin resultados", "No results").into()
         } else if let Items::Profiles(profiles) = &items {
@@ -2336,6 +2389,7 @@ impl State {
                     MediaKind::Video => item("Ver", "Play", "Enter", Action::Enter),
                 });
                 items.push(item("Marcar / desmarcar", "Mark / unmark", "espacio", Action::ToggleMark));
+                items.push(item("Cambiar el orden", "Change the sort order", "o", Action::CycleSort));
                 items.push(item("A la papelera", "To the trash", "x", Action::Trash));
             }
             Items::Downloads(downloads) => match downloads.get(selected).map(|d| &d.state) {

@@ -70,7 +70,7 @@ pub const IN_LISTS: &[(&str, Text)] = &[
     ("Esc  ←  h", Text::new("volver", "back")),
     ("Tab", Text::new("ir al menú", "go to the menu")),
     ("/", Text::new("buscar (dentro de un canal: en ese canal)", "search (inside a channel: in that channel)")),
-    ("v  t", Text::new("vistos: mostrar/ocultar · t: todo o lo mío", "watched: show/hide · t: all or mine")),
+    ("v  t  o", Text::new("vistos · t: todo o lo mío · o: ordenar", "watched · t: all or mine · o: sort")),
     ("espacio", Text::new("marcar varios (Mis videos, Mi música)", "mark several (My videos, My music)")),
     (
         "x  Supr",
@@ -244,6 +244,7 @@ fn lists(code: KeyCode) -> Option<Action> {
         KeyCode::Char('x') | KeyCode::Delete => Some(Action::Trash),
         KeyCode::Char('v') => Some(Action::ToggleWatched),
         KeyCode::Char('t') => Some(Action::ToggleHomeAll),
+        KeyCode::Char('o') => Some(Action::CycleSort),
         KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
         KeyCode::Enter => Some(Action::Enter),

@@ -994,6 +994,10 @@ fn draw_listing(frame: &mut Frame, state: &State, icons: &Icons, view: &View, li
                 let label = state.lang().pick("marcados", "marked");
                 format!(" {} · {} · ✗ {marked} {label} ", breadcrumb.join(" › "), listing.items.len())
             }
+            Items::Files(..) => {
+                let (sort, by) = (state.file_sort.label(state.lang()), state.lang().pick("orden", "sort"));
+                format!(" {} · {} · {by}: {sort} ", breadcrumb.join(" › "), listing.items.len())
+            }
             _ => format!(" {} · {} ", breadcrumb.join(" › "), listing.items.len()),
         },
     };
@@ -1486,6 +1490,7 @@ pub fn hints(state: &State) -> Vec<(String, &'static str)> {
                     MediaKind::Music => key("Enter", "escuchar desde esta canción", "play from this song"),
                     MediaKind::Video => key("Enter", "ver", "play"),
                 },
+                key("o", "ordenar: carpeta / nombre / peso", "sort: folder / name / size"),
                 // Several files: mark them first, then `x` sends them all.
                 if state.marked_files().is_empty() {
                     key(lang.pick("espacio", "space"), "marcar varios", "mark several")

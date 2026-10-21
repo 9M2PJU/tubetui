@@ -182,7 +182,8 @@ In lists: `↑↓` / `jk`, `Enter`, `Esc` to go back, `Tab` menu ↔ list,
 audio only. In **History** `x` removes the video; in **Downloads** it cancels
 the download (or forgets a finished one). In **My videos**
 and **My music**: `space` marks files, `x` / `Del` moves the marked ones (or
-the selected one) to the system trash, after asking.
+the selected one) to the system trash, after asking. `o` sorts the files by
+folder, name or size (largest first).
 While watching: `space` pause, `←→` seek, `↑↓` volume, `m` mute, `j`
 subtitles, `i` original / subtitles / dubbed, `o` language, `v` quality
 (360p–1440p), `b` codec (H.264 / VP9 / AV1 / any), `f` fullscreen, `.` `,`
